@@ -408,7 +408,6 @@ class Hub(object):
 
 def sample_loop(hub):
     interval = float(hub.config["server"]["interval_seconds"])
-    max_sample_ms = max(30000, interval * 1000 * 5)  # 5x interval or 30s cap
     while True:
         started = time.time()
         sample_done = False

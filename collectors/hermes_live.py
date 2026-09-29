@@ -32,8 +32,7 @@ PROXY_RE = re.compile(r"proxying request to model (.+?) on port (\d+)")
 class LiveEndpoint(object):
     """A dashboard endpoint that always points at the model in use right now."""
 
-    def __init__(self, log_path, endpoint_id="hermes-live",
-                 label="Hermes 当前模型"):
+    def __init__(self, log_path, label="Hermes 当前模型"):
         self.log_path = Path(log_path)
         self.id = "hermes"
         self.label = label
