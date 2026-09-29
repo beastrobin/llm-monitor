@@ -1,0 +1,25 @@
+# Runtime / data files
+*.log
+*.json
+*.csv
+*.db
+stats.json
+run.log
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.hermes/.venv/
+
+# Temp files
+*.tmp
+*_llm_monitor_*.vbs
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Monitor log
+monitor.log

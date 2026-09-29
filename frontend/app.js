@@ -1,0 +1,1841 @@
+'use strict';
+
+const HISTORY_LIMIT = 900;
+const THEME_KEY = 'llm-monitor-theme';
+const PEAK_WINDOW_SEC = 1800; // 滚动峰值窗口：30分钟
+
+// The connection lamp reports the *transport*, not the watched endpoints --
+// those already have their own error text on their cards.
+const CONN_TITLES = {
+  live: '实时推送中',
+  poll: '推送不可用，已降级为定时轮询',
+  down: '连接断开，正在重连…',
+};
+// One column per ~2 CSS pixels is the sweet spot: enough resolution to keep the
+// shape, few enough points that the stroke stays crisp.
+const BUCKET_PX = 2.2;
+const FALLBACK_MONO = 'ui-monospace, "Cascadia Mono", Consolas, monospace';
+
+const S = {
+  snapshot: null,
+  history: { timestamps: [], series: {} },
+  config: null,
+};
+
+// ---------------------------------------------------------------- formatting
+
+function num(v, digits) {
+  if (v === null || v === undefined || Number.isNaN(v)) return '—';
+  return Number(v).toFixed(digits === undefined ? 1 : digits);
+}
+
+function pct(v, digits) {
+  if (v === null || v === undefined || Number.isNaN(v)) return '—';
+  return (Number(v) * 100).toFixed(digits === undefined ? 1 : digits) + '%';
+}
+
+function gb(mb, digits) {
+  if (mb === null || mb === undefined || Number.isNaN(mb)) return '—';
+  return (Number(mb) / 1024).toFixed(digits === undefined ? 1 : digits);
+}
+
+function esc(text) {
+  return String(text === null || text === undefined ? '' : text)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function shortPath(p) {
+  if (!p) return '—';
+  const parts = String(p).split(/[\\/]/);
+  return parts[parts.length - 1] || p;
+}
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function countText(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—';
+  return Number(value).toLocaleString('zh-CN');
+}
+
+// ------------------------------------------------------------------ sparkline
+
+function cleanSeries(values) {
+  const out = [];
+  const source = values || [];
+  for (let i = 0; i < source.length; i++) {
+    const v = source[i];
+    if (v !== null && v !== undefined && !Number.isNaN(v)) out.push(v);
+  }
+  return out;
+}
+
+// 900 samples crammed into a ~200 px card alias into a hairy scribble if every
+// sample keeps its own point.  Bucketing holds roughly one column per two
+// pixels while keeping each bucket's extremes, so a spike survives the
+// downsampling instead of being smoothed away by an average.
+function bucketise(values, columns) {
+  const source = values || [];
+  const total = source.length;
+  const out = [];
+  if (!total || columns < 1) return out;
+
+  const collapsed = total > columns;
+  const size = collapsed ? total / columns : 1;
+  const count = collapsed ? columns : total;
+
+  for (let c = 0; c < count; c++) {
+    const start = collapsed ? Math.floor(c * size) : c;
+    const end = collapsed ? Math.max(start + 1, Math.floor((c + 1) * size)) : c + 1;
+    let lo = null;
+    let hi = null;
+    let sum = 0;
+    let hits = 0;
+    for (let i = start; i < end && i < total; i++) {
+      const v = source[i];
+      if (v === null || v === undefined || Number.isNaN(v)) continue;
+      if (lo === null || v < lo) lo = v;
+      if (hi === null || v > hi) hi = v;
+      sum += v;
+      hits += 1;
+    }
+    out.push({ lo: lo, hi: hi, avg: hits ? sum / hits : null, empty: hits === 0 });
+  }
+  return out;
+}
+
+function niceCeil(value) {
+  if (!(value > 0)) return 1;
+  const exp = Math.floor(Math.log10(value));
+  const base = Math.pow(10, exp);
+  const n = value / base;
+  const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10;
+  return step * base;
+}
+
+// A ceiling recomputed from the data on every tick rescales the whole curve
+// whenever a new peak lands, so the chart visibly twitches every couple of
+// seconds.  The ceiling jumps up at once and only decays slowly.
+function stableCeiling(canvas, observed) {
+  const previous = canvas._ceiling;
+  if (previous === undefined || observed > previous) {
+    canvas._ceiling = niceCeil(observed * 1.08);
+  } else if (observed < previous * 0.5) {
+    canvas._ceiling = Math.max(niceCeil(observed * 1.08), previous * 0.88);
+  }
+  return canvas._ceiling || 1;
+}
+
+function defaultFormat(value, decimals) {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—';
+  const abs = Math.abs(value);
+  if (abs >= 1e6) return (value / 1e6).toFixed(1) + 'M';
+  if (abs >= 1e4) return (value / 1e3).toFixed(0) + 'k';
+  return value.toFixed(decimals === undefined ? 0 : decimals);
+}
+
+function roundRect(g, x, y, w, h, r) {
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.lineTo(x + w - r, y);
+  g.quadraticCurveTo(x + w, y, x + w, y + r);
+  g.lineTo(x + w, y + h - r);
+  g.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  g.lineTo(x + r, y + h);
+  g.quadraticCurveTo(x, y + h, x, y + h - r);
+  g.lineTo(x, y + r);
+  g.quadraticCurveTo(x, y, x + r, y);
+  g.closePath();
+}
+
+function drawSpark(canvas, data, options) {
+  const opts = options || {};
+  const values = data || [];
+  // Keep the payload on the element so the hover handler can repaint without
+  // waiting for the next sample to arrive.
+  canvas._spark = { values: values, opts: opts };
+  if (canvas._hover === undefined) canvas._hover = null;
+
+  const mono = cssVar('--font-mono') || FALLBACK_MONO;
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(64, canvas.clientWidth || 160);
+  const height = Math.max(30, canvas.clientHeight || 46);
+  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+  }
+  const g = canvas.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, width, height);
+
+  const color = opts.color || cssVar('--chart-a');
+  const gridColor = cssVar('--grid');
+  const trackColor = cssVar('--track');
+  const axisColor = cssVar('--axis');
+  const surface = cssVar('--panel');
+  const edge = cssVar('--border');
+  const ink = cssVar('--text');
+  const fmt = opts.format || function (v) { return defaultFormat(v, opts.decimals); };
+
+  const clean = cleanSeries(values);
+  let min = (opts.min === undefined || opts.min === null) ? null : opts.min;
+  let max = (opts.max === undefined || opts.max === null) ? null : opts.max;
+
+  if (max === null) {
+    max = stableCeiling(canvas, clean.length ? Math.max.apply(null, clean) : 0);
+  } else {
+    canvas._ceiling = max;
+  }
+  if (min === null) {
+    const floor = clean.length ? Math.min.apply(null, clean) : 0;
+    min = floor < 0 ? floor * 1.15 : 0;
+  }
+  // EKG mode: a fixed range (0–100%) squashes a real swing into a sliver, so
+  // when the caller opts in we zoom to the data's own span.  The big number and
+  // the bar below still show the absolute level, and the axis labels print the
+  // exact window on display, so the zoom never misleads.  A minimum-span floor
+  // keeps a genuinely flat series from turning its own noise into a fake EKG;
+  // too little data falls back to the fixed range for the same reason.
+  if (opts.autoscale && clean.length >= 8) {
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < clean.length; i++) {
+      if (clean[i] < lo) lo = clean[i];
+      if (clean[i] > hi) hi = clean[i];
+    }
+    const refSpan = Math.max(max - min, 1e-6);
+    let span = hi - lo;
+    if (span < refSpan * 0.12) {
+      // Nearly flat: show a bounded window centred on the data rather than
+      // stretching micro-noise across the whole box.
+      span = refSpan * 0.12;
+      const mid = (lo + hi) / 2;
+      lo = mid - span / 2;
+      hi = mid + span / 2;
+    }
+    const pad = span * 0.1;
+    min = Math.max(0, lo - pad);
+    max = hi + pad;
+  }
+  if (max - min < 1e-9) max = min + 1;
+
+  const showAxis = opts.axis !== false;
+  const x0 = showAxis ? 32 : 2;
+  const x1 = width - 3;
+  const yTop = showAxis ? 11 : 5;
+  const yBase = height - 3;
+  const plotW = Math.max(8, x1 - x0);
+  const plotH = Math.max(8, yBase - yTop);
+  const yOf = function (v) {
+    const raw = yBase - ((v - min) / (max - min)) * plotH;
+    return Math.max(yTop - 2, Math.min(yBase + 2, raw));
+  };
+
+  g.lineWidth = 1;
+  g.strokeStyle = gridColor;
+  g.beginPath();
+  g.moveTo(x0, Math.round(yOf(min + (max - min) / 2)) + 0.5);
+  g.lineTo(x1, Math.round(yOf(min + (max - min) / 2)) + 0.5);
+  g.stroke();
+
+  g.strokeStyle = trackColor;
+  g.beginPath();
+  g.moveTo(x0, yBase + 0.5);
+  g.lineTo(x1, yBase + 0.5);
+  g.stroke();
+
+  // An empty series would otherwise render as a bare axis with a stray "1" on
+  // it, which reads like a broken chart.
+  if (!clean.length) {
+    canvas._geom = { x0: x0, plotW: plotW, count: 0 };
+    canvas._hover = null;
+    g.font = '11px ' + mono;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillStyle = axisColor;
+    g.fillText('暂无数据', (x0 + x1) / 2, (yTop + yBase) / 2);
+    return;
+  }
+
+  const columns = Math.max(2, Math.floor(plotW / BUCKET_PX));
+  const pts = bucketise(values, columns);
+  const dense = pts.length < values.length;
+  const count = pts.length;
+  canvas._geom = { x0: x0, plotW: plotW, count: count };
+
+  const pointAt = function (k) {
+    const p = pts[k];
+    if (!p || p.empty) return null;
+    const x = count === 1 ? (x0 + x1) / 2 : x0 + (k / (count - 1)) * plotW;
+    const value = dense ? p.avg : p.lo;
+    return { x: x, y: yOf(value), lo: yOf(p.lo), hi: yOf(p.hi), value: value };
+  };
+
+  const runs = [];
+  let run = null;
+  for (let k = 0; k < count; k++) {
+    const point = pointAt(k);
+    if (!point) { run = null; continue; }
+    if (!run) { run = []; runs.push(run); }
+    run.push(point);
+  }
+
+  if (runs.length) {
+    if (dense) {
+      // The per-column extremes form a band that keeps the noise envelope; the
+      // mean traces the trend through the middle of it.
+      g.globalAlpha = 0.2;
+      g.fillStyle = color;
+      runs.forEach(function (r) {
+        if (r.length < 2) return;
+        g.beginPath();
+        g.moveTo(r[0].x, r[0].hi);
+        for (let i = 1; i < r.length; i++) g.lineTo(r[i].x, r[i].hi);
+        for (let i = r.length - 1; i >= 0; i--) g.lineTo(r[i].x, r[i].lo);
+        g.closePath();
+        g.fill();
+      });
+      g.globalAlpha = 1;
+    } else {
+      // Sparse data gets a soft area instead of a band, which would collapse to
+      // a zero-height sliver anyway.
+      g.globalAlpha = 0.14;
+      g.fillStyle = color;
+      runs.forEach(function (r) {
+        g.beginPath();
+        g.moveTo(r[0].x, r[0].y);
+        for (let i = 1; i < r.length; i++) g.lineTo(r[i].x, r[i].y);
+        g.lineTo(r[r.length - 1].x, yBase);
+        g.lineTo(r[0].x, yBase);
+        g.closePath();
+        g.fill();
+      });
+      g.globalAlpha = 1;
+    }
+
+    // One stroke per contiguous run: joining across a gap would draw a line
+    // through samples that do not exist.
+    g.strokeStyle = color;
+    g.lineWidth = 1.5;
+    g.lineJoin = 'round';
+    g.lineCap = 'round';
+    runs.forEach(function (r) {
+      if (r.length < 2) return;
+      g.beginPath();
+      g.moveTo(r[0].x, r[0].y);
+      for (let i = 1; i < r.length; i++) g.lineTo(r[i].x, r[i].y);
+      g.stroke();
+    });
+
+    const tail = runs[runs.length - 1];
+    const head = tail[tail.length - 1];
+    g.beginPath();
+    g.arc(head.x, head.y, 3.4, 0, Math.PI * 2);
+    g.fillStyle = surface;
+    g.fill();
+    g.beginPath();
+    g.arc(head.x, head.y, 2.1, 0, Math.PI * 2);
+    g.fillStyle = color;
+    g.fill();
+
+    const hovered = canvas._hover;
+    if (hovered !== null && hovered !== undefined && hovered < count) {
+      const point = pointAt(hovered);
+      if (point) {
+        g.strokeStyle = edge;
+        g.lineWidth = 1;
+        g.beginPath();
+        g.moveTo(Math.round(point.x) + 0.5, yTop - 3);
+        g.lineTo(Math.round(point.x) + 0.5, yBase);
+        g.stroke();
+
+        g.beginPath();
+        g.arc(point.x, point.y, 3.2, 0, Math.PI * 2);
+        g.fillStyle = surface;
+        g.fill();
+        g.strokeStyle = color;
+        g.lineWidth = 1.5;
+        g.stroke();
+
+        const text = fmt(point.value);
+        g.font = '11px ' + mono;
+        const boxW = g.measureText(text).width + 12;
+        const boxH = 18;
+        const boxX = Math.max(x0, Math.min(x1 - boxW, point.x - boxW / 2));
+        const boxY = Math.max(yTop - 9, point.y - boxH - 7);
+        roundRect(g, boxX, boxY, boxW, boxH, 5);
+        g.fillStyle = surface;
+        g.fill();
+        g.strokeStyle = edge;
+        g.lineWidth = 1;
+        g.stroke();
+        g.fillStyle = ink;
+        g.textAlign = 'left';
+        g.textBaseline = 'middle';
+        g.fillText(text, boxX + 6, boxY + boxH / 2 + 0.5);
+      }
+    }
+  }
+
+  if (showAxis) {
+    g.font = '10px ' + mono;
+    g.textAlign = 'right';
+    g.textBaseline = 'middle';
+    g.fillStyle = axisColor;
+    g.fillText(fmt(max), x0 - 6, Math.max(6, Math.min(yBase - 2, yOf(max))));
+    // A zero floor needs no label: the baseline line already says it.
+    if (min > 0) {
+      g.fillText(fmt(min), x0 - 6, Math.max(6, Math.min(yBase - 2, yOf(min))));
+    }
+  }
+}
+
+// A crosshair read-out on hover turns a pretty squiggle into something you can
+// actually take a number off, which is the point of the chart.
+let hoveredSpark = null;
+
+function repaintSpark(canvas) {
+  if (!canvas || !canvas._spark) return;
+  drawSpark(canvas, canvas._spark.values, canvas._spark.opts);
+}
+
+function onPointerMove(event) {
+  const target = event.target;
+  const canvas = (target && target.tagName === 'CANVAS' && target._spark) ? target : null;
+
+  if (hoveredSpark && hoveredSpark !== canvas) {
+    hoveredSpark._hover = null;
+    repaintSpark(hoveredSpark);
+    hoveredSpark = null;
+  }
+  if (!canvas) return;
+
+  hoveredSpark = canvas;
+  const geom = canvas._geom;
+  if (!geom || geom.count < 2) return;
+  const rect = canvas.getBoundingClientRect();
+  const ratio = (event.clientX - rect.left - geom.x0) / geom.plotW;
+  const index = Math.round(Math.max(0, Math.min(1, ratio)) * (geom.count - 1));
+  if (canvas._hover === index) return;
+  canvas._hover = index;
+  repaintSpark(canvas);
+}
+
+// -------------------------------------------------------------------- history
+
+function seriesOf(key) {
+  if (!S.history.series[key]) S.history.series[key] = [];
+  return S.history.series[key];
+}
+
+function appendPoint(point) {
+  if (!point) return;
+  const stamps = S.history.timestamps;
+  const last = stamps.length ? stamps[stamps.length - 1] : 0;
+  if (point.ts <= last) return;
+
+  stamps.push(point.ts);
+  if (stamps.length > HISTORY_LIMIT) stamps.shift();
+
+  const keys = Object.keys(point.values);
+  keys.forEach(function (key) {
+    const series = seriesOf(key);
+    while (series.length < stamps.length - 1) series.push(null);
+    series.push(point.values[key]);
+    if (series.length > stamps.length) series.shift();
+  });
+
+  const length = stamps.length;
+  Object.keys(S.history.series).forEach(function (key) {
+    const series = S.history.series[key];
+    while (series.length < length) series.unshift(null);
+    if (series.length > length) series.shift();
+  });
+}
+
+function loadHistory(payload) {
+  if (!payload) return;
+  S.history.timestamps = payload.timestamps || [];
+  S.history.series = {};
+  const source = payload.series || {};
+  Object.keys(source).forEach(function (key) { S.history.series[key] = source[key].slice(); });
+}
+
+function peakOf(series) {
+  let best = null;
+  (series || []).forEach(function (value) {
+    if (value === null || value === undefined || Number.isNaN(value)) return;
+    if (best === null || value > best) best = value;
+  });
+  return best;
+}
+
+// Rolling peak: only consider values within the last PEAK_WINDOW_SEC seconds.
+// Old peaks naturally decay as new data ages them out of the window.
+function rollingPeakOf(series, timestamps) {
+  if (!series || !timestamps || !timestamps.length) return null;
+  const cutoff = timestamps[timestamps.length - 1] - PEAK_WINDOW_SEC;
+  let best = null;
+  for (let i = 0; i < series.length; i++) {
+    if ((timestamps[i] || 0) < cutoff) continue;
+    const v = series[i];
+    if (v === null || v === undefined || Number.isNaN(v)) continue;
+    if (best === null || v > best) best = v;
+  }
+  return best;
+}
+
+function maxOf(list, field) {
+  let best = null;
+  (list || []).forEach(function (item) {
+    const value = item[field];
+    if (value === null || value === undefined) return;
+    if (best === null || value > best) best = value;
+  });
+  return best;
+}
+
+// ----------------------------------------------------------------------- cards
+
+function cardSpec(key, label, options) {
+  const opts = options || {};
+  return {
+    key: key,
+    label: label,
+    tip: opts.tip || '',
+    bar: !!opts.bar,
+    spark: opts.spark !== false,
+  };
+}
+
+// Every card renders the same slots and hides the unused ones with visibility,
+// so cards that carry no bar keep the exact width of the ones that do and a
+// row of cards lines up.  The bar is a vertical rail on the card's left edge;
+// everything else lives in .card-body so the rail can stretch full height.
+// The info icon sits OUTSIDE .card-label on purpose:
+// the label's overflow:hidden (used for ellipsis) would clip the tooltip.
+function buildCards(container, specs) {
+  container.innerHTML = specs.map(function (spec) {
+    return '<div class="card' + (spec.bar ? '' : ' no-bar') + '" data-card="' + esc(spec.key) + '">' +
+      '<div class="bar" data-role="bar"><i data-role="fill"></i></div>' +
+      '<div class="card-body">' +
+        '<div class="card-head">' +
+          '<span class="card-label">' + esc(spec.label) + '</span>' +
+          (spec.tip ? '<span class="tip" tabindex="0" data-tip="' + esc(spec.tip) + '">i</span>' : '') +
+          '<span class="card-value" data-role="value">—</span>' +
+        '</div>' +
+        '<div class="card-visual' + (spec.spark ? '' : ' no-spark') + '">' +
+          '<canvas class="spark" data-role="spark"></canvas>' +
+        '</div>' +
+        '<div class="card-foot" data-role="foot"></div>' +
+      '</div>' +
+      '</div>';
+  }).join('');
+
+  const refs = new Map();
+  specs.forEach(function (spec) {
+    const root = container.querySelector('[data-card="' + spec.key + '"]');
+    if (!root) return;
+    refs.set(spec.key, {
+      root: root,
+      value: root.querySelector('[data-role="value"]'),
+      spark: root.querySelector('[data-role="spark"]'),
+      bar: root.querySelector('[data-role="bar"]'),
+      fill: root.querySelector('[data-role="fill"]'),
+      foot: root.querySelector('[data-role="foot"]'),
+      // The info icon next to the label; its tooltip now also carries the live
+      // foot text, so hovering one icon explains the metric AND shows the
+      // current breakdown instead of a permanent line under the spark.
+      tip: root.querySelector('.card-head .tip'),
+      tipBase: spec.tip || '',
+    });
+  });
+  return refs;
+}
+
+function ensureCards(container, specs) {
+  const signature = specs.map(function (s) { return s.key; }).join('|');
+  if (container.dataset.signature !== signature) {
+    container.dataset.signature = signature;
+    container._refs = buildCards(container, specs);
+  }
+  return container._refs;
+}
+
+function paintCards(refs, values) {
+  refs.forEach(function (ref, key) {
+    const value = values[key] || {};
+    if (ref.value) {
+      ref.value.innerHTML = esc(value.text) +
+        (value.unit ? '<span class="card-unit">' + esc(value.unit) + '</span>' : '');
+    }
+    // The foot line is hidden; its text now rides on the info icon's tooltip so
+    // the card keeps its full height for the spark.  The static metric note
+    // (if any) leads, the live breakdown follows.
+    if (ref.tip) {
+      const base = ref.tipBase;
+      const foot = value.foot || '';
+      ref.tip.setAttribute('data-tip', base ? (base + ' ' + foot).trim() : foot);
+    }
+    if (ref.fill) {
+      const ratio = (value.bar === undefined || value.bar === null) ? null : value.bar;
+      // The rail fills from the bottom up, so it is a height, not a width.
+      ref.fill.style.height = ratio === null ? '0%' : Math.max(0, Math.min(100, ratio * 100)) + '%';
+      ref.bar.className = 'bar' + (value.barClass ? ' ' + value.barClass : '');
+    }
+    if (ref.spark && value.series) {
+      drawSpark(ref.spark, value.series, value.sparkOptions || {});
+    }
+  });
+}
+
+function kvChips(items) {
+  return (items || []).map(function (item) {
+    // Expandable chip: a <details> whose summary is the chip itself and whose
+    // body holds the child rows.  Used for the long MTP per-position list so
+    // it does not sprawl across the detail row by default.
+    if (item.expand) {
+      const children = (item.children || []).map(function (c) {
+        return '<span class="kv-item">' +
+          '<em>' + esc(c.label) + '</em><b>' + esc(c.value) + '</b></span>';
+      }).join('');
+      return '<details class="kv-item kv-expand">' +
+        '<summary><em>' + esc(item.label) + '</em><b>' + esc(item.value) + '</b></summary>' +
+        '<div class="kv-children">' + children + '</div>' +
+        '</details>';
+    }
+    return '<span class="kv-item' + (item.wide ? ' wide' : '') + (item.alert ? ' alert' : '') + '"' +
+      (item.title ? ' title="' + esc(item.title) + '"' : '') + '>' +
+      '<em>' + esc(item.label) + '</em>' +
+      '<b>' + esc(item.value) + '</b>' +
+      (item.unit ? '<span class="kv-unit">' + esc(item.unit) + '</span>' : '') +
+      '</span>';
+  }).join('');
+}
+
+// --------------------------------------------------------------------- render
+
+function modelSignature(endpoint) {
+  return (endpoint.models || []).map(function (m) {
+    return (m.id || 'model') + (m.slots ? ':' + m.slots.length : '');
+  }).join(',') || 'none';
+}
+
+// Newer builds report speculative.types as a comma list like
+// "none,draft-mtp,ngram-simple".  Show only the active types, joined.
+function cleanSpecTypes(value) {
+  const parts = String(value || '').split(',').map(function (s) {
+    return s.trim();
+  }).filter(function (s) { return s && s.toLowerCase() !== 'none'; });
+  return parts.join('+');
+}
+
+// The spec tags shown next to a model name (quant / context / slots / MTP).
+// Shared by the hero line and the per-model title so both read identically.
+function modelTags(model) {
+  const mtpTag = model.mtp_enabled
+    ? '<span class="tag on">MTP ' + esc(cleanSpecTypes(model.mtp_type) || '启用') + '</span>'
+    : '<span class="tag off">MTP 关闭</span>';
+  return [
+    model.model_ftype ? '<span class="tag">' + esc(model.model_ftype) + '</span>' : '',
+    model.n_ctx ? '<span class="tag">' + esc((model.n_ctx / 1024).toFixed(0)) + 'K 上下文</span>' : '',
+    model.total_slots ? '<span class="tag">' + esc(model.total_slots) + ' slots</span>' : '',
+    mtpTag,
+  ].join('');
+}
+
+// Some builds report the full model path as the model id; show only the
+// file name without the .gguf suffix so the card reads "which model", not a
+// filesystem breadcrumb.
+function shortModelName(id) {
+  const seg = String(id || 'model').split(/[\\/]/).pop();
+  return seg.replace(/\.gguf$/i, '');
+}
+
+function portOf(url) {
+  const m = /:(\d+)(?:[/?]|$)/.exec(String(url || ''));
+  return m ? m[1] : '';
+}
+
+// One compact chip per source: which llamacpp is up and on what port.  The
+// preset inventory used to live here; the user only needs "which server,
+// which model", so the rest of this section is a status line.
+function endpointChip(endpoint) {
+  const label = endpoint.live ? 'spawn 子 server' : endpoint.label;
+  const port = portOf(endpoint.base_url);
+  return '<span class="src-chip' + (endpoint.up ? '' : ' down') + '">' +
+    '<span class="src-name">' + esc(label) + '</span>' +
+    (port ? '<span class="src-port">:' + esc(port) + '</span>' : '') +
+    '<span class="src-state">' + (endpoint.up ? '在线' : '离线') + '</span>' +
+    '</span>';
+}
+
+const MODEL_SPECS = [
+  cardSpec('decode', '生成速度', {
+    bar: true,
+    tip: 'Δ已生成 token ÷ Δ解码耗时，分母取引擎自己计时的耗时而不是墙钟，' +
+      '否则空闲秒数会被摊进窗口、读数偏低。引擎空闲时不产生新耗时，' +
+      '所以数字会退回累计均值并带 ≈ 前缀。' +
+      '血条是当前速度 ÷ 本会话峰值速度；空闲时为 0。',
+  }),
+  cardSpec('prefill', 'Prefill 速度', {
+    bar: true,
+    tip: 'Δ提示 token ÷ Δ预填充耗时。只在读入提示词时才明显上升；' +
+      '纯输出阶段它不动是正常的，不是采集失败。' +
+      '血条是当前速度 ÷ 本会话峰值速度。',
+  }),
+  cardSpec('mtp', 'MTP 命中率', {
+    bar: true,
+    tip: '投机解码接受率 = 被接受的草稿 token ÷ 草稿 token 总数。' +
+      '越高说明 MTP 猜得越准、加速越明显。低于 50% 进度条转黄。' +
+      '注意：是否启用 MTP 看的是启动参数里的 --spec-type，' +
+      '因为 /props 的 speculative.types 在 MTP 实际运行时也可能报 none。',
+  }),
+  cardSpec('kv', 'KV 缓存命中', {
+    bar: true,
+    tip: '前缀缓存命中率 = 命中缓存的 token ÷ 全部提示 token。' +
+      '多轮对话里重复前缀越多这个值越高，命中的部分不需要重新 prefill。',
+  }),
+  cardSpec('ctx', '上下文水位', {
+    bar: true,
+    tip: '各 slot 里已用上下文的最大值（提示词 + 已生成）÷ 模型上下文上限。' +
+      '超过 85% 变红，再涨就该清理对话了。' +
+      'slot 空闲时服务端会清掉提示词计数，此时数字只剩上次请求的已生成残留，' +
+      '脚注会标出"空闲残留"。',
+  }),
+  cardSpec('step', 'MTP 每步接受', {
+    bar: true,
+    tip: '每个验证步平均接受几个 token（含那一个必然正确的 token）。' +
+      '1.00 表示 MTP 没起作用，接近 2 以上才算真的在加速。',
+  }),
+];
+
+function applyModel(root, endpoint, model) {
+  const metrics = model.metrics || {};
+  const counters = metrics.counters || {};
+  const slots = model.slots || [];
+  const modelId = model.id || 'model';
+  const base = endpoint.id + '/' + modelId;
+  const cards = root.querySelector('[data-role="cards"]');
+  if (!cards) return;
+  const refs = ensureCards(cards, MODEL_SPECS);
+  if (!refs) return;
+
+  const decodeSeries = seriesOf(base + '.decode');
+  const prefillSeries = seriesOf(base + '.prefill');
+  const ctxSeries = seriesOf(base + '.ctx');
+
+  // An idle engine reports no new tokens, so the instantaneous rate is 0.
+  // Showing that as the headline reads like a stall; fall back to the
+  // cumulative average and mark it with "≈" so the number is not taken for a
+  // live reading.
+  const decodeNow = metrics.decode_tps_inst
+    ? num(metrics.decode_tps_inst, 1)
+    : '≈' + num(metrics.decode_tps_avg, 1);
+  const prefillNow = metrics.prefill_tps_inst
+    ? num(metrics.prefill_tps_inst, 0)
+    : '≈' + num(metrics.prefill_tps_avg, 0);
+
+  const ctxRatio = maxOf(slots, 'ctx_ratio');
+  const mtpRatio = metrics.mtp_accept_ratio;
+  const kvRatio = metrics.kv_hit_ratio;
+  const stepValue = metrics.mtp_tokens_per_step;
+  const ctxTight = (ctxRatio || 0) > 0.85;
+  const mtpEnabled = !!model.mtp_enabled;
+  const drafts = counters.draft_tokens;
+  const draftSeen = drafts !== null && drafts !== undefined && drafts > 0;
+  // The slot drops its prompt counters once a request finishes, so an idle
+  // engine reports a partially cleared context.  Say so rather than passing the
+  // residue off as a live watermark.
+  const firstSlot = slots[0] || {};
+  const slotLive = !!firstSlot.is_processing ||
+    (firstSlot.n_prompt_tokens !== null && firstSlot.n_prompt_tokens !== undefined);
+  const decodePeak = rollingPeakOf(decodeSeries, S.history.timestamps);
+  const prefillPeak = rollingPeakOf(prefillSeries, S.history.timestamps);
+
+  // A rate has no natural 0–100% range, so the bar measures "how close to
+  // this session's best": current rate ÷ session peak.  An idle engine
+  // (inst = 0) reads empty on purpose — the ≈ headline already says it is
+  // not a live number.
+  const decodeBar = (metrics.decode_tps_inst === null || metrics.decode_tps_inst === undefined || !decodePeak)
+    ? null : Math.max(0, Math.min(1, metrics.decode_tps_inst / decodePeak));
+  const prefillBar = (metrics.prefill_tps_inst === null || metrics.prefill_tps_inst === undefined || !prefillPeak)
+    ? null : Math.max(0, Math.min(1, metrics.prefill_tps_inst / prefillPeak));
+
+  const rateFoot = function (average, peak, digits) {
+    return '均值 ' + num(average, digits) + ' t/s' +
+      (peak === null ? ' · 暂无曲线' : ' · 峰值 ' + num(peak, digits));
+  };
+
+  paintCards(refs, {
+    decode: {
+      text: decodeNow, unit: 't/s', bar: decodeBar,
+      foot: rateFoot(metrics.decode_tps_avg, decodePeak, 1),
+      series: decodeSeries,
+      sparkOptions: {
+        min: 0, color: cssVar('--chart-a'), autoscale: true,
+        format: function (v) { return num(v, 0); },
+      },
+    },
+    prefill: {
+      text: prefillNow, unit: 't/s', bar: prefillBar,
+      foot: rateFoot(metrics.prefill_tps_avg, prefillPeak, 0),
+      series: prefillSeries,
+      sparkOptions: {
+        min: 0, color: cssVar('--chart-b'), autoscale: true,
+        format: function (v) { return num(v, 0); },
+      },
+    },
+    mtp: {
+      text: pct(mtpRatio), bar: mtpRatio,
+      barClass: (mtpRatio === null || mtpRatio === undefined) ? '' : (mtpRatio >= 0.5 ? 'good' : 'warn'),
+      foot: draftSeen
+        ? '每步接受 ' + num(stepValue, 2) + ' tok'
+        : (mtpEnabled ? '已启用 ' + (model.mtp_type || '') + ' · 暂无草稿' : '未启用 MTP'),
+      series: seriesOf(base + '.mtp'),
+      sparkOptions: {
+        min: 0, max: 1, color: cssVar('--chart-d'), autoscale: true,
+        format: function (v) { return num(v * 100, 0) + '%'; },
+      },
+    },
+    kv: {
+      text: pct(kvRatio), bar: kvRatio, barClass: 'good',
+      foot: '累计命中 ' + countText(counters.prompt_cached) + ' tok',
+      series: seriesOf(base + '.kv'),
+      sparkOptions: {
+        min: 0, max: 1, color: cssVar('--chart-c'), autoscale: true,
+        format: function (v) { return num(v * 100, 0) + '%'; },
+      },
+    },
+    ctx: {
+      text: pct(ctxRatio), bar: ctxRatio,
+      barClass: ctxTight ? 'bad' : '',
+      foot: '上限 ' + countText(model.n_ctx) + ' tok' +
+        (ctxTight ? ' · 接近溢出' : '') + (slotLive ? '' : ' · 空闲残留'),
+      series: ctxSeries,
+      sparkOptions: {
+        min: 0, max: 1, color: ctxTight ? cssVar('--bad') : cssVar('--chart-c'), autoscale: true,
+        format: function (v) { return num(v * 100, 0) + '%'; },
+      },
+    },
+    step: {
+      text: num(stepValue, 2), unit: 'tok/步',
+      bar: (stepValue === null || stepValue === undefined) ? null : Math.min(1, stepValue / 3),
+      foot: draftSeen
+        ? '草稿 ' + countText(drafts) + ' tok'
+        : (mtpEnabled ? 'MTP 已启用 · 暂无草稿' : 'MTP 未启用'),
+      series: seriesOf(base + '.step'),
+      sparkOptions: {
+        min: 0, color: cssVar('--chart-d'), autoscale: true,
+        format: function (v) { return num(v, 2); },
+      },
+    },
+  });
+
+  const detail = root.querySelector('[data-role="detail"]');
+  if (detail) {
+    // The row is rebuilt on every tick; carry the user's expand choice over so
+    // opening the per-position list does not snap shut two seconds later.
+    const openDetail = detail.querySelector('details');
+    const wasOpen = !!(openDetail && openDetail.open);
+    const items = [
+      { label: '累计均值', value: num(metrics.decode_tps_avg, 1), unit: 't/s' },
+      { label: 'prefill 均值', value: num(metrics.prefill_tps_avg, 0), unit: 't/s' },
+      { label: '序列峰值', value: countText(metrics.n_tokens_max), unit: 'tok' },
+      { label: '上下文上限', value: countText(model.n_ctx), unit: 'tok' },
+      { label: '处理中', value: num(metrics.requests_processing, 0), unit: '请求' },
+      { label: '批内 slot', value: num(metrics.busy_slots_per_decode, 2), unit: '个' },
+      {
+        label: '投机解码',
+        value: model.mtp_enabled ? (cleanSpecTypes(model.mtp_type) || '启用') : '关闭',
+        title: '取自 preset 的启动参数 --spec-type；/props 的 speculative.types 不可靠',
+      },
+    ];
+    const positions = metrics.mtp_positions || {};
+    const posKeys = Object.keys(positions).sort(function (a, b) {
+      return Number(a) - Number(b);
+    });
+    // The per-position acceptance list is long (ngram drafts report every
+    // position), so it folds away by default and only expands on demand.
+    if (posKeys.length) {
+      items.push({
+        label: 'MTP 逐位命中',
+        value: posKeys.length + ' 位',
+        title: '展开看每一位草稿的接受率',
+        expand: true,
+        children: posKeys.map(function (p) {
+          return { label: '第' + (Number(p) + 1) + '位', value: pct(positions[p]) };
+        }),
+      });
+    }
+    if (model.model_path) {
+      items.push({
+        label: '权重', value: shortPath(model.model_path), wide: true, title: model.model_path,
+      });
+    }
+    if (model.metrics_error) {
+      items.push({ label: '指标采集失败', value: model.metrics_error, wide: true, alert: true });
+    }
+    if (model.slots_error) {
+      items.push({ label: 'slot 采集失败', value: model.slots_error, wide: true, alert: true });
+    }
+    detail.innerHTML = kvChips(items);
+  }
+}
+
+function renderEndpointModels(container, endpoint) {
+  const models = endpoint.models || [];
+  if (!models.length) {
+    container.innerHTML = '';
+    return;
+  }
+
+  // The model represented by the hero line above already has its name, port
+  // and spec tags on that row, so it renders without a repeated title.
+  const heroId = container.dataset.heroModel || '';
+
+  container.innerHTML = models.map(function (model) {
+    // /props reports speculative.types as "none" even while a draft-mtp preset
+    // runs, so the tag follows the launch argument instead.
+    const title = model.id === heroId
+      ? ''
+      : '<div class="model-title"><span class="id">' + esc(shortModelName(model.id)) + '</span>' + modelTags(model) + '</div>';
+    return '<div class="model" data-model="' + esc(model.id || 'model') + '" data-fade>' +
+      title +
+      '<div class="grid" data-role="cards"></div>' +
+      '<div class="kv" data-role="detail"></div>' +
+      '</div>';
+  }).join('');
+
+  // Trigger fadeIn animation on new/updated models
+  container.querySelectorAll('[data-fade]').forEach(function (m) {
+    m.classList.add('fade-in');
+  });
+
+  models.forEach(function (model) {
+    const root = container.querySelector('[data-model="' + CSS.escape(model.id || 'model') + '"]');
+    if (root) applyModel(root, endpoint, model);
+  });
+}
+
+function renderEndpoints(snapshot) {
+  const container = document.getElementById('endpoints');
+  const endpoints = snapshot.endpoints || [];
+  // The section answers one question: which llamacpp is serving which model
+  // right now.  So it renders as a single merged block -- the active source's
+  // model card leads, and every source (router / loader / spawned child) is
+  // reduced to one status chip instead of its own card.
+  const live = endpoints.find(function (e) { return e.live; }) || null;
+  const ordered = live
+    ? [live].concat(endpoints.filter(function (e) { return !e.live; }))
+    : endpoints;
+  // Merge endpoints that share the same id (e.g. hermes router + hermes-live).
+  // The live endpoint carries real metrics; the router carries preset metadata.
+  // Together they become one endpoint with one combined model list.
+  // After merging, live flag is cleared — the distinction was internal, not
+  // something the dashboard should display as a separate label.
+  // Router endpoints (non-live) come first in `ordered`, so their label wins.
+  const merged = {};
+  ordered.forEach(function (e) {
+    if (!merged[e.id]) {
+      merged[e.id] = {
+        id: e.id, label: e.label, base_url: e.base_url, up: e.up, live: !!e.live,
+        models: [], error: e.error, backing_off: e.backing_off,
+        polled_at: e.polled_at, mode: e.mode,
+      };
+    } else {
+      // Merge: union of models, error kept; live flag wins for up status
+      if (e.live) merged[e.id].live = true;
+      if (e.error && !merged[e.id].error) merged[e.id].error = e.error;
+      if (e.base_url && !merged[e.id].base_url) merged[e.id].base_url = e.base_url;
+      // Label: prefer the non-live (router/loader) label over "Hermes 当前模型"
+      if (e.label && !merged[e.id].label && !e.live) merged[e.id].label = e.label;
+    }
+    (e.models || []).forEach(function (m) {
+      // Avoid duplicate models by id across endpoints
+      var already = merged[e.id].models.some(function (mm) { return mm.id === m.id; });
+      if (!already) merged[e.id].models.push(m);
+    });
+  });
+  // After merging, clear the live flag — the distinction was internal, not
+  // something the dashboard should display as a separate label.
+  Object.keys(merged).forEach(function (k) { merged[k].live = false; });
+  const deduped = Object.keys(merged).map(function (k) { return merged[k]; });
+  const active = deduped.find(function (e) { return (e.models || []).length; }) || null;
+  const signature = deduped.map(function (e) {
+    return e.id + '@' + e.up + '#' + modelSignature(e);
+  }).join('|');
+
+  // The source chips live in the section head (right-aligned), so they are
+  // refreshed on their own tick -- up/down state changes without rebuilding
+  // the model card below.
+  const sourcesBox = document.getElementById('endpoint-sources');
+  if (sourcesBox) {
+    const srcSig = deduped.map(function (e) { return e.id + '@' + e.up; }).join('|');
+    if (sourcesBox.dataset.sig !== srcSig) {
+      sourcesBox.dataset.sig = srcSig;
+      sourcesBox.innerHTML = deduped.map(endpointChip).join('');
+    }
+  }
+
+  if (container.dataset.signature !== signature) {
+    container.dataset.signature = signature;
+    // The hero line doubles as the model's title: label + name + port + spec
+    // tags all on one row, so the per-model title below no longer repeats it.
+    const heroModel = active && (active.models || [])[0] || null;
+    const hero = heroModel
+      ? '<div class="hero" data-role="hero">' +
+        '<span class="hero-label">当前模型</span>' +
+        '<span class="hero-name">' + esc(shortModelName(heroModel.id)) + '</span>' +
+        '<span class="hero-port">' + esc(portOf(active.base_url) || '?') + '</span>' +
+        modelTags(heroModel) +
+        '</div>'
+      : '';
+    const empty = !active
+      ? '<div class="empty">当前没有已加载的模型 —— 服务在线时指标会自动出现在这里。</div>'
+      : '';
+    container.innerHTML = '<div class="endpoint is-live" data-endpoint="' + esc(active ? active.id : 'none') + '">' +
+      hero + empty +
+      '<div data-role="models" data-hero-model="' + esc(heroModel ? heroModel.id : '') + '"></div>' +
+      '</div>';
+  }
+
+  if (active) {
+    const root = container.querySelector('[data-endpoint="' + CSS.escape(active.id) + '"]');
+    if (!root) return;
+    const before = root.dataset.modelsSig || '';
+    const after = modelSignature(active);
+    if (before !== after) {
+      root.dataset.modelsSig = after;
+      renderEndpointModels(root.querySelector('[data-role="models"]'), active);
+    } else {
+      // Values refresh on every tick and the DOM is reused, so the canvases
+      // (and their accumulated scale) survive.
+      (active.models || []).forEach(function (model) {
+        const modelRoot = root.querySelector(
+          '[data-model="' + CSS.escape(model.id || 'model') + '"]');
+        if (modelRoot) applyModel(modelRoot, active, model);
+      });
+    }
+  }
+}
+
+const SYS_SPECS = [
+  cardSpec('util', '显卡利用率', {
+    bar: true,
+    tip: 'nvidia-smi 的 utilization.gpu，采样区间内 SM 处于工作状态的时间占比。' +
+      '批量推理时它常常很低，因为瓶颈在显存带宽而不是算力。',
+  }),
+  cardSpec('mem', '显存占用', {
+    bar: true,
+    tip: '已用显存 ÷ 总显存。脚注里的上限就是这张卡的全部显存。' +
+      '注意 WDDM 驱动下 nvidia-smi 不给每进程显存。',
+  }),
+  cardSpec('temp', '核心温度', {
+    bar: true,
+    tip: 'GPU 核心温度。进度条按 30–90°C 换算占用比例，' +
+      '75°C 转黄、83°C 转红并在脚注直接写明温度偏高。',
+  }),
+  cardSpec('power', '功耗', {
+    bar: true,
+    tip: '当前功耗 ÷ 功耗上限。接近上限说明这张卡已经在全力跑。' +
+      '下方就是功耗档位切换。',
+  }),
+  cardSpec('cpu', 'CPU 负载', {
+    bar: true,
+    tip: 'GetSystemTimes 两次采样差分算出的整机 CPU 占用。' +
+      'Windows 的 kernel time 已经包含 idle，所以忙碌比是 (kernel + user − idle) ÷ (kernel + user)。' +
+      '这是整机总负载，不是单个核心。',
+  }),
+  cardSpec('commit', '提交内存', {
+    bar: true,
+    tip: 'commit charge = 物理内存 + 页面文件已经"承诺"出去的量，' +
+      '比物理占用更接近真实压力。超过 90% 变红，那时再申请内存就会开始失败。',
+  }),
+];
+
+// One merged block at the top of the page: the card's main vitals (GPU util /
+// VRAM / temp / power) plus the host's (CPU load / commit memory), with the
+// power-limit switch right underneath.  The per-section GPU and system grids
+// used to sit two blocks down and took a full screen; these six are what a
+// glance actually needs, so they lead and everything else is one scroll away.
+function renderSystem(snapshot) {
+  const container = document.getElementById('sys');
+  if (!container) return;
+
+  const gpuState = snapshot.gpu || {};
+  const host = snapshot.system || {};
+  const gpus = gpuState.gpus || [];
+  const gpu = gpus.length ? gpus[0] : null;
+  const cpu = host.cpu || {};
+  const memory = host.memory || {};
+
+  const refs = ensureCards(container, SYS_SPECS);
+  if (!refs) return;
+
+  const index = gpu && (gpu.index === undefined || gpu.index === null) ? 0 : (gpu ? gpu.index : 0);
+  const memRatio = gpu ? gpu.mem_ratio : null;
+  const powerRatio = gpu && gpu.power_limit_w ? gpu.power_w / gpu.power_limit_w : null;
+  const temp = gpu ? gpu.temp_c : null;
+  const tempRatio = (temp === null || temp === undefined)
+    ? null : Math.max(0, Math.min(1, (temp - 30) / 60));
+  const hot = temp !== null && temp !== undefined && temp >= 83;
+  const warm = temp !== null && temp !== undefined && temp >= 75;
+  const memTight = gpu && (memRatio || 0) > 0.9;
+  const cpuLoad = host.available ? cpu.load_pct : null;
+  const commitRatio = host.available ? memory.commit_ratio : null;
+  const commitTight = (commitRatio || 0) > 0.9;
+
+  paintCards(refs, {
+    util: {
+      text: gpu ? num(gpu.util_pct, 0) : '—', unit: gpu ? '%' : '',
+      bar: gpu ? (gpu.util_pct || 0) / 100 : null,
+      foot: gpu
+        ? 'SM ' + countText(gpu.clock_sm_mhz) + ' MHz · 显存 ' + countText(gpu.clock_mem_mhz) + ' MHz'
+        : '显卡不可用',
+      series: seriesOf('gpu' + index + '.util'),
+      sparkOptions: {
+        min: 0, max: 100, color: cssVar('--chart-d'), autoscale: true,
+        format: function (v) { return num(v, 0) + '%'; },
+      },
+    },
+    mem: {
+      text: gpu ? gb(gpu.mem_used_mb, 1) : '—', unit: gpu ? 'GB' : '', bar: memRatio,
+      barClass: memTight ? 'bad' : (gpu && (memRatio || 0) > 0.8 ? 'warn' : ''),
+      foot: gpu ? '上限 ' + gb(gpu.mem_total_mb, 1) + ' GB' + (memTight ? ' · 接近上限' : '') : '显卡不可用',
+      series: seriesOf('gpu' + index + '.mem'),
+      sparkOptions: {
+        min: 0, max: 1, color: cssVar('--chart-e'), autoscale: true,
+        format: function (v) { return num(v * 100, 0) + '%'; },
+      },
+    },
+    temp: {
+      text: gpu ? num(temp, 0) : '—', unit: gpu ? '°C' : '', bar: tempRatio,
+      barClass: hot ? 'bad' : (warm ? 'warn' : ''),
+      foot: gpu
+        ? (hot ? '温度偏高，注意散热' : '风扇 ' + num(gpu.fan_pct, 0) + '%')
+        : '显卡不可用',
+      series: seriesOf('gpu' + index + '.temp'),
+      sparkOptions: {
+        min: 30, max: 95, color: hot ? cssVar('--bad') : cssVar('--chart-f'), autoscale: true,
+        format: function (v) { return num(v, 0) + '°'; },
+      },
+    },
+    power: {
+      text: gpu ? num(gpu.power_w, 0) : '—', unit: gpu ? 'W' : '', bar: powerRatio,
+      barClass: (powerRatio || 0) > 0.95 ? 'warn' : '',
+      foot: gpu ? '上限 ' + num(gpu.power_limit_w, 0) + ' W' : '显卡不可用',
+      series: seriesOf('gpu' + index + '.power'),
+      sparkOptions: {
+        min: 0, color: cssVar('--chart-g'), autoscale: true,
+        format: function (v) { return num(v, 0); },
+      },
+    },
+    cpu: {
+      text: host.available ? num(cpuLoad, 1) : '—', unit: host.available ? '%' : '',
+      bar: host.available ? (cpuLoad || 0) / 100 : null,
+      barClass: host.available
+        ? ((cpuLoad || 0) > 92 ? 'bad' : ((cpuLoad || 0) > 80 ? 'warn' : ''))
+        : '',
+      foot: host.available
+        ? '基准 ' + countText(cpu.max_mhz) + ' MHz' + ((cpuLoad || 0) > 92 ? ' · 负载饱和' : '')
+        : '系统采集不可用',
+      series: seriesOf('host.cpu'),
+      sparkOptions: {
+        min: 0, max: 100, color: cssVar('--chart-h'), autoscale: true,
+        format: function (v) { return num(v, 0) + '%'; },
+      },
+    },
+    commit: {
+      text: host.available ? gb(memory.commit_used_mb, 1) : '—', unit: host.available ? 'GB' : '',
+      bar: commitRatio,
+      barClass: commitTight ? 'bad' : (host.available && (commitRatio || 0) > 0.8 ? 'warn' : ''),
+      foot: host.available
+        ? '上限 ' + gb(memory.commit_limit_mb, 1) + ' GB' + (commitTight ? ' · 压力偏高' : '')
+        : '系统采集不可用',
+      series: seriesOf('host.commit'),
+      sparkOptions: {
+        min: 0, max: 1, color: cssVar('--chart-e'), autoscale: true,
+        format: function (v) { return num(v * 100, 0) + '%'; },
+      },
+    },
+  });
+}
+
+// ---------------------------------------------------------------- power limit
+
+// The wording lives here rather than in the server so the Python side can stay
+// free of non-ASCII text; the API speaks in preset ids and error codes.
+const POWER_LABELS = {
+  eco: { name: '静音', note: '最凉最静，出字明显变慢。降到 1/4 功率会开始碰到真实瓶颈。' },
+  quiet: { name: '低耗', note: '比均衡再低一档，解码仍接近满速，预填充会慢些。' },
+  balanced: { name: '均衡', note: '推荐起点：温度明显下降，解码速度基本不变。' },
+  full: { name: '复原', note: '恢复出厂默认，满血不限。跑训练/微调时用这一档。' },
+};
+
+const POWER_ERRORS = {
+  not_elevated: '需要管理员权限',
+  not_a_preset: '不是允许的档位',
+  out_of_range: '超出这张卡允许的范围',
+  no_gpu: '读不到显卡的功耗范围',
+  smi_failed: '驱动拒绝了这次设置',
+  bad_host: '请求来源校验失败',
+  bad_origin: '跨站请求已被拒绝',
+  missing_header: '缺少必要的请求头',
+  bad_body: '请求内容不合法',
+  not_found: '接口不存在',
+};
+
+const POWER_UI = { pending: null, message: null };
+
+function powerMessage() {
+  const message = POWER_UI.message;
+  if (!message) return null;
+  // render() runs on every sample, so a timestamp is all it takes to expire
+  // the note -- no timer to leak.
+  return (Date.now() - message.at < 8000) ? message : null;
+}
+
+function renderPowerControl(snapshot) {
+  const box = document.getElementById('power-control');
+  if (!box) return;
+
+  const gpuState = (snapshot && snapshot.gpu) || {};
+  const gpus = gpuState.gpus || [];
+  const config = S.config || {};
+  const presets = config.power_presets || [];
+
+  if (!gpus.length || !presets.length) {
+    box.innerHTML = '';
+    box.dataset.sig = '';
+    return;
+  }
+
+  const gpu = gpus[0];
+  const current = (gpu.power_limit_w === undefined) ? null : gpu.power_limit_w;
+  const elevated = !!config.elevated;
+  const pending = POWER_UI.pending;
+  const note = powerMessage();
+  // The .top variant lives in the section head as a one-line switch; the
+  // classic full-width row is kept for any future wider placement.
+  const compact = box.classList.contains('top');
+
+  // Rebuilding this row on every sample would fight the pointer and flicker
+  // the hover state, so only touch the DOM when something rendered changed.
+  const sig = JSON.stringify([current, elevated, pending, note ? note.text + note.tone : '', compact]);
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+
+  const buttons = presets.map(function (preset) {
+    const meta = POWER_LABELS[preset.id] || { name: '', note: '' };
+    // Highlight from the measured limit, not from what we last asked for: if
+    // something else changes the card the buttons follow reality.
+    const active = current !== null && Math.abs(preset.watts - current) < 1;
+    const classes = ['pw-btn'];
+    if (active) classes.push('on');
+    if (pending === preset.watts) classes.push('pending');
+    if (compact) {
+      // One line, watts only: the preset name and its explanation move into
+      // the tooltip because the section head has no room for a second line.
+      return '<button type="button" class="' + classes.join(' ') +
+        '" data-watts="' + preset.watts + '"' + (elevated ? '' : ' disabled') +
+        ' title="' + esc((meta.name || '') + ' · ' + meta.note) + '">' +
+        '<span class="pw-watts">' + preset.watts + 'W</span></button>';
+    }
+    return '<button type="button" class="' + classes.join(' ') +
+      '" data-watts="' + preset.watts + '"' + (elevated ? '' : ' disabled') +
+      ' title="' + esc(meta.note) + '">' +
+      '<span class="pw-watts">' + preset.watts + ' W</span>' +
+      '<span class="pw-note">' + esc(meta.name) + '</span></button>';
+  }).join('');
+
+  const low = gpu.power_min_w;
+  const high = gpu.power_max_w;
+  const range = (low !== null && low !== undefined && high !== null && high !== undefined)
+    ? '可用范围 ' + num(low, 0) + '–' + num(high, 0) + ' W' : '';
+
+  let status = '';
+  if (note) {
+    status = '<span class="pw-status ' + (note.tone || '') + '">' + esc(note.text) + '</span>';
+  } else if (current !== null) {
+    status = '<span class="pw-status">当前 ' + num(current, 0) + ' W</span>';
+  }
+
+  const tip = '<span class="tip" tabindex="0" data-tip="' + esc('对应 nvidia-smi -pl 的功率墙。' +
+    '满载时显卡会在此值附近降频，实际功耗不会超过去。' +
+    '需要管理员权限，且重启电脑后恢复默认（可用任务计划程序做开机自动设置）。' +
+    '出字（解码）阶段卡在显存带宽，适度下调通常几乎不掉速；' +
+    '预填充阶段卡在算力，会变慢一些，但它只占一次请求开头的一小段。') + '">i</span>';
+
+  if (compact) {
+    // No room for the admin-rights paragraph here, so it becomes a lock icon
+    // with the explanation in its tooltip.  The "current N W" readout is also
+    // dropped: the power card next door already shows the live limit, and the
+    // active preset button says which one is in force.  Error/success notes
+    // still get a slot though -- they are feedback, not decoration.
+    const lock = elevated ? '' :
+      '<span class="tip pw-lock" tabindex="0" data-tip="' + esc('当前进程没有管理员权限，改不了功耗上限（nvidia-smi -pl 会被系统拒绝）。请关闭本窗口，改用 start_monitor_admin.bat 启动，会弹一次 UAC 确认。') + '">🔒</span>';
+    const noteStatus = note ? '<span class="pw-status ' + (note.tone || '') + '">' + esc(note.text) + '</span>' : '';
+    box.innerHTML =
+      '<div class="pw-row">' +
+        '<span class="pw-title">显卡功耗' + tip + lock + '</span>' +
+        '<div class="pw-group">' + buttons + '</div>' +
+        noteStatus +
+      '</div>';
+    return;
+  }
+
+  box.innerHTML =
+    '<div class="pw-row">' +
+      '<span class="pw-title">功耗上限' +
+        '<span class="tip" tabindex="0" data-tip="对应 nvidia-smi -pl 的功率墙。' +
+          '满载时显卡会在此值附近降频，实际功耗不会超过去。' +
+          '需要管理员权限，且重启电脑后恢复默认（可用任务计划程序做开机自动设置）。' +
+          '出字（解码）阶段卡在显存带宽，适度下调通常几乎不掉速；' +
+          '预填充阶段卡在算力，会变慢一些，但它只占一次请求开头的一小段。">i</span>' +
+      '</span>' +
+      '<div class="pw-group">' + buttons + '</div>' +
+      status +
+      (range ? '<span class="pw-range">' + range + '</span>' : '') +
+    '</div>' +
+    (elevated ? '' : '<div class="pw-hint">当前进程没有管理员权限，改不了功耗上限' +
+      '（<code>nvidia-smi -pl</code> 会被系统拒绝）。' +
+      '请关闭本窗口，改用 <b>start_monitor_admin.bat</b> 启动，会弹一次 UAC 确认。</div>');
+}
+
+function applyPowerLimit(watts) {
+  const config = S.config || {};
+  if (!config.elevated) {
+    POWER_UI.message = { text: POWER_ERRORS.not_elevated, tone: 'bad', at: Date.now() };
+    renderPowerControl(S.snapshot || {});
+    return;
+  }
+  if (POWER_UI.pending !== null) return;
+
+  const gpus = (S.snapshot && S.snapshot.gpu && S.snapshot.gpu.gpus) || [];
+  const active = gpus.length ? gpus[0].power_limit_w : null;
+  if (active !== null && active !== undefined && Math.abs(active - watts) < 1) {
+    POWER_UI.message = { text: '当前已经是该档位', tone: '', at: Date.now() };
+    renderPowerControl(S.snapshot || {});
+    return;
+  }
+
+  POWER_UI.pending = watts;
+  POWER_UI.message = { text: '正在设置…', tone: '', at: Date.now() };
+  renderPowerControl(S.snapshot || {});
+
+  fetch('/api/power-limit', {
+    method: 'POST',
+    // The custom header is the check that matters: it forces a CORS preflight,
+    // and this server never answers OPTIONS, so another site cannot get the
+    // request out at all.  See Handler._write_refusal.
+    headers: { 'Content-Type': 'application/json', 'X-LLM-Monitor': '1' },
+    body: JSON.stringify({ watts: watts }),
+  }).then(function (response) {
+    return response.json().then(function (body) { return body || {}; });
+  }).then(function (body) {
+    POWER_UI.pending = null;
+    if (body.ok) {
+      // Move the highlight on this frame; the next sample overwrites it with
+      // what the driver actually reports.
+      if (gpus.length && body.applied !== null && body.applied !== undefined) {
+        gpus[0].power_limit_w = body.applied;
+      }
+      const previous = body.previous;
+      POWER_UI.message = {
+        text: '已设为 ' + num(body.applied, 0) + ' W' +
+          (previous !== null && previous !== undefined &&
+           Math.abs(previous - body.applied) >= 1
+            ? '（原 ' + num(previous, 0) + ' W）' : ''),
+        tone: 'ok', at: Date.now(),
+      };
+    } else {
+      const code = body.error || 'unknown';
+      POWER_UI.message = {
+        text: (POWER_ERRORS[code] || '设置失败（' + code + '）') +
+          (body.detail ? '：' + body.detail : ''),
+        tone: 'bad', at: Date.now(),
+      };
+    }
+    renderPowerControl(S.snapshot || {});
+  }).catch(function (error) {
+    POWER_UI.pending = null;
+    POWER_UI.message = { text: '请求失败：' + error.message, tone: 'bad', at: Date.now() };
+    renderPowerControl(S.snapshot || {});
+  });
+}
+
+// ---------------------------------------------------------------- token ledger
+
+function tokenText(value) {
+  // These totals reach into the millions and the exact digit count never
+  // changes a decision, so the headline stays short and the precise value
+  // lives in the tooltip.
+  const n = Number(value);
+  if (!isFinite(n)) return '—';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  return String(Math.round(n));
+}
+
+function tokenExact(value) {
+  const n = Number(value);
+  return isFinite(n) ? Math.round(n).toLocaleString('zh-CN') + ' tok' : '暂无数据';
+}
+
+// A recorded power limit is just a number; the preset name is a frontend
+// concern (the backend deliberately carries no Chinese).  A limit that is not
+// one of the presets -- someone can set any value with nvidia-smi directly --
+// still renders, just without a nickname.
+function wattsLabel(watts) {
+  const value = Number(watts);
+  if (!isFinite(value) || value <= 0) return '档位未知';
+  const presets = (S.config && S.config.power_presets) || [];
+  const hit = presets.filter(function (preset) {
+    return Math.abs(Number(preset.watts) - value) < 1;
+  })[0];
+  const meta = hit ? POWER_LABELS[hit.id] : null;
+  return Math.round(value) + ' W' + (meta && meta.name ? ' ' + meta.name : '');
+}
+
+function rateText(value) {
+  const n = Number(value);
+  if (!isFinite(n) || n <= 0) return '—';
+  return n >= 100 ? String(Math.round(n)) : n.toFixed(1);
+}
+
+function currentPowerLimit(snapshot) {
+  const gpu = ((snapshot && snapshot.gpu) || {}).gpus || [];
+  const value = gpu.length ? gpu[0].power_limit_w : null;
+  return (value === null || value === undefined) ? null : Number(value);
+}
+
+function renderTokenStats(snapshot) {
+  const grid = document.getElementById('token-stats');
+  const note = document.getElementById('token-note');
+  const days = document.getElementById('token-days');
+  const tiers = document.getElementById('token-tiers');
+  const tierNote = document.getElementById('token-tier-note');
+  const tierSummary = document.getElementById('token-tier-summary');
+  const combos = document.getElementById('token-combos');
+  const rankOutput = document.getElementById('token-rank-output');
+  const rankSpeed = document.getElementById('token-rank-speed');
+  const summary = document.getElementById('stats-summary');
+  if (!grid || !note || !days) return;
+
+  const data = snapshot.stats;
+  if (!data || data.available === false) {
+    const reason = (data && data.error === 'disabled')
+      ? 'config.json 里 stats.enabled 设成了 false'
+      : '本次采样没有上报账本';
+    grid.innerHTML = '<div class="stat">' +
+      '<span class="stat-label">Token 账本</span>' +
+      '<span class="stat-value">未启用</span>' +
+      '<span class="stat-foot">' + esc(reason) + '</span></div>';
+    note.className = 'stat-note';
+    note.textContent = '';
+    days.innerHTML = '';
+    if (tiers) tiers.innerHTML = '';
+    if (combos) combos.innerHTML = '';
+    if (rankOutput) rankOutput.innerHTML = '';
+    if (rankSpeed) rankSpeed.innerHTML = '';
+    if (tierNote) tierNote.textContent = '';
+    if (tierSummary) tierSummary.textContent = '';
+    if (summary) summary.textContent = '';
+    return;
+  }
+
+  const today = data.today_totals || {};
+  const total = data.totals || {};
+  const cells = [
+    {
+      label: '今日生成', value: today.predicted_tokens, unit: 'tok',
+      foot: 'decode 调用 ' + tokenText(today.decode_steps) + ' 次',
+    },
+    {
+      label: '今日预填充', value: today.prompt_tokens, unit: 'tok',
+      foot: 'KV 复用 ' + tokenText(today.cached_tokens) + ' tok',
+    },
+    {
+      label: '累计生成', value: total.predicted_tokens, unit: 'tok',
+      foot: data.since ? '自 ' + data.since + ' 起' : '尚无记录',
+    },
+    {
+      label: '累计预填充', value: total.prompt_tokens, unit: 'tok',
+      foot: '覆盖 ' + (data.days || 0) + ' 天',
+    },
+  ];
+  grid.innerHTML = cells.map(function (cell) {
+    return '<div class="stat">' +
+      '<span class="stat-label">' + esc(cell.label) + '</span>' +
+      '<span class="stat-value" title="' + esc(tokenExact(cell.value)) + '">' +
+        tokenText(cell.value) +
+        '<span class="stat-unit">' + esc(cell.unit) + '</span></span>' +
+      '<span class="stat-foot">' + esc(cell.foot) + '</span>' +
+      '</div>';
+  }).join('');
+
+  // Persistence is the entire point of the ledger, so a failure to write has
+  // to be visible on the page rather than tucked into a hover.
+  const where = data.path ? '账本文件 ' + data.path : '账本文件位置未配置';
+  if (!data.persisted) {
+    note.className = 'stat-note warn';
+    note.textContent = '账本未落盘（' + (data.error || '未知原因') +
+      '）：当前只记在内存里，工作台重启后会清零。';
+  } else if (data.resets > 0) {
+    note.className = 'stat-note';
+    note.textContent = '检测到 ' + data.resets +
+      ' 次计数器归零（server 重启或模型卸载），已自动从零续算 · ' + where;
+  } else {
+    note.className = 'stat-note';
+    note.textContent = where;
+  }
+
+  if (summary) {
+    const models = Object.keys(data.models || {}).length;
+    summary.textContent = '覆盖 ' + (data.days || 0) + ' 天 · ' +
+      models + ' 个模型分账';
+  }
+
+  // TOP-3 rankings straight off the per-model ledger: one table by output
+  // volume, one by engine-measured decode speed.  The model name uses the same
+  // "source / short name" format as the rest of the panel so a loader path id
+  // reads like every other entry.
+  const rankRows = (data.model_rows || []).slice();
+  // raw() is the number used for filtering and sorting; display() is what the
+  // cell shows.  Keeping them apart matters because a formatted total like
+  // "1.23M" cannot be subtracted to order rows.
+  const rankTable = function (title, metricLabel, raw, display) {
+    const rows = rankRows.filter(function (row) { return raw(row) !== null; })
+      .sort(function (a, b) { return raw(b) - raw(a); })
+      .slice(0, 3);
+    if (!rows.length) return '<p class="muted">暂无记录。</p>';
+    return '<table><thead><tr><th>#</th><th>模型</th><th class="num">' +
+      title + '</th></tr></thead><tbody>' +
+      rows.map(function (row, i) {
+        const name = (row.endpoint
+          ? '<span class="muted">' + esc(row.endpoint) + '/</span>' : '') +
+          esc(shortModelName(row.model));
+        return '<tr><td class="num rank-no">' + (i + 1) + '</td>' +
+          '<td>' + name + '</td>' +
+          '<td class="num" title="' + esc(metricLabel) + '">' + display(row) + '</td></tr>';
+      }).join('') + '</tbody></table>';
+  };
+  if (rankOutput) {
+    rankOutput.innerHTML = rankTable('输出 tok', '累计生成的 token 总数',
+      function (row) {
+        const n = Number(row.predicted_tokens || 0);
+        return n > 0 ? n : null;
+      },
+      function (row) { return tokenText(row.predicted_tokens); });
+  }
+  if (rankSpeed) {
+    rankSpeed.innerHTML = rankTable('生成 t/s', '引擎自计时口径的平均生成速率',
+      function (row) {
+        const n = Number(row.predicted_tps);
+        return isFinite(n) && n > 0 ? n : null;
+      },
+      function (row) { return rateText(row.predicted_tps); });
+  }
+
+  // Power-tier attribution.  A token delta carries the limit that was in force
+  // when it was booked, so this is the one place the panel can answer "what did
+  // I run at 300 W".  A zero tier is a real state -- the limit could not be
+  // read -- so it gets its own row instead of being hidden or merged.
+  const limit = currentPowerLimit(snapshot);
+  const tierRows = (data.tiers || []).slice();
+  if (tiers) {
+    const tiered = tierRows.reduce(function (acc, row) {
+      return acc + Number(row.predicted_tokens || 0);
+    }, 0);
+    tiers.innerHTML = tierRows.map(function (row) {
+      const isNow = limit !== null && Math.abs(limit - row.watts) < 1;
+      const share = tiered > 0 ? Number(row.predicted_tokens || 0) / tiered : 0;
+      const metric = function (label, value, unit, title) {
+        return '<span class="tier-item"' +
+          (title ? ' title="' + esc(title) + '"' : '') + '><em>' + esc(label) +
+          '</em><b>' + value + '</b><span class="tier-unit">' + esc(unit) +
+          '</span></span>';
+      };
+      return '<div class="tier' + (isNow ? ' now' : '') +
+        (row.watts ? '' : ' unknown') + '">' +
+        '<div class="tier-head"><b>' + esc(wattsLabel(row.watts)) + '</b>' +
+          (isNow ? '<span class="tier-now">当前</span>' : '') + '</div>' +
+        '<div class="tier-metrics">' +
+          metric('生成', tokenText(row.predicted_tokens), 'tok',
+                 tokenExact(row.predicted_tokens)) +
+          metric('预填充', tokenText(row.prompt_tokens), 'tok',
+                 tokenExact(row.prompt_tokens)) +
+          // Shown next to the prefill rate on purpose: cached tokens are
+          // near-free to re-read, so a high prefill t/s usually means a high
+          // cache hit rate rather than raw compute.
+          metric('KV 复用', tokenText(row.cached_tokens), 'tok',
+                 tokenExact(row.cached_tokens)) +
+          metric('生成速度', rateText(row.predicted_tps), 't/s', '') +
+          metric('预填充速度', rateText(row.prompt_tps), 't/s', '') +
+        '</div>' +
+        '<div class="tier-bar" title="占已归集生成量的 ' +
+          (share * 100).toFixed(1) + '%"><i style="width:' +
+          (share * 100).toFixed(1) + '%"></i></div>' +
+        '</div>';
+    }).join('');
+  }
+
+  if (tierSummary) {
+    tierSummary.textContent = tierRows.length
+      ? tierRows.length + ' 个档位'
+      : '';
+  }
+  if (tierNote) {
+    const unknown = tierRows.filter(function (row) { return !row.watts; }).length;
+    if (!tierRows.length) {
+      tierNote.className = 'stat-note subtle';
+      tierNote.textContent = '还没有按档位归集的记录，本功能启用后才开始累计。';
+    } else if (unknown) {
+      // A tier that could not be read is a conclusion, not a detail: it means
+      // part of the total cannot be attributed at all.
+      tierNote.className = 'stat-note warn';
+      tierNote.textContent = '有 ' + unknown + ' 组记录读不到功耗上限' +
+        '（显卡采集被关闭或驱动查询失败），已单独计为『档位未知』。';
+    } else if (data.tier_since) {
+      tierNote.className = 'stat-note subtle';
+      tierNote.textContent = '档位归集自 ' + data.tier_since +
+        ' 起；更早的 token 未记录当时档位，所以各档之和小于累计总量。';
+    } else {
+      tierNote.className = 'stat-note subtle';
+      tierNote.textContent = '';
+    }
+  }
+
+  const comboRows = (data.combos || []).slice();
+  if (combos) {
+    combos.innerHTML = comboRows.length ? '<table><thead><tr>' +
+      '<th>日期</th><th>功率档</th><th>模型</th>' +
+      '<th class="num">生成</th><th class="num">预填充</th>' +
+      '<th class="num">KV 复用</th>' +
+      '<th class="num">生成 t/s</th><th class="num">预填充 t/s</th>' +
+      '</tr></thead><tbody>' +
+      comboRows.map(function (row) {
+        const isNow = limit !== null && Math.abs(limit - row.watts) < 1;
+        // Same "source / short name" format as the rankings and model cards,
+        // so a loader path id no longer dominates the column.
+        const name = (row.endpoint
+          ? '<span class="muted">' + esc(row.endpoint) + '/</span>' : '') +
+          esc(shortModelName(row.model));
+        return '<tr>' +
+          '<td>' + esc(row.day) + '</td>' +
+          '<td><span class="tier-chip' + (row.watts ? '' : ' unknown') +
+            (isNow ? ' now' : '') + '">' + esc(wattsLabel(row.watts)) +
+            '</span></td>' +
+          '<td>' + name + '</td>' +
+          '<td class="num" title="' + esc(tokenExact(row.predicted_tokens)) + '">' +
+            tokenText(row.predicted_tokens) + '</td>' +
+          '<td class="num" title="' + esc(tokenExact(row.prompt_tokens)) + '">' +
+            tokenText(row.prompt_tokens) + '</td>' +
+          '<td class="num" title="' + esc(tokenExact(row.cached_tokens)) + '">' +
+            tokenText(row.cached_tokens) + '</td>' +
+          '<td class="num">' + rateText(row.predicted_tps) + '</td>' +
+          '<td class="num">' + rateText(row.prompt_tps) + '</td>' +
+          '</tr>';
+      }).join('') + '</tbody></table>'
+      : '<p class="muted">尚无明细记录。</p>';
+  }
+
+  const recent = (data.recent || []).slice();
+  days.innerHTML = recent.length ? '<table><thead><tr>' +
+    '<th>日期</th><th class="num">生成</th><th class="num">预填充</th>' +
+    '<th class="num">合计</th></tr></thead><tbody>' +
+    recent.map(function (row) {
+      const sum = Number(row.predicted_tokens || 0) +
+        Number(row.prompt_tokens || 0);
+      return '<tr><td>' + esc(row.day) + '</td>' +
+        '<td class="num" title="' + esc(tokenExact(row.predicted_tokens)) + '">' +
+          tokenText(row.predicted_tokens) + '</td>' +
+        '<td class="num" title="' + esc(tokenExact(row.prompt_tokens)) + '">' +
+          tokenText(row.prompt_tokens) + '</td>' +
+        '<td class="num" title="' + esc(tokenExact(sum)) + '">' +
+          tokenText(sum) + '</td></tr>';
+    }).join('') + '</tbody></table>' : '';
+}
+
+function render() {
+  const snapshot = S.snapshot;
+  if (!snapshot) return;
+  renderEndpoints(snapshot);
+  renderSystem(snapshot);
+  renderPowerControl(snapshot);
+  renderTokenStats(snapshot);
+
+  const meta = document.getElementById('meta');
+  const when = new Date(snapshot.ts * 1000);
+  const timings = snapshot.timings || {};
+  const parts = [];
+  if (timings.gpu !== undefined) parts.push('显卡 ' + timings.gpu + ' ms');
+  if (timings.system !== undefined) parts.push('系统 ' + timings.system + ' ms');
+  if (timings.endpoints && timings.endpoints.length) {
+    parts.push('推理 ' + timings.endpoints.join('/') + ' ms');
+  }
+  meta.title = '各阶段采样耗时：' + (parts.join(' · ') || '未上报');
+  meta.textContent = '更新于 ' + when.toLocaleTimeString('zh-CN', { hour12: false }) +
+    ' · 采样 ' + num(snapshot.sample_ms, 0) + ' ms';
+
+  // The connection lamp is owned by markConn() in the stream watchdog.  It
+  // used to be set here from endpoint state too, so the two overwrote each
+  // other on every sample and the lamp said nothing dependable.
+
+  const total = (snapshot.endpoints || []).reduce(function (acc, e) {
+    return acc + (e.models || []).length;
+  }, 0);
+  const interval = snapshot.interval || (S.config && S.config.interval_seconds) || 2;
+  const points = S.history.timestamps.length;
+  const agingSec = S.history.timestamps.length ?
+    Math.max(0, PEAK_WINDOW_SEC - (S.history.timestamps[S.history.timestamps.length - 1] - S.history.timestamps[0])) : 0;
+  const aging = agingSec > 0 ? ' · 峰值窗口 ' + Math.floor(agingSec / 60) + 'm' : '';
+  const note = document.getElementById('foot-note');
+  note.textContent = '已加载模型 ' + total + ' 个 · 曲线历史 ' + points + ' / ' +
+    HISTORY_LIMIT + ' 点（约 ' + Math.round(points * interval / 60) + ' 分钟，每 ' +
+    interval + ' 秒一采样）' + aging;
+  note.title = '曲线可悬停取值；每张卡片右侧的 i 是该项口径说明。';
+}
+
+// ----------------------------------------------------------------------- theme
+
+function initTheme() {
+  const button = document.getElementById('theme-btn');
+  const sync = function () {
+    const dark = document.documentElement.dataset.theme === 'dark';
+    button.textContent = dark ? '浅色' : '深色';
+    button.title = dark ? '切换到浅色主题' : '切换到深色主题';
+  };
+  sync();
+  button.addEventListener('click', function () {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem(THEME_KEY, next); } catch (error) { /* private mode */ }
+    sync();
+    render();
+  });
+}
+
+// ------------------------------------------------------------------------ boot
+
+async function boot() {
+  initTheme();
+  document.addEventListener('pointermove', onPointerMove, { passive: true });
+
+  // Delegated once: the control row rebuilds itself, so per-button listeners
+  // would have to be rebound on every render.
+  const powerBox = document.getElementById('power-control');
+  if (powerBox) {
+    powerBox.addEventListener('click', function (event) {
+      const button = event.target.closest('button[data-watts]');
+      if (!button || button.disabled) return;
+      applyPowerLimit(Number(button.dataset.watts));
+    });
+  }
+
+  const manualOnly = new URLSearchParams(window.location.search).has('no-stream');
+  try {
+    const response = await fetch('/api/snapshot');
+    const payload = await response.json();
+    S.config = payload.config;
+    S.snapshot = payload.snapshot;
+    loadHistory(payload.history);
+    render();
+  } catch (error) {
+    document.getElementById('meta').textContent = '初次加载失败：' + error.message;
+  }
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', function (e) {
+    // T: toggle theme
+    if (e.key === 't' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const btn = document.getElementById('theme-btn');
+      if (btn) btn.click();
+    }
+    // R: force refresh
+    if (e.key === 'r' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      if (S.snapshot) render();
+    }
+    // 0-9: toggle collapsible sections
+    if (e.key >= '0' && e.key <= '9') {
+      const idx = parseInt(e.key) - 1;
+      const details = document.querySelectorAll('#token-details details');
+      if (details[idx]) details[idx].toggle();
+    }
+  });
+
+  if (manualOnly) return;
+
+  // Two independent paths keep the panel live:
+  //   * SSE for the normal case -- immediate delivery, no repeating request;
+  //   * a watchdog that falls back to polling once no frame has arrived for
+  //     WATCHDOG_MS.  Some embedded browsers and preview panes block
+  //     EventSource outright, and "refresh it by hand" is not an answer.
+  // Streaming always wins: polling only runs while the stream is silent, so a
+  // recovered stream stops the polling by itself.
+  const WATCHDOG_MS = 8000;
+  const POLL_MS = 4000;
+  let lastStreamAt = Date.now();
+  let lastPollAt = 0;
+
+  function markConn(state) {
+    const dot = document.getElementById('conn-dot');
+    if (!dot) return;
+    dot.className = 'dot ' + state;
+    dot.title = CONN_TITLES[state] || '';
+  }
+
+  function applyFrame(message) {
+    // Every frame carries both a snapshot and the flattened point, so the
+    // numbers and the charts advance together.  Consuming only one of them is
+    // exactly how the cards end up frozen while the curves keep moving.
+    let touched = false;
+    if (message.snapshot) { S.snapshot = message.snapshot; touched = true; }
+    if (message.point) { appendPoint(message.point); touched = true; }
+    if (touched) render();
+    return touched;
+  }
+
+  function pollOnce() {
+    lastPollAt = Date.now();
+    fetch('/api/snapshot')
+      .then(function (response) { return response.json(); })
+      .then(function (payload) {
+        if (payload.snapshot) S.snapshot = payload.snapshot;
+        loadHistory(payload.history);
+        render();
+        markConn('poll');
+      })
+      .catch(function () { markConn('down'); });
+  }
+
+  const stream = new EventSource('/api/stream');
+  stream.onopen = function () { markConn('live'); };
+  stream.onmessage = function (event) {
+    let message;
+    try { message = JSON.parse(event.data); } catch (error) { return; }
+    lastStreamAt = Date.now();
+    if (applyFrame(message)) markConn('live');
+  };
+  stream.onerror = function () {
+    // EventSource retries by itself; do not close it here, that would cancel
+    // the retry.  The watchdog covers the case where retrying cannot help.
+    markConn('down');
+  };
+
+  window.setInterval(function () {
+    if (Date.now() - lastStreamAt < WATCHDOG_MS) return;
+    if (Date.now() - lastPollAt < POLL_MS) return;
+    pollOnce();
+  }, 2000);
+}
+
+window.addEventListener('resize', function () {
+  clearTimeout(window.__resizeTimer);
+  window.__resizeTimer = setTimeout(render, 160);
+});
+
+boot();
