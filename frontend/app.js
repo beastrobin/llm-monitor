@@ -955,7 +955,18 @@ function renderEndpoints(snapshot) {
     (e.models || []).forEach(function (m) {
       // Avoid duplicate models by id across endpoints
       var already = merged[e.id].models.some(function (mm) { return mm.id === m.id; });
-      if (!already) merged[e.id].models.push(m);
+      if (already) {
+        // The router's model record carries preset metadata (e.g. mtp_type
+        // from launch args) that a live child cannot report — backfill it
+        // into the merged record so tags match the running server.
+        merged[e.id].models.forEach(function (mm) {
+          if (mm.id !== m.id) return;
+          if (m.mtp_enabled) mm.mtp_enabled = true;
+          if (m.mtp_type && (!mm.mtp_type || mm.mtp_type === 'none')) mm.mtp_type = m.mtp_type;
+        });
+        return;
+      }
+      merged[e.id].models.push(m);
     });
   });
   // After merging, clear the live flag — the distinction was internal, not

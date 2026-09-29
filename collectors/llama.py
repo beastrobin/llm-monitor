@@ -397,6 +397,14 @@ class LlamaEndpoint(object):
             detail["metrics"] = None
             detail["metrics_error"] = "%s: %s" % (type(exc).__name__, exc)
 
+        # spec_decode counters are ground truth: a spawned child (or a router
+        # preset) can run MTP while args, /props and /slots all report
+        # speculative.types = "none".  Nonzero draft counters prove the
+        # speculative track is live, so override the args/props verdict.
+        metrics = detail.get("metrics")
+        if metrics and metrics.get("mtp_active") and not detail["mtp_enabled"]:
+            detail["mtp_enabled"] = True
+
         return detail
 
     def poll(self):
