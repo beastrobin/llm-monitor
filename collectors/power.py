@@ -34,10 +34,14 @@ CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 # A fixed menu rather than free-form wattage.  The control is a segmented
 # button group, and a whitelist means a malformed or hostile request cannot
 # ask for 1 W or 100000 W.
+#
+# Balanced is 400W, not 450W: the 150-600W decode power curve (both short and
+# long-context loads) flattens after ~450W, and 400W sits at the efficiency
+# peak — ~95% of peak speed at the best t/s-per-watt.  See power_curve/.
 PRESETS = [
     {"id": "eco", "watts": 150},
     {"id": "quiet", "watts": 300},
-    {"id": "balanced", "watts": 450},
+    {"id": "balanced", "watts": 400},
     {"id": "full", "watts": 600},
 ]
 PRESET_WATTS = tuple(p["watts"] for p in PRESETS)

@@ -1179,10 +1179,10 @@ function renderSystem(snapshot) {
 // The wording lives here rather than in the server so the Python side can stay
 // free of non-ASCII text; the API speaks in preset ids and error codes.
 const POWER_LABELS = {
-  eco: { name: '静音', note: '最凉最静，出字明显变慢。降到 1/4 功率会开始碰到真实瓶颈。' },
-  quiet: { name: '低耗', note: '比均衡再低一档，解码仍接近满速，预填充会慢些。' },
-  balanced: { name: '均衡', note: '推荐起点：温度明显下降，解码速度基本不变。' },
-  full: { name: '复原', note: '恢复出厂默认，满血不限。跑训练/微调时用这一档。' },
+  eco: { name: '静音', note: '150W：~634MHz，decode ~19t/s，3K 上下文 prefill 要 ~33s。只为极致静音/省电时。' },
+  quiet: { name: '低耗', note: '300W：~1386MHz，decode ~61t/s(长上下文)，prefill ~10s。长对话的安静默认档。' },
+  balanced: { name: '均衡', note: '400W：~2350MHz，decode ~67t/s，峰值速度的 95%，能效最高的档位。实测曲线在 450W 后变平，这里是性价比顶点。' },
+  full: { name: '复原', note: '600W：~2777MHz 到时钟顶，decode ~70t/s(长上下文)/159t/s(短)。比均衡只快 ~5%，给 prefill 密集或批量任务用。' },
 };
 
 const POWER_ERRORS = {
