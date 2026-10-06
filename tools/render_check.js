@@ -172,6 +172,17 @@ function readFrames(base, count, timeoutMs) {
         ' / ' + (contract.hasPoint ? '含 point ✓' : '缺 point ✗ 曲线不会动')
       : '（帧数不足，无法判断）'));
   say('主题: ' + doc.documentElement.dataset.theme);
+  // The header badge is the only place the running release is visible to a
+  // user, and it is filled from the server rather than from the page.  Checking
+  // it here means a version that never arrives -- or a badge wired to a stale
+  // hard-coded string -- shows up as a failed smoke test instead of a shrug.
+  const versionBadge = doc.getElementById('version');
+  const badgeText = text(versionBadge);
+  const serverVersion = ((payload.config || {}).version) || '';
+  say('版本徽章: ' + (badgeText || '（空）') +
+    (serverVersion && badgeText === 'v' + serverVersion
+      ? ' ✓ 与服务端 config.version 一致'
+      : ' ✗ 服务端下发 "' + serverVersion + '"，徽章却是 "' + badgeText + '"'));
   say('页面 meta: ' + text(doc.getElementById('meta')));
   say('历史脚注: ' + text(doc.getElementById('foot-note')));
 

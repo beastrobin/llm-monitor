@@ -1820,9 +1820,23 @@ function renderTokenStats(snapshot) {
     }).join('') + '</tbody></table>' : '';
 }
 
+// The release is named by the server, not by this file, so a browser holding a
+// cached app.js still shows the version it is actually talking to.  Empty until
+// the first snapshot lands, and hidden by CSS while it is.
+function renderVersion() {
+  const badge = document.getElementById('version');
+  if (!badge) return;
+  const version = (S.config && S.config.version) || '';
+  const text = version ? 'v' + version : '';
+  if (badge.textContent === text) return;
+  badge.textContent = text;
+  badge.title = version ? 'llm-monitor v' + version : '';
+}
+
 function render() {
   const snapshot = S.snapshot;
   if (!snapshot) return;
+  renderVersion();
   renderEndpoints(snapshot);
   renderSystem(snapshot);
   renderPowerControl(snapshot);

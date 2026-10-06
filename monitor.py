@@ -32,6 +32,11 @@ from collectors import gpu, power, stats, system
 from collectors.llama import LlamaEndpoint
 from collectors.hermes_live import LiveEndpoint
 
+# The one place the release is named.  It is stamped into the startup log, the
+# /api/snapshot config and --version, so the console, the browser header and a
+# bare invocation all agree; nothing else in the tree hard-codes it.
+VERSION = "1.1"
+
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
 # only place an outside reader learns any of it.  Hermes keeps its state under
@@ -623,6 +628,7 @@ class Handler(BaseHTTPRequestHandler):
                 "snapshot": self.hub.snapshot(),
                 "history": self.hub.history(),
                 "config": {
+                    "version": VERSION,
                     "pid": os.getpid(),
                     "interval_seconds": self.hub.config["server"]["interval_seconds"],
                     "endpoints": [
@@ -716,6 +722,8 @@ class DashboardServer(ThreadingHTTPServer):
 
 def main():
     parser = argparse.ArgumentParser(description="Local LLM monitoring dashboard")
+    parser.add_argument("--version", action="version",
+                        version="llm-monitor %s" % VERSION)
     parser.add_argument("--host", default=None)
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--interval", type=float, default=None)
@@ -781,8 +789,8 @@ def main():
         raise SystemExit(code)
     server.daemon_threads = True
 
-    log("dashboard on http://%s:%d  (interval %.1fs, pid %d)" % (
-        host, port, config["server"]["interval_seconds"], os.getpid()))
+    log("llm-monitor v%s -- dashboard on http://%s:%d  (interval %.1fs, pid %d)" % (
+        VERSION, host, port, config["server"]["interval_seconds"], os.getpid()))
     if hub.elevated:
         log("power limit control: enabled")
     else:
