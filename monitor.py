@@ -856,7 +856,7 @@ def main():
                 log("that copy can only monitor. To get the power control, "
                     "stop it first:")
                 log("    taskkill /PID %s /F" % holder_pid)
-                log("then start start_monitor_admin.bat")
+                log("then double-click start_monitor_admin.vbs")
                 code = EXIT_PORT_BUSY_READONLY
         raise SystemExit(code)
     server.daemon_threads = True
@@ -867,7 +867,7 @@ def main():
         log("power limit control: enabled")
     else:
         log("power limit control: read-only -- nvidia-smi -pl needs an "
-            "elevated token; start via start_monitor_admin.bat to enable it")
+            "elevated token; start via start_monitor_admin.vbs to enable it")
     for endpoint in hub.endpoints:
         log("watching %s -> %s" % (
             endpoint.id, endpoint.base_url or getattr(endpoint, "log_path", None)))

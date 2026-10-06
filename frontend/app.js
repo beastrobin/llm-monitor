@@ -1472,7 +1472,7 @@ function powerMarkup(presets, state) {
     // No room for the admin-rights paragraph here, so it becomes a lock icon
     // with the explanation in its tooltip.
     const lock = state.elevated ? '' :
-      '<span class="tip pw-lock" tabindex="0" data-tip="' + esc('当前进程没有管理员权限，改不了功耗上限（nvidia-smi -pl 会被系统拒绝）。请关闭本窗口，改用 start_monitor_admin.bat 启动，会弹一次 UAC 确认。') + '">🔒</span>';
+      '<span class="tip pw-lock" tabindex="0" data-tip="' + esc('当前进程没有管理员权限，改不了功耗上限（nvidia-smi -pl 会被系统拒绝）。请关闭本窗口，改用 start_monitor_admin.vbs 启动（双击，会弹一次 UAC 确认）。') + '">🔒</span>';
     const group = state.settable
       ? '<div class="pw-group">' + buttons + '</div>' : '';
     return '<div class="pw-row">' +
@@ -1490,7 +1490,7 @@ function powerMarkup(presets, state) {
     '</div>' +
     (state.elevated ? '' : '<div class="pw-hint">当前进程没有管理员权限，改不了功耗上限' +
       '（<code>nvidia-smi -pl</code> 会被系统拒绝）。' +
-      '请关闭本窗口，改用 <b>start_monitor_admin.bat</b> 启动，会弹一次 UAC 确认。</div>');
+      '请关闭本窗口，改用 <b>start_monitor_admin.vbs</b> 启动（双击，会弹一次 UAC 确认）。</div>');
 }
 
 function applyPowerLimit(watts) {
