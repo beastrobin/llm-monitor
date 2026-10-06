@@ -1,6 +1,6 @@
 # LLM 监控工作台
 
-**当前版本 v1.1** —— 查版本：`python monitor.py --version`，或看面板标题旁的小徽章
+**当前版本 v1.2** —— 查版本：`python monitor.py --version`，或看面板标题旁的小徽章
 （它读的是服务端下发的值，不是页面里写死的）。改动历史见[版本记录](#版本记录)。
 
 本地大模型推理 + 硬件的实时监控面板。**零第三方依赖**——只用 Python 标准库，
@@ -8,8 +8,10 @@ GPU 走 `nvidia-smi`，系统指标走 ctypes 调 Win32 API。
 
 ## 快速开始
 
+双击桌面上的 `monitor` 快捷方式（等价于）：
+
 ```bat
-start_monitor.bat
+wscript.exe start_monitor.vbs
 ```
 
 浏览器打开 <http://127.0.0.1:8090>。
@@ -17,16 +19,24 @@ start_monitor.bat
 想用**功耗控制**（面板上唯一会改机器设置的控件），改用：
 
 ```bat
-start_monitor_admin.bat
+wscript.exe start_monitor_admin.vbs
 ```
 
-它只多做一件事：弹一次 UAC 提权，然后转调 `start_monitor.bat`。原因见
+它只多做一件事：弹一次 UAC 提权，然后转调 `start_monitor.vbs`。原因见
 [显卡功耗控制](#显卡功耗控制)。纯看数据不需要提权。
 
-命令行参数可覆盖配置（两个启动脚本都支持）：
+**为什么是 VBS 而不是 bat。** 这两个脚本从 `wscript.exe`（GUI 子系统）启动，服务用
+`pythonw.exe` 跑 —— 整条链上没有任何控制台。早先用 `.bat` 配 `WScript.Shell.Run(cmd, 0)`
+隐藏窗口，那个窗口样式只有老的 `conhost` 认；Windows 11 默认把新控制台交给
+**Windows Terminal** 托管，样式被忽略，于是双击后会留下一个关不掉的黑窗口。换成
+`wscript.exe` + `pythonw.exe` 之后，没有控制台可以被接管。
+副作用是输出没有地方可看：`pythonw.exe` 下 `stdout` 是空的，所以 `log()` 同时写一份
+`run.log`，排查启动失败先看它。
+
+命令行参数可覆盖配置（原样透传给 `monitor.py`）：
 
 ```bat
-start_monitor.bat --port 8090 --interval 2
+wscript.exe start_monitor.vbs --port 8090 --interval 2
 ```
 
 **重复启动会被拒绝，并且会告诉你为什么。** 服务用 `SO_EXCLUSIVEADDRUSE` 独占端口，
@@ -35,17 +45,19 @@ start_monitor.bat --port 8090 --interval 2
 所以这里显式关掉了。
 
 被挡下时 `monitor.py` 会先问一句占着端口的那份是谁（读它的 `/api/snapshot`），再按结果
-返回不同的退出码，`start_monitor.bat` 据此决定下一步：
+返回不同的退出码。启动器不等待服务（它要活到被 kill 为止），所以这些码只会写进 `run.log`，
+含义是：
 
-| 退出码 | 谁占着端口 | 启动脚本的反应 |
+| 退出码 | 谁占着端口 | 含义 |
 |---|---|---|
-| 1 | — | 真实错误（如 `config.json` 读不了），打印原因后停在窗口里 |
-| 2 | **提权**的面板 | 直接打开浏览器 —— 那份已经能改功耗，不需要第二份 |
-| 3 | **只读**的面板 | 打开浏览器，并停留十几秒让你看清接管用的 `taskkill` 命令 |
-| 4 | 不是面板的其他进程 | **不开浏览器**（那是别的东西），只把诊断留在屏幕上 |
+| 1 | — | 真实错误（如 `config.json` 读不了），原因已写进 `run.log` |
+| 2 | **提权**的面板 | 那份已经能改功耗，不需要第二份 |
+| 3 | **只读**的面板 | 那份只能看；接管要先 `taskkill`，命令写在 `run.log` 里 |
+| 4 | 不是面板的其他进程 | 端口上是别的东西，浏览器不会被打开 |
 
-所以双击 `start_monitor.bat` 而面板其实已经在跑时，你看到的是浏览器里那个面板，而不是
-一句报错。只想确认状态、不想弹窗的话，直接跑 `python monitor.py` 看退出码即可。
+启动器自己也不靠退出码决策：它先用一次 HTTP 探测（走 `WinHttp`，不经过系统代理）判断面板
+是否已经在跑，在跑就直接开浏览器。所以双击快捷方式而面板其实已经在跑时，你看到的是浏览器里
+那个面板，而不是一句报错。只想确认状态、不想开浏览器的话，直接跑 `python monitor.py` 读退出码。
 
 ## 界面
 
@@ -139,7 +151,7 @@ GPU 根本不报这一列（永远 `[N/A]`）。`enforced.power.limit` 是**驱�
 **需要管理员权限。** 这不是本工作台加的限制 —— Windows 上非管理员执行 `nvidia-smi -pl`
 会被直接拒绝，退出码 5（`ERROR_ACCESS_DENIED`），改动根本不会发生。本机实测过：用受限令牌
 （`runas /trustlevel:0x20000`）运行时，连 `--query-gpu` 都返回"拒绝访问"。所以
-`start_monitor.bat` 启动时会做一次权限自检并把结论写进日志；面板上无权限时档位条是禁用的，
+`monitor.py` 启动时会做一次权限自检并把结论写进 `run.log`；面板上无权限时档位条是禁用的，
 并且直接写明该改用哪个脚本启动。
 
 **重启电脑后恢复默认。** nvidia-smi 的设置不持久。要开机自动应用，用任务计划程序
@@ -242,7 +254,7 @@ token，所有速率都算成了"没有数据"。旧版 `stats.json`（v1，没�
 `config.json` **不在仓库里** —— `.gitignore` 把 `*.json` 一并排掉了，因为它按机器而定。直接跑
 `monitor.py` 会顺手生成一份默认配置，但默认配置里 `api_key` 是空的，而 hermes 每次启动都会换
 一个新 key，于是面板会以 401 开场、一个模型都不显示（报错只说 `unauthorized`，看不出是配置问题）。
-正常启动路径不用管这件事：`start_monitor.bat` 会先跑一次 `tools/sync_hermes_key.py`，把 router
+正常启动路径不用管这件事：`start_monitor.vbs` 会先跑一次 `tools/sync_hermes_key.py`，把 router
 当前的 key 与日志路径抄进 `config.json`。手动修也行：
 
 ```bash
@@ -267,14 +279,15 @@ python tools/sync_hermes_key.py --check  # 只报告差异，不动文件
     }
   ],
   "stats": { "enabled": true, "path": "stats.json", "keep_days": 90 },
-  "live": { "enabled": true, "log": "%LOCALAPPDATA%/hermes/logs/llama-server.log" }
+  "live": { "enabled": true, "log": "D:/AI/hermes/logs/llama-server.log" }
 }
 ```
 
 - `api_key_env` 里的环境变量**优先于** `api_key` 字段。不想把密钥留在文件里就设它。
-- `live.log` 是 router 的启动日志，`live` 端点尾随它找出当前模型。默认值由 `%LOCALAPPDATA%`
-  推导而来（hermes 的状态就在那儿），换机器不必改；填错的症状是卡片上写着
-  `router log reports no active model`。
+- `live.log` 是 router 的启动日志，`live` 端点尾随它找出当前模型。**一般不用手填**：启动时
+  `tools/sync_hermes_key.py` 会探测并写回。候选是 `%LOCALAPPDATA%\hermes\logs\llama-server.log`
+  与 `D:\AI\hermes\logs\llama-server.log`，取存在的里面最新的一个；显式配了 `live.log` 且文件
+  在，就以它为准。真配错了也不会只剩一句报错 —— 卡片上会直接写出它找过的位置。
 - 端点可以配多个，router 模式和单模型模式会自动识别。
 - 服务未启动的端点不会拖慢采样，只是显示为离线。
 - `stats.enabled` 设成 `false` 就关掉 token 账本（既不读也不写）；`stats.path` 的相对路径按项目
@@ -283,10 +296,10 @@ python tools/sync_hermes_key.py --check  # 只报告差异，不动文件
 
 ### 怎么拿到 hermes 当前的端口和密钥
 
-hermes 每次启动都会重新分配端口和 api-key，`config.yaml` 里的 `base_url` 不一定是实际值。以启动日志为准：
+hermes 每次启动都会重新分配端口和 api-key，`config.yaml` 里的 `base_url` 不一定是实际值。以启动日志为准（具体路径看面板启动日志里的 `live model log:` 那行）：
 
 ```bash
-grep -- "--api-key" "$LOCALAPPDATA/hermes/logs/llama-server.log" | tail -1
+grep -- "--api-key" "D:/AI/hermes/logs/llama-server.log" | tail -1
 ```
 
 日志里那行 `# spawn: [...]` 同时给出了 `--port` 和 `--api-key`。这件事已由
@@ -321,8 +334,10 @@ loader 起的 server 默认**不带** `/metrics` 端点，需要在 GUI 的 **Ad
    所以报告写完要显式 `process.exit(code)`（用回调形式，先冲 stdout）。
 7. **`config.json` 不进仓库，而它的默认值原本是按开发机写死的**：`api_key` 空着，`live.log`
    指向 `D:/AI/hermes/logs/llama-server.log`。新克隆的副本于是"两个端点都读不到模型"，而页面
-   上的两条报错（`unauthorized` / `no active model`）都看不出问题出在配置上。现在日志路径从
-   `%LOCALAPPDATA%` 推导，key 由 `tools/sync_hermes_key.py` 在每次启动前同步。
+   上的报错都看不出问题出在配置上。这个默认值后来改成从 `%LOCALAPPDATA%` 推导 —— **单一路径的
+   猜法本身就不可靠**：`%LOCALAPPDATA%` 在任何 Windows 上都有，Hermes 却不一定往里写东西，
+   猜错的后果又只是"卡片空白"。现在改成候选列表 + 最新者优先（见 v1.2），key 由
+   `tools/sync_hermes_key.py` 在每次启动前同步。
 8. **`for /f` 的命令集里再嵌一层引号，cmd 会解析错**：启动脚本原本用它探测端口，于是每次启动
    都先打印一行 `'C:\...\python.exe" -c "..."' is not recognized`（探测因此永远失败）。
    直接调用、看退出码就够了。
@@ -348,8 +363,9 @@ llm-monitor/
 │   └── sync_hermes_key.py     # 把 router 当前的 port / api-key 抄进 config.json
 ├── config.json
 ├── stats.json                 # token 账本数据（自动生成）
-├── start_monitor.bat          # 普通启动（功耗控制只读）
-└── start_monitor_admin.bat    # 提权启动（解锁功耗控制）
+├── run.log                    # 启动与运行日志（自动生成；pythonw 下唯一可读的输出）
+├── start_monitor.vbs          # 普通启动（功耗控制只读）
+└── start_monitor_admin.vbs    # 提权启动（解锁功耗控制）
 ```
 
 ### 渲染烟测
@@ -447,12 +463,47 @@ HTTP 接口：
   只在菜单确实来自标定表时才附加显示。
 
 **密钥轮换不再要人工干预。** 新增 `tools/sync_hermes_key.py`：从 router 日志抓当前的
-`--port` / `--api-key` 写回 `config.json`（幂等、原子写、输出掩码）。两个启动脚本在启动前
-都会先跑一次，hermes 重启换了密钥，双击 bat 就自动接上，不会再卡在 401。
+`--port` / `--api-key` 写回 `config.json`（幂等、原子写、输出掩码）。启动脚本在启动前
+会先跑一次，hermes 重启换了密钥，双击快捷方式就自动接上，不会再卡在 401。
 
-**另外两处修复**：`DEFAULT_LIVE_LOG` 改为从 `%LOCALAPPDATA%` 推导，不再写死某台机器的
-`D:/AI/hermes/...`；两个 `.bat` 的端口探测里嵌套引号会让 `for /f` 每次都失败、并多打印一行
+**另外两处修复**：`DEFAULT_LIVE_LOG` 由写死某台机器的 `D:/AI/hermes/...` 改为从
+`%LOCALAPPDATA%` 推导（这个猜法本身不够稳，v1.2 已换成候选列表 + 最新者优先）；当初的两个
+`.bat`（现已由 VBS 启动器取代）端口探测里嵌套引号会让 `for /f` 每次都失败、并多打印一行
 "系统找不到文件"。
+
+### v1.2 — 2026-10-06
+
+**启动器重写，双击不再留下黑窗口。** 旧的两个 `.bat` 用 `WScript.Shell.Run(cmd, 0)` 隐藏
+python 的控制台，而那个窗口样式只对 `conhost` 生效 —— Windows 11 把新控制台默认交给
+**Windows Terminal** 托管，样式被忽略。表现是：`git pull` 停掉旧实例后再双击，留下一个
+标题为 `monitor`、没有子进程、关不掉的 WT 窗口（关掉服务不会跟着停，因为服务早就不在里头了）。
+
+- `start_monitor.bat` / `start_monitor_admin.bat` 换成 `start_monitor.vbs` /
+  `start_monitor_admin.vbs`：入口是 `wscript.exe`，服务是 `pythonw.exe`，全程无控制台。
+- 端口探测不再用 `for /f` 跑一次解释器，改用 `WinHttp` 直接请求 `/api/snapshot`
+  （不经过系统代理，代理开着也不会误判成"没在跑"而启动第二份）。
+- 命令行参数（`--port` / `--interval` 等）原样透传给 `monitor.py`。
+- `log()` 现在同时写 `run.log`（超过 1 MB 从头写起），因为 `pythonw.exe` 下 `stdout` 是
+  `None`，不落盘的话窗口less 启动失败后没有任何线索。
+- `monitor.py` 与 `tools/sync_hermes_key.py` 在入口处给 `None` 的 `stdout` / `stderr`
+  补一个 sink：`pythonw.exe` 下 argparse 会在 `main()` 之前就写 stdout 并抛错。
+
+**模型卡片不再静默空白。** 面板"当前模型"一栏的数据全靠 `live` 端点尾随 router 日志；日志
+路径一旦猜错，整栏就是空的，而且**页面上没有任何东西说明为什么** —— 看起来和"服务挂了"
+一模一样，只有 `run.log` 才知道区别。
+
+- `DEFAULT_LIVE_LOG` 从单一路径改成候选列表（`%LOCALAPPDATA%\hermes\logs\llama-server.log`、
+  `D:\AI\hermes\logs\llama-server.log`），由 `resolve_live_log()` 挑：`live.log` 显式配了且
+  文件在就听它，否则取存在的候选里**最新的那个**（同时装了 desktop 和 CLI 的机器上，只有正在
+  被写入的那份能说出当前模型）。启动日志写明选了哪条、为什么。
+- 空白卡片现在会自己解释：日志不在 → 显示它找过的路径；日志在但尾部没有模型请求 → 说清；
+  router 报过模型而端口已无人应答 → 直接把模型名和端口写在卡片上。
+- 合并逻辑修正：router 与它按需派生的子进程共用一个 `id`，此前"子进程不在"被当成整个来源
+  离线 —— 于是健康的 router 显示成 `:57740 离线`，端口还是那个已经退出的进程的。现在任一端口
+  应答即在线，名字与端口跟着真正在应答的那个走。
+- `tools/sync_hermes_key.py` 改用同一套解析，并且在 **`config.json` 里根本没有 `live` 段**时
+  也按有效默认值比对再回写 —— 旧版本写出的 `config.json` 正是这种情况，原先的漏洞恰好会在
+  有问题的机器上被跳过。
 
 ### v1.0
 

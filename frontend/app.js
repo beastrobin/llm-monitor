@@ -685,6 +685,40 @@ function endpointChip(endpoint) {
     '</span>';
 }
 
+// Why the live probe found nothing, said in the panel's own words.
+//
+// The empty model card is the most confusing state this dashboard has: it looks
+// identical whether no model is loaded, the router log moved, or the path in
+// config.json never existed at all.  Only the collector knows which, so its
+// reason code and the path it actually opened both go on screen -- otherwise
+// the answer lives in run.log and the card just looks broken.
+const LIVE_REASON = {
+  'log missing': '日志文件不存在',
+  'log empty': '日志是空的',
+  'log unreadable': '日志读不出来',
+  'no proxy line in tail': '日志尾部没有模型请求记录',
+};
+
+function liveNote(endpoint) {
+  if (!endpoint || !endpoint.error) return '';
+  if (endpoint.error === 'router log reports no active model') {
+    const why = LIVE_REASON[endpoint.log_reason] || endpoint.log_reason || '原因未知';
+    const where = endpoint.log_path
+      ? '；查找位置 <code>' + esc(endpoint.log_path) + '</code>'
+      : '';
+    return '<div class="err">未在 router 日志里找到当前模型：' + esc(why) + where + '</div>';
+  }
+  // The router named a model but nothing answers on that port any more -- the
+  // normal state right after a model is unloaded, and otherwise indistinguishable
+  // from a broken panel.
+  if (endpoint.target_model) {
+    return '<div class="err">router 日志里最后一次请求的模型是 <code>' +
+      esc(endpoint.target_model) + '</code>（:' + esc(endpoint.target_port) +
+      '），但该端口现在没人应答 —— 模型已卸载或正在加载。发一次请求后这里会出现实时指标。</div>';
+  }
+  return '<div class="err">' + esc(endpoint.error) + '</div>';
+}
+
 const MODEL_SPECS = [
   cardSpec('decode', '生成速度', {
     bar: true,
@@ -941,55 +975,68 @@ function renderEndpoints(snapshot) {
   // model card leads, and every source (router / loader / spawned child) is
   // reduced to one status chip instead of its own card.
   const live = endpoints.find(function (e) { return e.live; }) || null;
-  const ordered = live
-    ? [live].concat(endpoints.filter(function (e) { return !e.live; }))
-    : endpoints;
-  // Merge endpoints that share the same id (e.g. hermes router + hermes-live).
-  // The live endpoint carries real metrics; the router carries preset metadata.
-  // Together they become one endpoint with one combined model list.
-  // After merging, live flag is cleared — the distinction was internal, not
-  // something the dashboard should display as a separate label.
-  // Router endpoints (non-live) come first in `ordered`, so their label wins.
-  const merged = {};
-  ordered.forEach(function (e) {
-    if (!merged[e.id]) {
-      merged[e.id] = {
-        id: e.id, label: e.label, base_url: e.base_url, up: e.up, live: !!e.live,
-        models: [], error: e.error, backing_off: e.backing_off,
-        polled_at: e.polled_at, mode: e.mode,
-      };
-    } else {
-      // Merge: union of models, error kept; live flag wins for up status
-      if (e.live) merged[e.id].live = true;
-      if (e.error && !merged[e.id].error) merged[e.id].error = e.error;
-      if (e.base_url && !merged[e.id].base_url) merged[e.id].base_url = e.base_url;
-      // Label: prefer the non-live (router/loader) label over "Hermes 当前模型"
-      if (e.label && !merged[e.id].label && !e.live) merged[e.id].label = e.label;
-    }
-    (e.models || []).forEach(function (m) {
-      // Avoid duplicate models by id across endpoints
-      var already = merged[e.id].models.some(function (mm) { return mm.id === m.id; });
-      if (already) {
-        // The router's model record carries preset metadata (e.g. mtp_type
-        // from launch args) that a live child cannot report — backfill it
-        // into the merged record so tags match the running server.
-        merged[e.id].models.forEach(function (mm) {
-          if (mm.id !== m.id) return;
-          if (m.mtp_enabled) mm.mtp_enabled = true;
-          if (m.mtp_type && (!mm.mtp_type || mm.mtp_type === 'none')) mm.mtp_type = m.mtp_type;
-        });
-        return;
-      }
-      merged[e.id].models.push(m);
-    });
+  // Endpoints that share an id (hermes router + the child the router spawned)
+  // fold into one source: the live endpoint carries real metrics, the router
+  // carries preset metadata, and together they make one combined model list.
+  //
+  // The two are not equal partners, though.  The spawned child exists only
+  // while a model is loaded, so its "connection refused" is the idle state
+  // rather than a failure -- reading it as the source's own status made a
+  // perfectly healthy router show up as 离线, named after a process that had
+  // already exited.  So the source is up when *any* of its endpoints answers,
+  // and its identity (label, port) follows the one with something to show.
+  const byId = {};
+  endpoints.forEach(function (e) {
+    (byId[e.id] = byId[e.id] || []).push(e);
   });
-  // After merging, clear the live flag — the distinction was internal, not
-  // something the dashboard should display as a separate label.
-  Object.keys(merged).forEach(function (k) { merged[k].live = false; });
-  const deduped = Object.keys(merged).map(function (k) { return merged[k]; });
+  const deduped = Object.keys(byId).map(function (id) {
+    const list = byId[id];
+    const livePart = list.find(function (e) { return e.live; }) || null;
+    // A live child leads only while it has a model to show; a model loaded
+    // elsewhere in the meantime would otherwise be described by a dead port.
+    const primary = (livePart && (livePart.models || []).length ? livePart : null) ||
+      list.find(function (e) { return !e.live; }) || livePart || list[0];
+    const out = {
+      id: id,
+      label: primary.label,
+      base_url: primary.base_url,
+      up: list.some(function (e) { return e.up; }),
+      live: false,  // internal distinction, never a label of its own
+      models: [],
+      error: null,
+      backing_off: list.some(function (e) { return e.backing_off; }),
+      polled_at: primary.polled_at,
+      mode: primary.mode,
+    };
+    list.forEach(function (e) {
+      if (e.error && !out.error) out.error = e.error;
+    });
+    list.forEach(function (e) {
+      (e.models || []).forEach(function (m) {
+        // Avoid duplicate models by id across endpoints
+        const already = out.models.some(function (mm) { return mm.id === m.id; });
+        if (already) {
+          // The router's model record carries preset metadata (e.g. mtp_type
+          // from launch args) that a live child cannot report — backfill it
+          // into the merged record so tags match the running server.
+          out.models.forEach(function (mm) {
+            if (mm.id !== m.id) return;
+            if (m.mtp_enabled) mm.mtp_enabled = true;
+            if (m.mtp_type && (!mm.mtp_type || mm.mtp_type === 'none')) mm.mtp_type = m.mtp_type;
+          });
+          return;
+        }
+        out.models.push(m);
+      });
+    });
+    return out;
+  });
   const active = deduped.find(function (e) { return (e.models || []).length; }) || null;
+  // The reason line belongs in the signature too: a wrong log path changes
+  // nothing else on screen, so without it the card would keep its first
+  // explanation for the rest of the run.
   const signature = deduped.map(function (e) {
-    return e.id + '@' + e.up + '#' + modelSignature(e);
+    return e.id + '@' + e.up + '#' + modelSignature(e) + '!' + (e.error || '');
   }).join('|');
 
   // The source chips live in the section head (right-aligned), so they are
@@ -1020,8 +1067,9 @@ function renderEndpoints(snapshot) {
     const empty = !active
       ? '<div class="empty">当前没有已加载的模型 —— 服务在线时指标会自动出现在这里。</div>'
       : '';
+    const note = liveNote(live);
     container.innerHTML = '<div class="endpoint is-live" data-endpoint="' + esc(active ? active.id : 'none') + '">' +
-      hero + empty +
+      hero + empty + note +
       '<div data-role="models" data-hero-model="' + esc(heroModel ? heroModel.id : '') + '"></div>' +
       '</div>';
   }

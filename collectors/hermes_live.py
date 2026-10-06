@@ -47,6 +47,11 @@ class LiveEndpoint(object):
         self.base_url = None
         self._target = None
         self._delegate = None
+        # Why the last read found nothing, kept in one of a few fixed codes so
+        # the dashboard can name which of three very different causes it is: a
+        # log that is not where we looked, a log with nothing in it, or a log
+        # whose newest request names a model the router has since unloaded.
+        self.log_reason = ""
         # Discover once up front so the startup log already names the port.
         target = self._read_target()
         if target is not None:
@@ -72,14 +77,17 @@ class LiveEndpoint(object):
         try:
             size = self.log_path.stat().st_size
         except OSError:
+            self.log_reason = "log missing"
             return None
         if size <= 0:
+            self.log_reason = "log empty"
             return None
         try:
             with open(self.log_path, "rb") as fh:
                 fh.seek(max(0, size - TAIL_BYTES))
                 chunk = fh.read().decode("utf-8", errors="replace")
         except OSError:
+            self.log_reason = "log unreadable"
             return None
         # The first line of the tail can be cut in half; a partial line either
         # still carries a full match or simply does not, so scanning all lines
@@ -89,6 +97,7 @@ class LiveEndpoint(object):
             match = PROXY_RE.search(line)
             if match:
                 target = (match.group(1).strip(), int(match.group(2)))
+        self.log_reason = "" if target is not None else "no proxy line in tail"
         return target
 
     def _offline(self, error):
@@ -100,6 +109,11 @@ class LiveEndpoint(object):
             "mode": None,
             "models": [],
             "error": error,
+            # Carried so the panel can show where it looked.  The whole class of
+            # "the model card is empty" bugs is a wrong path, and a reader can
+            # only tell that from an empty card if the path is on screen.
+            "log_path": str(self.log_path),
+            "log_reason": self.log_reason,
             "backing_off": False,
             "live": True,
             "polled_at": time.time(),
@@ -118,5 +132,12 @@ class LiveEndpoint(object):
         # /v1/models does not expose it under a stable key.
         if result.get("up") and result.get("models"):
             result["models"][0]["id"] = self._target[0]
+        # Hand the panel the target as well as the verdict.  When the log names
+        # a model but nothing answers on its port, "which model the router last
+        # used" is the whole explanation, and the child's own error string
+        # ("connection refused") cannot supply it.
+        result["target_model"] = self._target[0]
+        result["target_port"] = self._target[1]
+        result["log_path"] = str(self.log_path)
         result["live"] = True
         return result

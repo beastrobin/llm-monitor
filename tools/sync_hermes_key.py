@@ -9,8 +9,8 @@ router prints what it chose in its own startup line::
     #          '--api-key', 'XXX', '--models-max', '1', ...]
 
 This helper reads the newest such line and writes the pair into the endpoint
-that points at that port, so start_monitor.bat can call it before every launch
-and the key never has to be fixed by hand again.
+that points at that port, so the launcher can call it before every start and the
+key never has to be fixed by hand again.
 
 Deliberately quiet and idempotent: an unchanged key means no write, a missing
 log means no write, and the config is only ever replaced through a temp file.
@@ -34,6 +34,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import monitor  # noqa: E402  -- DEFAULT_CONFIG keeps one source of truth
+
+# The launcher starts this through pythonw.exe, which has no console at all and
+# leaves sys.stdout and sys.stderr as None.  Every print() below would raise on
+# that account, before the config it exists to update had been written.
+for _stream_name in ("stdout", "stderr"):
+    if getattr(sys, _stream_name) is None:
+        setattr(sys, _stream_name, open(os.devnull, "w", encoding="utf-8"))
+del _stream_name
 
 # The startup line, and the argv pairs inside it.  The list is a Python repr,
 # so the quotes around each element are whatever the writing interpreter felt
@@ -154,13 +162,20 @@ def sync(config, port, api_key, log_path, apply=True):
     # one machine's absolute path.  Repoint it only when the configured path is
     # gone and the real one is there, so a deliberate override is left alone.
     live = config.get("live")
-    if isinstance(live, dict):
-        configured = Path(str(live.get("log") or ""))
-        if log_path.exists() and str(configured) != str(log_path) \
-                and not configured.exists():
-            changes.append("live.log: %s -> %s" % (configured, log_path))
-            if apply:
-                live["log"] = str(log_path)
+    if not isinstance(live, dict):
+        # A config.json written before the live endpoint existed carries no
+        # section for it, and the dashboard quietly falls back to
+        # DEFAULT_CONFIG for the value.  The repoint has to consider that same
+        # effective path, or the stale default survives on exactly the machines
+        # that have it -- which is how the model card stayed empty.
+        live = copy.deepcopy(monitor.DEFAULT_CONFIG.get("live") or {})
+        config["live"] = live
+    configured = Path(str(live.get("log") or ""))
+    if log_path.exists() and str(configured) != str(log_path) \
+            and not configured.exists():
+        changes.append("live.log: %s -> %s" % (configured, log_path))
+        if apply:
+            live["log"] = str(log_path)
 
     return changes
 
@@ -169,13 +184,19 @@ def main():
     parser = argparse.ArgumentParser(
         description="Copy the running router's port and api-key into config.json")
     parser.add_argument("--config", default=str(monitor.CONFIG_PATH))
-    parser.add_argument("--log", default=monitor.DEFAULT_LIVE_LOG)
+    parser.add_argument("--log", default=None,
+                        help="router log to read (default: the first one that exists)")
     parser.add_argument("--check", action="store_true",
                         help="report what would change, write nothing")
     args = parser.parse_args()
 
     config_path = Path(args.config)
-    log_path = Path(args.log)
+    # The router log is not in the same place on every install, and a wrong
+    # guess here fails silently: read_spawn finds nothing, the sync reports "no
+    # source", and the panel keeps a key the router has already rotated away
+    # from.  So borrow the same resolution the dashboard itself uses rather
+    # than pinning one machine's layout.
+    log_path = Path(args.log) if args.log else monitor.resolve_live_log()[0]
 
     try:
         config, existed = load_config(config_path)

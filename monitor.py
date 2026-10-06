@@ -32,24 +32,74 @@ from collectors import gpu, power, stats, system
 from collectors.llama import LlamaEndpoint
 from collectors.hermes_live import LiveEndpoint
 
+# The desktop launcher starts this through pythonw.exe, which has no console at
+# all and therefore leaves sys.stdout and sys.stderr as None.  argparse writes
+# to stdout for --help and --version before main() is ever reached, so a bare
+# run would die on the first line instead of doing something diagnosable.  Give
+# both a sink once, here; log() keeps its own durable copy in run.log.
+for _stream_name in ("stdout", "stderr"):
+    if getattr(sys, _stream_name) is None:
+        setattr(sys, _stream_name, open(os.devnull, "w", encoding="utf-8"))
+del _stream_name
+
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.1"
+VERSION = "1.2"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
-# only place an outside reader learns any of it.  Hermes keeps its state under
-# %LOCALAPPDATA% on Windows, so the default is derived from the environment
-# instead of baked to one machine's drive layout: a fresh clone elsewhere would
-# otherwise start out pointing at a directory that does not exist and report
-# "no active model" with nothing to explain why.
+# only place an outside reader learns any of it.  Hermes does not keep that log
+# in one fixed place: a desktop install parks its state under %LOCALAPPDATA%,
+# while a CLI install keeps it wherever it was unpacked.  So the default is a
+# list of candidates rather than a single path -- %LOCALAPPDATA% exists on every
+# Windows box whether or not Hermes ever put anything there, and deriving from
+# it alone left the model card empty with nothing on screen to explain why.
+# resolve_live_log picks between them; see its docstring for the rule.
 _LOCAL_APPDATA = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-DEFAULT_LIVE_LOG = str(Path(_LOCAL_APPDATA) / "hermes" / "logs" / "llama-server.log")
+LIVE_LOG_CANDIDATES = (
+    Path(_LOCAL_APPDATA) / "hermes" / "logs" / "llama-server.log",
+    Path("D:/AI/hermes/logs/llama-server.log"),
+)
+# What config.json is seeded with.  The resolver, not this string, decides.
+DEFAULT_LIVE_LOG = str(LIVE_LOG_CANDIDATES[0])
+
+
+def resolve_live_log(configured=None):
+    """The router log to follow, and a one-line reason for the choice.
+
+    An explicit ``live.log`` in config.json wins outright whenever that file is
+    there -- the operator named it.  Otherwise take the candidates that exist,
+    and when several do (a box carrying both a desktop and a CLI install) the
+    newest one wins: the log being appended to is the only one that can name the
+    model being served right now.  With none, hand back the configured path and
+    say so; the collector degrades to "no active model" on its own, and the
+    reason rides along to the log and the panel so the guess is never silent.
+    """
+    if configured:
+        path = Path(configured)
+        if path.is_file():
+            return path, "configured in live.log"
+    found = []
+    for candidate in LIVE_LOG_CANDIDATES:
+        try:
+            found.append((candidate.stat().st_mtime, candidate))
+        except OSError:
+            continue
+    if found:
+        found.sort(key=lambda item: item[0], reverse=True)
+        return found[0][1], "newest of %d candidate(s) on disk" % len(found)
+    return Path(configured or DEFAULT_LIVE_LOG), "no candidate exists -- tried " + \
+        ", ".join(str(c) for c in LIVE_LOG_CANDIDATES)
 
 ROOT = Path(__file__).resolve().parent
 FRONTEND = ROOT / "frontend"
 CONFIG_PATH = ROOT / "config.json"
+LOG_PATH = ROOT / "run.log"
+
+# A rolling window onto the tail of the output, not an archive: a windowless
+# launch has nothing else to read afterwards, and it must not grow without end.
+MAX_LOG_BYTES = 1 << 20
 
 HISTORY_LEN = 900
 KEEPALIVE_SECONDS = 25.0
@@ -107,8 +157,26 @@ CONTENT_TYPES = {
 
 
 def log(message):
-    sys.stdout.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), message))
-    sys.stdout.flush()
+    """Timestamped line to the console, and always to run.log.
+
+    The console copy is what a hand-run in a terminal keeps.  run.log is the
+    copy that matters for the launched path: pythonw.exe has no console, so
+    without it a windowless start would leave nothing behind to read when the
+    dashboard fails to appear.
+    """
+    line = "[%s] %s\n" % (time.strftime("%H:%M:%S"), message)
+    try:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        pass
+    try:
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size > MAX_LOG_BYTES:
+            LOG_PATH.write_text("", encoding="utf-8")
+        with open(LOG_PATH, "a", encoding="utf-8") as handle:
+            handle.write(line)
+    except OSError:
+        pass
 
 
 def _probe_existing(host, port):
@@ -236,9 +304,13 @@ class Hub(object):
         self.config = config
         self.endpoints = [LlamaEndpoint(spec) for spec in config["endpoints"]]
         live = config.get("live") or {}
+        # Resolved once at startup, not per sample: the choice depends on which
+        # files exist, and re-deciding it every two seconds would follow a log
+        # to wherever it happened to be mid-rotation.
+        self.live_log, self.live_log_reason = None, ""
         if live.get("enabled", True):
-            self.endpoints.append(LiveEndpoint(
-                live.get("log") or DEFAULT_LIVE_LOG))
+            self.live_log, self.live_log_reason = resolve_live_log(live.get("log"))
+            self.endpoints.append(LiveEndpoint(self.live_log))
         self.system = system.SystemCollector()
         self.collect_gpu = bool(config["gpu"].get("enabled", True))
         self.collect_host = bool(config["system"].get("enabled", True))
@@ -797,7 +869,10 @@ def main():
         log("power limit control: read-only -- nvidia-smi -pl needs an "
             "elevated token; start via start_monitor_admin.bat to enable it")
     for endpoint in hub.endpoints:
-        log("watching %s -> %s" % (endpoint.id, endpoint.base_url))
+        log("watching %s -> %s" % (
+            endpoint.id, endpoint.base_url or getattr(endpoint, "log_path", None)))
+    if hub.live_log is not None:
+        log("live model log: %s (%s)" % (hub.live_log, hub.live_log_reason))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
