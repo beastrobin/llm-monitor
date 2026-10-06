@@ -49,7 +49,17 @@ del _stream_name
 SPAWN_RE = re.compile(r"^#\s*spawn:\s*(\[.*\])\s*$")
 ARGV_RE = re.compile(r"[\"'](--[a-z0-9-]+)[\"']\s*,\s*[\"']([^\"']*)[\"']")
 
-TAIL_BYTES = 256 * 1024
+# How far back to look for the newest spawn line, tried in this order; the search
+# stops at the first window that holds one, and the last entry (None) reads from
+# the start of the file.  The dashboard's collector tails a fixed 256 KB because
+# it re-reads this file every two seconds, and this script runs once per launch,
+# so it can afford to keep widening.  A fixed tail is not enough here: hermes
+# writes a spawn line per model load, so a few hundred KB of request traffic
+# after the last load pushes the newest one outside it -- and a miss is silent,
+# leaving the panel holding a key the router has already rotated away from.  The
+# last resort costs a full read, which this log has earned: ~2 MB a day in
+# practice, on an action the operator took by hand.
+SPAWN_WINDOWS = (256 * 1024, 1024 * 1024, 4 * 1024 * 1024, None)
 
 EXIT_OK = 0
 EXIT_NO_SOURCE = 1
@@ -59,8 +69,11 @@ EXIT_CHANGED = 1  # --check only: something would have been written
 def read_spawn(log_path):
     """The newest (port, api_key) the router announced, or (None, None).
 
-    The tail is read rather than the whole file: the log grows without bound
-    (one line per proxied request) and only the newest spawn line matters.
+    The file grows without bound (one line per proxied request) and only the
+    newest spawn line matters, so the search starts at the tail and widens only
+    as far as it has to.  See SPAWN_WINDOWS for why one fixed tail is not
+    enough.  Reaching the end of the list means the whole file was read, so a
+    miss from here is the real thing: no spawn line anywhere in it.
     """
     try:
         size = log_path.stat().st_size
@@ -68,18 +81,25 @@ def read_spawn(log_path):
         return None, None
     if size <= 0:
         return None, None
-    try:
-        with open(log_path, "rb") as handle:
-            handle.seek(max(0, size - TAIL_BYTES))
-            chunk = handle.read().decode("utf-8", errors="replace")
-    except OSError:
-        return None, None
 
     spawn = None
-    for line in chunk.splitlines():
-        match = SPAWN_RE.match(line.strip())
-        if match:
-            spawn = match.group(1)
+    for window in SPAWN_WINDOWS:
+        start = 0 if window is None else max(0, size - window)
+        try:
+            with open(log_path, "rb") as handle:
+                handle.seek(start)
+                chunk = handle.read().decode("utf-8", errors="replace")
+        except OSError:
+            return None, None
+        # A window can open mid-line.  A half line simply does not match, and it
+        # cannot be the newest spawn anyway, so scanning every line and keeping
+        # the last hit is right at any window size.
+        for line in chunk.splitlines():
+            match = SPAWN_RE.match(line.strip())
+            if match:
+                spawn = match.group(1)
+        if spawn is not None or start == 0:
+            break
     if spawn is None:
         return None, None
 
@@ -206,7 +226,10 @@ def main():
 
     port, api_key = read_spawn(log_path)
     if not api_key:
-        print("no '# spawn:' api-key in %s -- leaving %s alone"
+        # read_spawn widens to the start of the file before giving up, so this
+        # is not a window that was too small: the router has not announced a
+        # spawn since this log began.
+        print("no '# spawn:' api-key anywhere in %s -- leaving %s alone"
               % (log_path, config_path.name))
         return EXIT_NO_SOURCE
 
