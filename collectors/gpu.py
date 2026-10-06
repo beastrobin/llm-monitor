@@ -8,6 +8,7 @@ VRAM attribution comes from ``--query-compute-apps``: that reports the actual
 compute tenants on the card instead of guessing from a total.
 """
 
+import math
 import os
 import subprocess
 import time
@@ -25,11 +26,25 @@ GPU_FIELDS = [
     ("memory.total", "mem_total_mb", float),
     ("temperature.gpu", "temp_c", float),
     ("power.draw", "power_w", float),
-    ("power.limit", "power_limit_w", float),
+    # Two different numbers, and the dashboard needs both.
+    #
+    # ``power.limit`` is the *software* limit -- the one ``nvidia-smi -pl``
+    # writes.  Laptop GPUs do not report it at all: they answer ``[N/A]`` and
+    # hand the ceiling to Dynamic Boost instead, so a dashboard that only reads
+    # this column shows an empty power bar and "limit -" on every laptop.
+    # ``enforced.power.limit`` is the ceiling the power management algorithm is
+    # actually holding right now, and it is readable everywhere -- on a 5090
+    # Laptop it moves around 110-135 W inside a 175 W maximum.
+    ("power.limit", "power_requested_w", float),
+    ("enforced.power.limit", "power_enforced_w", float),
     # The min/max pair drives the power-limit control: the UI needs to know
     # which presets this particular card will actually accept.
     ("power.min_limit", "power_min_w", float),
     ("power.max_limit", "power_max_w", float),
+    # Optional column, kept out of POWER_FIELDS on purpose: it is context for
+    # the control ("factory default 95 W"), not something the write path needs,
+    # so a driver that rejects it costs the readout nothing.
+    ("power.default_limit", "power_default_w", float),
     ("fan.speed", "fan_pct", float),
     ("clocks.sm", "clock_sm_mhz", float),
     ("clocks.mem", "clock_mem_mhz", float),
@@ -37,11 +52,34 @@ GPU_FIELDS = [
     ("pcie.link.width.current", "pcie_width", str),
 ]
 
-# Fallback for drivers that reject one of the optional fields above.
+# Fallback ladder for drivers that reject one of the optional columns above: a
+# single unsupported column fails the whole query, so each rung trades away
+# detail rather than the whole card.  The power group is the rung that matters
+# most, because it is what the only write on this server is validated against.
 BASE_FIELDS = {
     "index", "name", "utilization.gpu", "memory.used", "memory.total",
     "temperature.gpu", "power.draw",
 }
+POWER_FIELDS = {
+    "power.draw", "power.limit", "enforced.power.limit",
+    "power.min_limit", "power.max_limit",
+}
+
+
+def _ladders():
+    """Field lists to try in order: everything, then the power group, then base."""
+    def keep(names):
+        return [field for field in GPU_FIELDS if field[0] in names]
+
+    ladders = [GPU_FIELDS, keep(BASE_FIELDS | POWER_FIELDS), keep(BASE_FIELDS)]
+    unique, seen = [], set()
+    for ladder in ladders:
+        signature = tuple(field[0] for field in ladder)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique.append(ladder)
+    return unique
 
 
 def _run(args, timeout=6.0):
@@ -60,9 +98,14 @@ def _to_number(raw, cast):
     if not text or text.upper() in ("N/A", "[N/A]", "[NOT SUPPORTED]"):
         return None
     try:
-        return cast(text)
+        value = cast(text)
     except (TypeError, ValueError):
         return None
+    # JSON has no NaN literal and the browser's parser rejects one, so a
+    # non-finite reading would take the whole panel down instead of one card.
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
 
 
 def _query_gpus(timeout=6.0):
@@ -73,15 +116,14 @@ def _query_gpus(timeout=6.0):
             "--format=csv,noheader,nounits",
         ]
 
-    rc, out = _run(build(GPU_FIELDS), timeout)
+    rc, out, fields = 0, "", GPU_FIELDS
+    for ladder in _ladders():
+        rc, out = _run(build(ladder), timeout)
+        if rc == 0:
+            fields = ladder
+            break
     if rc != 0:
-        fallback = [f for f in GPU_FIELDS if f[0] in BASE_FIELDS]
-        rc, out = _run(build(fallback), timeout)
-        if rc != 0:
-            return None, "nvidia-smi failed (rc=%s)" % rc
-        fields = fallback
-    else:
-        fields = GPU_FIELDS
+        return None, "nvidia-smi failed (rc=%s)" % rc
 
     gpus = []
     for line in out.splitlines():
@@ -93,7 +135,14 @@ def _query_gpus(timeout=6.0):
             continue
         # Pre-seed the keys the dashboard reads unconditionally, so a fallback
         # query that drops optional columns still yields a consistent shape.
-        gpu = {"mem_ratio": None, "power_min_w": None, "power_max_w": None}
+        gpu = {
+            "mem_ratio": None,
+            "power_requested_w": None,
+            "power_enforced_w": None,
+            "power_min_w": None,
+            "power_max_w": None,
+            "power_default_w": None,
+        }
         for (_, key, cast), raw in zip(fields, parts):
             gpu[key] = _to_number(raw, cast)
         used, total = gpu.get("mem_used_mb"), gpu.get("mem_total_mb")

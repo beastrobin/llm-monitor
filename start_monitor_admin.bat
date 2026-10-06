@@ -11,15 +11,27 @@ if not defined PY (
 )
 
 rem --- probe: is the dashboard already listening? ---
+rem A plain invocation, not a for /f loop: nesting this quoted command inside
+rem a loop's command set makes cmd misparse the interpreter path, and every
+rem launch printed 'C:\...\python.exe" -c "..."' is not recognized.  The exit
+rem code already answers the only question being asked here.
 set "PROBE_OK="
 if defined PY (
-  for /f "tokens=*" %%H in (
-    "%PY%" -c "import urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:8090/api/snapshot').read()" 2^>nul
-  ) do ( set "PROBE_OK=1" & goto :probe_done )
+  "%PY%" -c "import urllib.request; urllib.request.build_opener(urllib.request.ProxyHandler({})).open('http://127.0.0.1:8090/api/snapshot', timeout=3).read()" >nul 2>&1
+  if not errorlevel 1 set "PROBE_OK=1"
 )
-:probe_done
 
 if defined PROBE_OK goto :already_running
+
+rem --- adopt the api-key the router generated when it started ---
+rem Hermes regenerates its key on every start, so a config.json left over from
+rem an earlier run would answer 401 and the dashboard would show no models.
+rem Best-effort by design: if the helper cannot find the router's log it
+rem leaves the config alone, and the dashboard reports the 401 exactly as it
+rem did before.
+if defined PY (
+  if exist "tools\sync_hermes_key.py" "%PY%" "tools\sync_hermes_key.py" >nul 2>&1
+)
 
 rem --- elevated restart if needed ---
 net session >nul 2>&1

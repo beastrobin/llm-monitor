@@ -255,6 +255,16 @@ main {
   white-space: nowrap;
 }
 
+/* The live half of the row: what the card draws now and the ceiling it is
+   holding.  Sits next to the buttons, and keeps its width so the samples
+   ticking underneath it do not make the row jitter. */
+.pw-live {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .pw-hint {
   margin-top: 8px;
   padding: 9px 12px;
@@ -293,6 +303,7 @@ main {
   border-radius: 6px;
 }
 .power-control.top .pw-watts { font-size: 11.5px; line-height: 1.2; }
+.power-control.top .pw-live { font-size: 11px; }
 .power-control.top .pw-status { font-size: 11px; margin-left: auto; }
 .pw-lock {
   display: inline-flex;

@@ -29,6 +29,20 @@ function num(v, digits) {
   return Number(v).toFixed(digits === undefined ? 1 : digits);
 }
 
+// First argument that is actually a number.  The driver reports several power
+// columns as [N/A] -- which arrives here as null -- and one of them standing in
+// for the other is the whole reason this exists: falling back must not treat a
+// missing reading as a zero.
+function firstNumber() {
+  for (let i = 0; i < arguments.length; i += 1) {
+    const value = arguments[i];
+    if (value !== null && value !== undefined && !Number.isNaN(Number(value))) {
+      return Number(value);
+    }
+  }
+  return null;
+}
+
 function pct(v, digits) {
   if (v === null || v === undefined || Number.isNaN(v)) return '—';
   return (Number(v) * 100).toFixed(digits === undefined ? 1 : digits) + '%';
@@ -1050,8 +1064,10 @@ const SYS_SPECS = [
   }),
   cardSpec('power', '功耗', {
     bar: true,
-    tip: '当前功耗 ÷ 功耗上限。接近上限说明这张卡已经在全力跑。' +
-      '下方就是功耗档位切换。',
+    tip: '当前功耗 ÷ 功耗上限。上限优先取软件功耗墙（nvidia-smi -pl 写进去的那个）；' +
+      '笔记本 GPU 根本不上报软件墙，那里显示的是驱动实际生效的上限，' +
+      '由 Dynamic Boost 在最大 TGP 之内动态调整，所以会在一个区间里浮动。' +
+      '接近上限说明这张卡已经在全力跑。下方就是功耗档位切换。',
   }),
   cardSpec('cpu', 'CPU 负载', {
     bar: true,
@@ -1087,7 +1103,13 @@ function renderSystem(snapshot) {
 
   const index = gpu && (gpu.index === undefined || gpu.index === null) ? 0 : (gpu ? gpu.index : 0);
   const memRatio = gpu ? gpu.mem_ratio : null;
-  const powerRatio = gpu && gpu.power_limit_w ? gpu.power_w / gpu.power_limit_w : null;
+  // Which ceiling the bar is drawn against.  The software limit is the honest
+  // denominator where it exists; where it does not (laptop GPUs, where the
+  // driver only reports the ceiling it is enforcing right now) that ceiling is
+  // the only one there is, and the label says so.
+  const powerCeiling = gpu ? firstNumber(gpu.power_requested_w, gpu.power_enforced_w) : null;
+  const powerDynamic = !!gpu && firstNumber(gpu.power_requested_w) === null;
+  const powerRatio = (gpu && powerCeiling) ? gpu.power_w / powerCeiling : null;
   const temp = gpu ? gpu.temp_c : null;
   const tempRatio = (temp === null || temp === undefined)
     ? null : Math.max(0, Math.min(1, (temp - 30) / 60));
@@ -1136,7 +1158,11 @@ function renderSystem(snapshot) {
     power: {
       text: gpu ? num(gpu.power_w, 0) : '—', unit: gpu ? 'W' : '', bar: powerRatio,
       barClass: (powerRatio || 0) > 0.95 ? 'warn' : '',
-      foot: gpu ? '上限 ' + num(gpu.power_limit_w, 0) + ' W' : '显卡不可用',
+      foot: gpu
+        ? (powerCeiling !== null
+            ? '上限 ' + num(powerCeiling, 0) + ' W' + (powerDynamic ? ' · 动态' : '')
+            : '上限 — W')
+        : '显卡不可用',
       series: seriesOf('gpu' + index + '.power'),
       sparkOptions: {
         min: 0, color: cssVar('--chart-g'), autoscale: true,
@@ -1178,18 +1204,69 @@ function renderSystem(snapshot) {
 
 // The wording lives here rather than in the server so the Python side can stay
 // free of non-ASCII text; the API speaks in preset ids and error codes.
+//
+// The ids are *roles*, not wattages.  The menu is derived from the installed
+// card -- 40/60/80/100% of its own maximum -- so the same four buttons have to
+// read sensibly on a 175 W laptop and on a 600 W workstation.  The notes
+// therefore describe the intent; the measured numbers come from the 150-600 W
+// decode sweep, belong to the card it was run on, and are appended only for the
+// presets the backend marks `tuned` (i.e. the ones that sweep actually produced).
 const POWER_LABELS = {
-  eco: { name: '静音', note: '150W：~634MHz，decode ~19t/s，3K 上下文 prefill 要 ~33s。只为极致静音/省电时。' },
-  quiet: { name: '低耗', note: '300W：~1386MHz，decode ~61t/s(长上下文)，prefill ~10s。长对话的安静默认档。' },
-  balanced: { name: '均衡', note: '400W：~2350MHz，decode ~67t/s，峰值速度的 95%，能效最高的档位。实测曲线在 450W 后变平，这里是性价比顶点。' },
-  full: { name: '复原', note: '600W：~2777MHz 到时钟顶，decode ~70t/s(长上下文)/159t/s(短)。比均衡只快 ~5%，给 prefill 密集或批量任务用。' },
+  eco: {
+    name: '静音',
+    note: '最低档：最凉最静、最省电。解码（出字）卡在显存带宽，掉速通常有限，' +
+      '预填充（首字延迟）会明显变长，长提示词尤其。',
+  },
+  quiet: {
+    name: '低耗',
+    note: '中低档：日常长对话的安静选择，解码速度一般接近满血，代价主要在预填充。',
+  },
+  balanced: {
+    name: '均衡',
+    note: '中高档：接近满速、能效最好的区间。解码与满血档通常只差几个百分点，' +
+      '功耗和风扇噪声却低不少。',
+  },
+  full: {
+    name: '满血',
+    note: '最高档：放开整张卡的功耗上限。预填充最快，代价是功耗、温度和噪声都到顶。',
+  },
 };
+
+// Measured on the 600 W-class card the sweep was run on.  Keyed by watts on
+// purpose: these are properties of that card's curve, not of the role, so they
+// only make sense next to the tuned preset that produced them.
+const POWER_MEASURED = {
+  150: '实测：~634MHz，decode ~19t/s，3K 上下文 prefill 要 ~33s。',
+  300: '实测：~1386MHz，decode ~61t/s（长上下文），prefill ~10s。',
+  400: '实测：~2350MHz，decode ~67t/s，峰值速度的 95%，能效最高档（曲线在 450W 后变平）。',
+  600: '实测：~2777MHz 到时钟顶，decode ~70t/s（长上下文）/159t/s（短）；出厂默认，也就是「复原」。',
+};
+
+function presetMeta(preset) {
+  return POWER_LABELS[preset.id] || { name: '', note: '' };
+}
+
+function presetName(preset) {
+  const meta = presetMeta(preset);
+  // On the tuned menu the top preset is the card's factory default, which is
+  // what "复原" means; a derived menu's top setting is simply full power.
+  if (preset.tuned && preset.id === 'full') return '复原';
+  return meta.name;
+}
+
+function presetTip(preset) {
+  const measured = preset.tuned ? POWER_MEASURED[preset.watts] : '';
+  return [presetName(preset), presetMeta(preset).note, measured]
+    .filter(Boolean).join(' · ');
+}
 
 const POWER_ERRORS = {
   not_elevated: '需要管理员权限',
   not_a_preset: '不是允许的档位',
   out_of_range: '超出这张卡允许的范围',
   no_gpu: '读不到显卡的功耗范围',
+  unsupported: '这张卡不接受软件功耗墙（驱动拒绝）',
+  not_applied: '驱动没有按请求生效',
   smi_failed: '驱动拒绝了这次设置',
   bad_host: '请求来源校验失败',
   bad_origin: '跨站请求已被拒绝',
@@ -1208,6 +1285,17 @@ function powerMessage() {
   return (Date.now() - message.at < 8000) ? message : null;
 }
 
+// "current 31 W · limit 125 W (dynamic)" -- the live half of the power row,
+// patched in place on every sample rather than baked into the markup.
+function livePowerText(live, ceiling, dynamic) {
+  const parts = [];
+  if (live !== null) parts.push('当前 ' + num(live, 0) + ' W');
+  if (ceiling !== null) {
+    parts.push('上限 ' + num(ceiling, 0) + ' W' + (dynamic ? '（动态）' : ''));
+  }
+  return parts.join(' · ');
+}
+
 function renderPowerControl(snapshot) {
   const box = document.getElementById('power-control');
   if (!box) return;
@@ -1216,6 +1304,10 @@ function renderPowerControl(snapshot) {
   const gpus = gpuState.gpus || [];
   const config = S.config || {};
   const presets = config.power_presets || [];
+  // False once the driver has refused a software power limit outright.  There
+  // is nothing to retry in that case, so the buttons go away and the row
+  // reports the live ceiling instead of offering a write that cannot land.
+  const settable = config.power_settable !== false;
 
   if (!gpus.length || !presets.length) {
     box.innerHTML = '';
@@ -1224,7 +1316,18 @@ function renderPowerControl(snapshot) {
   }
 
   const gpu = gpus[0];
-  const current = (gpu.power_limit_w === undefined) ? null : gpu.power_limit_w;
+  // Three different numbers, and the row wants all of them: what the card draws
+  // right now, the ceiling it is holding, and which preset owns that ceiling.
+  // Only the middle one is always readable -- laptop GPUs report no software
+  // limit at all -- so the highlight falls back to what this dashboard last
+  // set, and drops that memory the moment the driver reports something else.
+  const requested = firstNumber(gpu.power_requested_w);
+  const enforced = firstNumber(gpu.power_enforced_w);
+  const ceiling = firstNumber(requested, enforced);
+  const dynamic = requested === null && enforced !== null;
+  const live = firstNumber(gpu.power_w);
+  const applied = firstNumber(config.power_applied_w);
+  const current = firstNumber(requested, applied);
   const elevated = !!config.elevated;
   const pending = POWER_UI.pending;
   const note = powerMessage();
@@ -1232,85 +1335,112 @@ function renderPowerControl(snapshot) {
   // classic full-width row is kept for any future wider placement.
   const compact = box.classList.contains('top');
 
-  // Rebuilding this row on every sample would fight the pointer and flicker
-  // the hover state, so only touch the DOM when something rendered changed.
-  const sig = JSON.stringify([current, elevated, pending, note ? note.text + note.tone : '', compact]);
-  if (box.dataset.sig === sig) return;
-  box.dataset.sig = sig;
+  // The readout ticks with every sample, and rebuilding the whole row that
+  // often would fight the pointer and flicker the hover state -- so the markup
+  // is gated on this signature and the numbers are patched in below.
+  const sig = JSON.stringify([current, ceiling, dynamic, elevated, settable,
+    pending, note ? note.text + note.tone : '', compact, presets.length]);
+  if (box.dataset.sig !== sig) {
+    box.dataset.sig = sig;
+    box.innerHTML = powerMarkup(presets, {
+      gpu: gpu, settable: settable, elevated: elevated, pending: pending,
+      note: note, compact: compact, current: current, live: live,
+      ceiling: ceiling, dynamic: dynamic,
+    });
+  }
 
+  const liveBox = box.querySelector('.pw-live');
+  if (liveBox) liveBox.textContent = livePowerText(live, ceiling, dynamic);
+}
+
+// The structural half of the power row: buttons, labels, status and range.
+// Called only when the signature above changes, so it can afford to build the
+// whole string at once.
+function powerMarkup(presets, state) {
+  const compact = state.compact;
   const buttons = presets.map(function (preset) {
-    const meta = POWER_LABELS[preset.id] || { name: '', note: '' };
     // Highlight from the measured limit, not from what we last asked for: if
     // something else changes the card the buttons follow reality.
-    const active = current !== null && Math.abs(preset.watts - current) < 1;
+    const active = state.current !== null &&
+      Math.abs(preset.watts - state.current) < 1;
     const classes = ['pw-btn'];
     if (active) classes.push('on');
-    if (pending === preset.watts) classes.push('pending');
+    if (state.pending === preset.watts) classes.push('pending');
+    const disabled = (state.elevated && state.settable) ? '' : ' disabled';
     if (compact) {
       // One line, watts only: the preset name and its explanation move into
       // the tooltip because the section head has no room for a second line.
       return '<button type="button" class="' + classes.join(' ') +
-        '" data-watts="' + preset.watts + '"' + (elevated ? '' : ' disabled') +
-        ' title="' + esc((meta.name || '') + ' · ' + meta.note) + '">' +
+        '" data-watts="' + preset.watts + '"' + disabled +
+        ' title="' + esc(presetTip(preset)) + '">' +
         '<span class="pw-watts">' + preset.watts + 'W</span></button>';
     }
     return '<button type="button" class="' + classes.join(' ') +
-      '" data-watts="' + preset.watts + '"' + (elevated ? '' : ' disabled') +
-      ' title="' + esc(meta.note) + '">' +
+      '" data-watts="' + preset.watts + '"' + disabled +
+      ' title="' + esc(presetTip(preset)) + '">' +
       '<span class="pw-watts">' + preset.watts + ' W</span>' +
-      '<span class="pw-note">' + esc(meta.name) + '</span></button>';
+      '<span class="pw-note">' + esc(presetName(preset)) + '</span></button>';
   }).join('');
 
-  const low = gpu.power_min_w;
-  const high = gpu.power_max_w;
-  const range = (low !== null && low !== undefined && high !== null && high !== undefined)
-    ? '可用范围 ' + num(low, 0) + '–' + num(high, 0) + ' W' : '';
+  const low = firstNumber(state.gpu.power_min_w);
+  const high = firstNumber(state.gpu.power_max_w);
+  const factory = firstNumber(state.gpu.power_default_w);
+  const rangeParts = [];
+  if (low !== null && high !== null) {
+    rangeParts.push('可用范围 ' + num(low, 0) + '–' + num(high, 0) + ' W');
+  }
+  if (factory !== null) rangeParts.push('出厂默认 ' + num(factory, 0) + ' W');
+  const range = rangeParts.join(' · ');
 
   let status = '';
-  if (note) {
-    status = '<span class="pw-status ' + (note.tone || '') + '">' + esc(note.text) + '</span>';
-  } else if (current !== null) {
-    status = '<span class="pw-status">当前 ' + num(current, 0) + ' W</span>';
+  if (state.note) {
+    status = '<span class="pw-status ' + (state.note.tone || '') + '">' +
+      esc(state.note.text) + '</span>';
+  } else if (!state.settable) {
+    // Not an error: the driver simply does not implement the setting.  Say
+    // what is in force instead, which is the number the user actually asked to
+    // see in the first place.
+    status = '<span class="pw-status">此卡不接受软件功耗墙，上限由 Dynamic Boost 动态管理</span>';
   }
 
-  const tip = '<span class="tip" tabindex="0" data-tip="' + esc('对应 nvidia-smi -pl 的功率墙。' +
+  let tipText = '对应 nvidia-smi -pl 的功率墙。' +
     '满载时显卡会在此值附近降频，实际功耗不会超过去。' +
     '需要管理员权限，且重启电脑后恢复默认（可用任务计划程序做开机自动设置）。' +
     '出字（解码）阶段卡在显存带宽，适度下调通常几乎不掉速；' +
-    '预填充阶段卡在算力，会变慢一些，但它只占一次请求开头的一小段。') + '">i</span>';
+    '预填充阶段卡在算力，会变慢一些，但它只占一次请求开头的一小段。';
+  if (state.dynamic) {
+    tipText += '这张卡不上报软件功耗墙（笔记本 GPU 一般由 Dynamic Boost 接管上限），' +
+      '所以读数里的是驱动此刻真正生效的上限，它会随 CPU 负载和温度在最大 TGP 之内浮动，' +
+      '这也是「动态」两个字的来历。';
+  }
+  if (!state.settable) {
+    tipText += '驱动已经明确拒绝过软件设限，所以档位按钮不再提供。';
+  }
+  const tip = '<span class="tip" tabindex="0" data-tip="' + esc(tipText) + '">i</span>';
+  const liveHtml = '<span class="pw-live muted">' +
+    esc(livePowerText(state.live, state.ceiling, state.dynamic)) + '</span>';
 
   if (compact) {
     // No room for the admin-rights paragraph here, so it becomes a lock icon
-    // with the explanation in its tooltip.  The "current N W" readout is also
-    // dropped: the power card next door already shows the live limit, and the
-    // active preset button says which one is in force.  Error/success notes
-    // still get a slot though -- they are feedback, not decoration.
-    const lock = elevated ? '' :
+    // with the explanation in its tooltip.
+    const lock = state.elevated ? '' :
       '<span class="tip pw-lock" tabindex="0" data-tip="' + esc('当前进程没有管理员权限，改不了功耗上限（nvidia-smi -pl 会被系统拒绝）。请关闭本窗口，改用 start_monitor_admin.bat 启动，会弹一次 UAC 确认。') + '">🔒</span>';
-    const noteStatus = note ? '<span class="pw-status ' + (note.tone || '') + '">' + esc(note.text) + '</span>' : '';
-    box.innerHTML =
-      '<div class="pw-row">' +
+    const group = state.settable
+      ? '<div class="pw-group">' + buttons + '</div>' : '';
+    return '<div class="pw-row">' +
         '<span class="pw-title">显卡功耗' + tip + lock + '</span>' +
-        '<div class="pw-group">' + buttons + '</div>' +
-        noteStatus +
+        group + liveHtml + status +
       '</div>';
-    return;
   }
 
-  box.innerHTML =
-    '<div class="pw-row">' +
-      '<span class="pw-title">功耗上限' +
-        '<span class="tip" tabindex="0" data-tip="对应 nvidia-smi -pl 的功率墙。' +
-          '满载时显卡会在此值附近降频，实际功耗不会超过去。' +
-          '需要管理员权限，且重启电脑后恢复默认（可用任务计划程序做开机自动设置）。' +
-          '出字（解码）阶段卡在显存带宽，适度下调通常几乎不掉速；' +
-          '预填充阶段卡在算力，会变慢一些，但它只占一次请求开头的一小段。">i</span>' +
-      '</span>' +
-      '<div class="pw-group">' + buttons + '</div>' +
-      status +
+  const group = state.settable
+    ? '<div class="pw-group">' + buttons + '</div>' : '';
+  return '<div class="pw-row">' +
+      '<span class="pw-title">功耗上限' + tip + '</span>' +
+      group + liveHtml + status +
       (range ? '<span class="pw-range">' + range + '</span>' : '') +
     '</div>' +
-    (elevated ? '' : '<div class="pw-hint">当前进程没有管理员权限，改不了功耗上限' +
+    (state.elevated ? '' : '<div class="pw-hint">当前进程没有管理员权限，改不了功耗上限' +
       '（<code>nvidia-smi -pl</code> 会被系统拒绝）。' +
       '请关闭本窗口，改用 <b>start_monitor_admin.bat</b> 启动，会弹一次 UAC 确认。</div>');
 }
@@ -1325,8 +1455,9 @@ function applyPowerLimit(watts) {
   if (POWER_UI.pending !== null) return;
 
   const gpus = (S.snapshot && S.snapshot.gpu && S.snapshot.gpu.gpus) || [];
-  const active = gpus.length ? gpus[0].power_limit_w : null;
-  if (active !== null && active !== undefined && Math.abs(active - watts) < 1) {
+  const active = gpus.length
+    ? firstNumber(gpus[0].power_requested_w, config.power_applied_w) : null;
+  if (active !== null && Math.abs(active - watts) < 1) {
     POWER_UI.message = { text: '当前已经是该档位', tone: '', at: Date.now() };
     renderPowerControl(S.snapshot || {});
     return;
@@ -1350,19 +1481,29 @@ function applyPowerLimit(watts) {
     if (body.ok) {
       // Move the highlight on this frame; the next sample overwrites it with
       // what the driver actually reports.
-      if (gpus.length && body.applied !== null && body.applied !== undefined) {
-        gpus[0].power_limit_w = body.applied;
-      }
-      const previous = body.previous;
+      const applied = firstNumber(body.applied);
+      if (gpus.length && applied !== null) gpus[0].power_requested_w = applied;
+      // The server remembers what it set for exactly this case: a card that
+      // accepts the write but will not report it back has no other basis for
+      // the highlight, and the memory is dropped the moment the driver starts
+      // reporting a value of its own.
+      config.power_applied_w = applied !== null ? applied : watts;
+      const previous = firstNumber(body.previous);
+      const target = applied !== null ? applied : watts;
       POWER_UI.message = {
-        text: '已设为 ' + num(body.applied, 0) + ' W' +
-          (previous !== null && previous !== undefined &&
-           Math.abs(previous - body.applied) >= 1
+        text: '已设为 ' + num(target, 0) + ' W' +
+          (applied === null ? '（驱动不回读软件功耗墙，按请求值显示）' : '') +
+          (previous !== null && Math.abs(previous - target) >= 1
             ? '（原 ' + num(previous, 0) + ' W）' : ''),
         tone: 'ok', at: Date.now(),
       };
     } else {
       const code = body.error || 'unknown';
+      if (code === 'unsupported') {
+        // Verified refusal: the driver does not implement this setting at all,
+        // so stop offering it now rather than on the next sample.
+        config.power_settable = false;
+      }
       POWER_UI.message = {
         text: (POWER_ERRORS[code] || '设置失败（' + code + '）') +
           (body.detail ? '：' + body.detail : ''),
@@ -1398,8 +1539,9 @@ function tokenExact(value) {
 
 // A recorded power limit is just a number; the preset name is a frontend
 // concern (the backend deliberately carries no Chinese).  A limit that is not
-// one of the presets -- someone can set any value with nvidia-smi directly --
-// still renders, just without a nickname.
+// one of the presets -- someone can set any value with nvidia-smi directly, and
+// a card with no software limit records the ceiling it happened to be holding
+// -- still renders, with a tilde to say "measured, not chosen".
 function wattsLabel(watts) {
   const value = Number(watts);
   if (!isFinite(value) || value <= 0) return '档位未知';
@@ -1408,7 +1550,9 @@ function wattsLabel(watts) {
     return Math.abs(Number(preset.watts) - value) < 1;
   })[0];
   const meta = hit ? POWER_LABELS[hit.id] : null;
-  return Math.round(value) + ' W' + (meta && meta.name ? ' ' + meta.name : '');
+  const name = hit ? presetName(hit) : '';
+  return (hit ? '' : '≈') + Math.round(value) + ' W' +
+    (name ? ' ' + name : '');
 }
 
 function rateText(value) {
@@ -1419,8 +1563,13 @@ function rateText(value) {
 
 function currentPowerLimit(snapshot) {
   const gpu = ((snapshot && snapshot.gpu) || {}).gpus || [];
-  const value = gpu.length ? gpu[0].power_limit_w : null;
-  return (value === null || value === undefined) ? null : Number(value);
+  // The tier the ledger booked this sample under, not the raw ceiling: on a
+  // card that will not report a software limit the two differ (the server
+  // rounds the dynamic ceiling onto the 5 W grid), and the row this is used to
+  // mark has to be the row the tokens actually landed in.
+  const value = gpu.length
+    ? firstNumber(gpu[0].power_tier_w, gpu[0].power_requested_w) : null;
+  return value === null ? null : Number(value);
 }
 
 function renderTokenStats(snapshot) {

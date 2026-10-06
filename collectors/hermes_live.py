@@ -1,18 +1,26 @@
 """Auto-discovery of the live model behind the Hermes router.
 
 The Hermes router (llama.cpp router mode) loads on-demand models as
-*separate* llama-server processes on throwaway ports.  It does not list them
-in its own ``/v1/models`` -- every preset reads "unloaded" -- and it will not
-proxy their telemetry (``/metrics?model=...`` answers 400).  The one place the
-router reveals the truth is its log: every proxied request writes
+*separate* llama-server processes on throwaway ports, so the model actually
+generating tokens is not the one listening on the router's own port.  The
+router does name it, though: every proxied request writes
 
     proxying request to model <name> on port <N>
 
 This collector tails that log, follows the newest ``(name, port)`` pair and
-scrapes it as an ordinary single-model llama endpoint.  The pair changes on
-every model load, so a new delegate is built each time the log shows a
-different one; the sampler baseline and the ledger pick the change up the
-same way they do a server restart.
+scrapes it as an ordinary single-model llama endpoint -- straight at the child,
+which answers ``/props``, ``/slots`` and ``/metrics`` without an api-key.  The
+pair changes on every model load, so a new delegate is built each time the log
+shows a different one; the sampler baseline and the ledger pick the change up
+the same way they do a server restart.
+
+Why not just read the router's own endpoints?  As of llama.cpp b11370 the
+router *does* report ``/v1/models`` status ``loaded`` correctly, and it will
+proxy telemetry for a named model (``/metrics?model=<id>&autoload=false``).  It
+still cannot answer the one question this panel exists for -- which model is
+being served *right now* -- without a log to interpret, because the router's
+own body carries no counters of its own.  Keeping the child as a separate
+endpoint also means the router's auth never has to be configured here.
 
 Reading is cheap (a tail of a few hundred KB) and tolerant: a missing or
 unreadable log just reports "no active model" and never touches the rest of

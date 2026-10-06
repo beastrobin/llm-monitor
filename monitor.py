@@ -32,7 +32,15 @@ from collectors import gpu, power, stats, system
 from collectors.llama import LlamaEndpoint
 from collectors.hermes_live import LiveEndpoint
 
-DEFAULT_LIVE_LOG = "D:/AI/hermes/logs/llama-server.log"
+# The router writes its startup line -- the port it listens on, the api-key it
+# generated, and every request it proxies -- to this log, and that line is the
+# only place an outside reader learns any of it.  Hermes keeps its state under
+# %LOCALAPPDATA% on Windows, so the default is derived from the environment
+# instead of baked to one machine's drive layout: a fresh clone elsewhere would
+# otherwise start out pointing at a directory that does not exist and report
+# "no active model" with nothing to explain why.
+_LOCAL_APPDATA = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+DEFAULT_LIVE_LOG = str(Path(_LOCAL_APPDATA) / "hermes" / "logs" / "llama-server.log")
 
 ROOT = Path(__file__).resolve().parent
 FRONTEND = ROOT / "frontend"
@@ -77,9 +85,9 @@ DEFAULT_CONFIG = {
     # back to zero on every restart.  The ledger folds them into a file to give
     # the dashboard daily and lifetime usage that outlives the server.
     "stats": {"enabled": True, "path": "stats.json", "keep_days": 90},
-    # The router loads on-demand models on throwaway ports and never lists
-    # them, so this endpoint follows the router's own log to find whichever
-    # model is live right now.
+    # The router serves each on-demand model from a child process on a
+    # throwaway port, so this endpoint follows the router's own log to find
+    # whichever model is live right now.
     "live": {"enabled": True, "log": DEFAULT_LIVE_LOG},
 }
 
@@ -129,21 +137,33 @@ def _timed(fn):
 
 
 def active_power_tier(payload):
-    """The GPU power limit in force for this sample, or None if unreadable.
+    """The GPU power wall in force for this sample, or None if unreadable.
 
     The ledger wants to say which tier a token total was produced at, and the
     only place that is knowable is here, at sample time.  A power limit belongs
     to the card rather than to any one model, so this returns a single number
     for the whole sample and the ledger stamps every delta with it.  With more
-    than one GPU the first reported limit wins -- the dashboard is built around
+    than one GPU the first reported wall wins -- the dashboard is built around
     a single card, and guessing a per-model mapping would be worse than saying
     what was actually measured.
+
+    The software limit is preferred, because that is the tier the user picked.
+    Laptop GPUs do not report one -- Dynamic Boost owns the ceiling there -- so
+    the enforced ceiling stands in, rounded to the 5 W grid the driver accepts:
+    that ceiling moves every second, and a ledger row per wobble would say less
+    than "about 125 W".
     """
+    def usable(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) \
+            and value > 0
+
     for item in (payload.get("gpu") or {}).get("gpus") or []:
-        watts = item.get("power_limit_w")
-        if isinstance(watts, (int, float)) and not isinstance(watts, bool) \
-                and watts > 0:
-            return watts
+        requested = item.get("power_requested_w")
+        if usable(requested):
+            return float(requested)
+        enforced = item.get("power_enforced_w")
+        if usable(enforced):
+            return float(round(enforced / 5.0) * 5)
     return None
 
 
@@ -228,6 +248,19 @@ class Hub(object):
         # token cannot change under a running process, and the UI needs it
         # before it can decide whether to offer the power control at all.
         self.elevated = power.is_elevated()
+        # The preset menu for whatever card is installed.  Refreshed from each
+        # sample (the card reports its own window there), emptied when no card
+        # answers -- an empty menu is what hides the control in the UI.
+        self.power_presets = []
+        # A card can also refuse software power limits outright; the driver
+        # says so only when asked, so the answer is remembered here and the
+        # panel stops offering dead buttons for the rest of the run.
+        self.power_settable = True
+        # What this dashboard last set, for the case where the driver will not
+        # report it back (laptops): without it the active-preset highlight has
+        # nothing to stand on.  Any value the driver *does* report wins over
+        # this, so someone else changing the limit still moves the highlight.
+        self.power_applied_w = None
         # A power-limit change should land on the charts immediately instead of
         # waiting out the interval, so the sampler waits on this rather than
         # sleeping blind.  A generation counter plus a condition (not a bare
@@ -332,12 +365,33 @@ class Hub(object):
         payload["timings"] = timings
         payload["sample_ms"] = (time.time() - started) * 1000.0
 
+        # The tier this sample gets booked under, computed once: the ledger
+        # stamps it and the UI marks the tier row it is standing on with it, so
+        # the two are not allowed to disagree.  It rides on the card record
+        # because that is where the UI reads it from.
+        tier = active_power_tier(payload)
+        gpu_payload = payload.setdefault("gpu", {})
+        cards = gpu_payload.get("gpus") or []
+        if cards:
+            cards[0]["power_tier_w"] = tier
+        # The preset menu follows the card, and this sample already carries its
+        # window -- deriving it here keeps one source of truth with the write
+        # path (the handler passes this exact list back in) without spending an
+        # extra nvidia-smi spawn on every request.
+        menu = power.presets_for(
+            cards[0].get("power_min_w") if cards else None,
+            cards[0].get("power_max_w") if cards else None)
+        if menu != self.power_presets:
+            self.power_presets = menu
+            log("power presets: %s" % (", ".join(
+                "%s %dW" % (preset["id"], preset["watts"]) for preset in menu)
+                or "none -- the card did not report its limits"))
+
         # Fold this sample's counters into the lifetime ledger.  It is pure
         # dict arithmetic over data already in hand, so it does not belong on
         # the thread pool, and it must not be able to fail the sample.
         if self.ledger is not None:
-            self.ledger.observe(stats.readings_for(endpoints),
-                                watts=active_power_tier(payload))
+            self.ledger.observe(stats.readings_for(endpoints), watts=tier)
             self.ledger.flush()
             payload["stats"] = self.ledger.payload()
         else:
@@ -381,12 +435,24 @@ class Hub(object):
         series and the other GPU cards come from the sampler -- waking it means
         the whole panel converges on the new state within a frame instead of
         sitting stale for an interval.
+
+        The menu comes from the hub rather than from a constant, so the values
+        accepted here are exactly the buttons the UI was shown.
         """
-        result = power.set_limit(watts)
+        result = power.set_limit(watts, presets=self.power_presets)
         if result.get("ok"):
+            self.power_applied_w = result.get("applied")
+            if self.power_applied_w is None:
+                self.power_applied_w = result.get("requested")
+            self.power_settable = True
             log("power limit -> %s W (was %s W)" % (
-                result.get("applied"), result.get("previous")))
+                result.get("applied", "unverified"), result.get("previous")))
         else:
+            if result.get("error") == "unsupported":
+                # The driver told us this card takes no software power limit at
+                # all.  Nothing to retry, so the panel switches to reporting
+                # the live ceiling instead of offering a write that cannot work.
+                self.power_settable = False
             log("power limit change refused: %s (requested %s W)" % (
                 result.get("error"), watts))
         with self._wake_cond:
@@ -566,8 +632,15 @@ class Handler(BaseHTTPRequestHandler):
                     # The UI needs to know whether it may offer the power
                     # control before the user clicks and gets a rejection.
                     "elevated": self.hub.elevated,
-                    "power_presets": power.PRESETS,
-                    "power_default_watts": power.DEFAULT_WATTS,
+                    # Derived from the installed card, not from a constant:
+                    # a menu hard-coded for a 600 W card offers a 175 W laptop
+                    # three settings its driver has to refuse.
+                    "power_presets": self.hub.power_presets,
+                    # False once the driver has refused a software power limit
+                    # (laptop GPUs); the panel then reports the live ceiling
+                    # instead of pretending the buttons can work.
+                    "power_settable": self.hub.power_settable,
+                    "power_applied_w": self.hub.power_applied_w,
                 },
             })
         elif path == "/api/stream":

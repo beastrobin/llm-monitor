@@ -105,12 +105,33 @@ start_monitor.bat --port 8090 --interval 2
 显卡区下方的档位条对应 `nvidia-smi -pl`，也就是显卡的功率墙。满载时 GPU 会在这个上限
 附近降频，功耗不会超过去。
 
-| 档位 | 说明 |
-|---|---|
-| 150 W | 静音。最凉最静，但只剩 1/4 功率，出字会明显变慢 |
-| 300 W | 低耗。解码仍接近满速，预填充会慢一些 |
-| 450 W | 均衡。推荐起点 |
-| 600 W | 复原。恢复出厂默认，跑训练/微调时用这档 |
+**档位跟着显卡走，不是写死的。** 菜单在运行时按显卡自己上报的 `power.min_limit` /
+`power.max_limit` 推导：
+
+- 窗口能覆盖 600 W 级的卡（最大上限 ≥ 575 W）用实测标定过的那一套
+  **150 / 300 / 400 / 600 W**（静音 / 低耗 / 均衡 / 复原）。400 W 是 150–600 W 功耗曲线的
+  能效顶点：曲线在 450 W 之后变平，那里是 ~95% 峰值速度下最好的 t/s-per-watt。见 `power_curve/`。
+- 其它任何卡按自己最大上限的 **40 / 60 / 80 / 100 %** 生成四档，取整到 5 W。比如
+  RTX 5090 Laptop（5–175 W）得到 70 / 105 / 140 / 175 W；一台 300 W 的桌面卡得到
+  120 / 180 / 240 / 300 W。
+
+菜单只在一个地方生成（`collectors/power.py` 的 `presets_for()`），写接口做白名单校验时用的
+就是下发给面板的同一份列表，所以"面板上有的按钮"和"接口肯接受的值"不可能各走各的。前端的中文
+档位名按**角色**映射（静音/低耗/均衡/满血），与瓦数解耦；600 W 级卡上标定出来的实测数字，只在
+菜单确实来自那份标定表时才附加显示。
+
+**笔记本 GPU 接受不了这个设置，而且拒绝方式很阴。** 这不是权限问题：驱动对 `nvidia-smi -pl`
+直接回 `Changing power management limit is not supported in current scope`，**退出码却仍然是
+0**，还照样打印 "All done."。所以本工作台不看退出码，而是解析驱动自己的输出；识破后回
+`unsupported`，面板随即撤掉档位按钮并改报实测上限。笔记本的上限由 Dynamic Boost 在出厂 TGP
+区间内自主调整（5090 Laptop 实测在 110–175 W 之间浮动），要改只能走厂商控制中心或 NVIDIA
+控制面板里的性能模式，`nvidia-smi` 这条路是关着的。
+
+**两条功耗读数不是一回事。** `power.limit` 是**软件功耗墙**，即 `-pl` 写进去的那个值；笔记本
+GPU 根本不报这一列（永远 `[N/A]`）。`enforced.power.limit` 是**驱动此刻真正在生效的上限**，
+任何卡都报，且在笔记本上会随 CPU 负载与温度浮动。面板优先用软件墙做分母；没有软件墙时改用生效
+上限，并在读数后面标「动态」，同时把 `出厂默认` 一并显示出来当参照。功耗卡和档位条用的是同一
+套回退规则，所以两处的"上限"永远指同一个数。
 
 **需要管理员权限。** 这不是本工作台加的限制 —— Windows 上非管理员执行 `nvidia-smi -pl`
 会被直接拒绝，退出码 5（`ERROR_ACCESS_DENIED`），改动根本不会发生。本机实测过：用受限令牌
@@ -127,8 +148,14 @@ start_monitor.bat --port 8090 --interval 2
 81.2 掉到 80.4 tok/s。**但这个比例不能直接套用** —— 那是把 180 W 卡降到 83%，而 150 W
 只有本机型 600 W 的 25%，降这么狠会开始碰到真实瓶颈。
 
-**只接受预设档位。** 接口用白名单校验，且写入前会读一次显卡报告的 `power.min_limit` /
-`power.max_limit`，超出范围直接拒绝，而不是交给驱动去静默钳制。
+**只接受预设档位。** 接口用白名单校验（就是下发给面板的那份菜单），且写入前会读一次显卡报告
+的 `power.min_limit` / `power.max_limit`，超出范围直接拒绝，而不是交给驱动去静默钳制。
+
+**写完必须回读，且回读方式分两种。** 驱动可以拒绝或取整，档位高亮也以实测值为准 —— 万一别处
+改了功耗，按钮跟着现实走，而不是跟着"我上次请求了什么"。驱动肯报软件墙时直接比对；不肯报时
+（笔记本）退一步拿生效上限做旁证 —— 功耗管理算法永远不会把上限抬到软件墙之上，所以"上限明显
+高于刚请求的值"就说明这次写入没落地，那种情况回 `not_applied`，而不是报成功。两条路都读不到
+时回 `verified: false`，面板把话术改成"已下达 X W（驱动不回读）"，不假装确认过。
 
 ### 这个写接口是怎么防跨站的
 
@@ -176,7 +203,7 @@ start_monitor.bat --port 8090 --interval 2
 | 区块 | 切分 | 回答的问题 |
 |---|---|---|
 | 近 7 天汇总 | 日期 | 哪天跑了多少 |
-| 按功率档归集 | 显卡功耗上限 | 这些量是在 150/300/450/600 W 哪一档跑出来的 |
+| 按功率档归集 | 显卡功耗上限 | 这些量是在哪一档功耗墙下跑出来的 |
 | 明细 | 日期 × 功率档 × 模型 | 某天、某档位、某个模型各跑了多少、多快 |
 
 **速度**用的是引擎自己上报的耗时（`prompt_seconds_total` / `tokens_predicted_seconds_total`），
@@ -191,6 +218,11 @@ start_monitor.bat --port 8090 --interval 2
 档位，所以各档之和小于累计总量 —— 页面上有一条说明直接写着起始时刻。采样时读不到功耗上限
 （显卡采集关闭或驱动查询失败）会单独记成"档位未知"并显示为警告，不会被并进任何一档。
 
+**档位记的是"当时生效的那个值"。** 优先软件功耗墙（就是你点的那一档）；笔记本这类不报软件墙的
+卡退回到驱动的生效上限，并**取整到 5 W** —— 那个上限每秒都在动，逐瓦记一档只会把账本打碎成
+一堆没有意义的行。取整得来的档位在面板上显示成 `≈170 W`，一眼能看出它不是从菜单里选的；
+`175 W 满血` 这种才是。档位行数有上限（`TIER_CAP`），超出后按量级保留前面几档。
+
 **落盘。** `stats.json` 与面板同目录，写入先落 `.tmp` 再改名，中途崩溃不会留下半个文件。
 数据有变化时每 15 秒写一次，Ctrl-C 退出时补一次。文件损坏不影响启动，只是降级成"只在内存里
 记账"，页面上会直接显示一条黄色提示（这类结论不进 hover）。
@@ -203,6 +235,19 @@ token，所有速率都算成了"没有数据"。旧版 `stats.json`（v1，没�
 新的两个维度从升级那一刻开始重新累计。
 
 ## 配置
+
+`config.json` **不在仓库里** —— `.gitignore` 把 `*.json` 一并排掉了，因为它按机器而定。直接跑
+`monitor.py` 会顺手生成一份默认配置，但默认配置里 `api_key` 是空的，而 hermes 每次启动都会换
+一个新 key，于是面板会以 401 开场、一个模型都不显示（报错只说 `unauthorized`，看不出是配置问题）。
+正常启动路径不用管这件事：`start_monitor.bat` 会先跑一次 `tools/sync_hermes_key.py`，把 router
+当前的 key 与日志路径抄进 `config.json`。手动修也行：
+
+```bash
+python tools/sync_hermes_key.py          # 同步 port / api-key / live.log
+python tools/sync_hermes_key.py --check  # 只报告差异，不动文件
+```
+
+它幂等且克制：key 没变就不写文件，找不到 router 日志就不碰配置（面板照旧报 401，不会更糟）。
 
 编辑 `config.json`：
 
@@ -218,11 +263,15 @@ token，所有速率都算成了"没有数据"。旧版 `stats.json`（v1，没�
       "api_key_env": "HERMES_LLAMA_API_KEY"
     }
   ],
-  "stats": { "enabled": true, "path": "stats.json", "keep_days": 90 }
+  "stats": { "enabled": true, "path": "stats.json", "keep_days": 90 },
+  "live": { "enabled": true, "log": "%LOCALAPPDATA%/hermes/logs/llama-server.log" }
 }
 ```
 
 - `api_key_env` 里的环境变量**优先于** `api_key` 字段。不想把密钥留在文件里就设它。
+- `live.log` 是 router 的启动日志，`live` 端点尾随它找出当前模型。默认值由 `%LOCALAPPDATA%`
+  推导而来（hermes 的状态就在那儿），换机器不必改；填错的症状是卡片上写着
+  `router log reports no active model`。
 - 端点可以配多个，router 模式和单模型模式会自动识别。
 - 服务未启动的端点不会拖慢采样，只是显示为离线。
 - `stats.enabled` 设成 `false` 就关掉 token 账本（既不读也不写）；`stats.path` 的相对路径按项目
@@ -234,10 +283,11 @@ token，所有速率都算成了"没有数据"。旧版 `stats.json`（v1，没�
 hermes 每次启动都会重新分配端口和 api-key，`config.yaml` 里的 `base_url` 不一定是实际值。以启动日志为准：
 
 ```bash
-grep -- "--api-key" D:/AI/hermes/logs/llama-server.log | tail -1
+grep -- "--api-key" "$LOCALAPPDATA/hermes/logs/llama-server.log" | tail -1
 ```
 
-日志里那行 `# spawn: [...]` 同时给出了 `--port` 和 `--api-key`。
+日志里那行 `# spawn: [...]` 同时给出了 `--port` 和 `--api-key`。这件事已由
+`tools/sync_hermes_key.py` 自动完成，上面两行只在排查时用得上。
 
 ### 让 llamacpp-loader 也能被监控
 
@@ -253,9 +303,12 @@ loader 起的 server 默认**不带** `/metrics` 端点，需要在 GUI 的 **Ad
    误报成"卡死"。所以速率一律由 counter 差分算出。
 3. **`urllib` 在 Windows 会读取 `http_proxy` 环境变量**，导致请求 `127.0.0.1` 被送到代理上
    而失败。采集器显式使用了空的 `ProxyHandler`。
-4. **`nvidia-smi -pl` 在非管理员下静默失败**：退出码 5，输出去是"拒绝访问"，但如果不看返回码
-   就会以为设置成功了。所以写完一律用 `power.limit` 读回，并且档位高亮也以实测值为准 ——
-   万一别处改了功耗，按钮跟着现实走，而不是跟着"我上次请求了什么"。
+4. **`nvidia-smi -pl` 有三种失败方式，退出码只认得出第一种**：非管理员下退出码 5、输出"拒绝
+   访问"；笔记本上输出 `Changing power management limit is not supported in current scope`
+   而**退出码是 0**，只看返回码就会以为改成功了；还有第三种 —— 命令被接受、值根本没变。所以
+   写完一律回读：驱动肯报 `power.limit` 就直接比对，不肯报（笔记本）就拿 `enforced.power.limit`
+   当旁证（功耗管理算法不会把上限抬到软件墙之上），两条都读不到就明说"验证不了"。档位高亮同样
+   以实测值为准 —— 万一别处改了功耗，按钮跟着现实走，而不是跟着"我上次请求了什么"。
 5. **推送的帧内容是一份契约，两边必须同时改**。`hub.broadcast()` 原来只发
    `{point: {ts, values}}`，而卡片渲染读的是 `S.snapshot` —— 于是曲线照常延伸、**所有数字
    停在建连那一刻**，看起来就像"页面不自动刷新"。首帧是好的（它带 snapshot），所以只打开
@@ -263,6 +316,13 @@ loader 起的 server 默认**不带** `/metrics` 端点，需要在 GUI 的 **Ad
 6. **jsdom 里加了 `setInterval` 之后，node 不会自己退出**。烟测新加的看门狗让事件循环永远
    不空，脚本一直挂到被 SIGTERM 杀掉，于是**真实退出码被 SIGTERM 顶替**，看起来像失败了。
    所以报告写完要显式 `process.exit(code)`（用回调形式，先冲 stdout）。
+7. **`config.json` 不进仓库，而它的默认值原本是按开发机写死的**：`api_key` 空着，`live.log`
+   指向 `D:/AI/hermes/logs/llama-server.log`。新克隆的副本于是"两个端点都读不到模型"，而页面
+   上的两条报错（`unauthorized` / `no active model`）都看不出问题出在配置上。现在日志路径从
+   `%LOCALAPPDATA%` 推导，key 由 `tools/sync_hermes_key.py` 在每次启动前同步。
+8. **`for /f` 的命令集里再嵌一层引号，cmd 会解析错**：启动脚本原本用它探测端口，于是每次启动
+   都先打印一行 `'C:\...\python.exe" -c "..."' is not recognized`（探测因此永远失败）。
+   直接调用、看退出码就够了。
 
 ## 目录结构
 
@@ -272,7 +332,7 @@ llm-monitor/
 ├── collectors/
 │   ├── llama.py               # llama.cpp 指标（router / 单模型自适应）
 │   ├── gpu.py                 # nvidia-smi 解析 + 显存归属
-│   ├── power.py               # 功耗上限读写（服务上唯一的写操作）
+│   ├── power.py               # 功耗上限读写 + 按卡推导档位菜单（服务上唯一的写操作）
 │   ├── stats.py               # token 账本：counter 折叠 + 原子落盘
 │   └── system.py              # Win32 ctypes 采集
 ├── frontend/
@@ -281,7 +341,8 @@ llm-monitor/
 │   └── style.css              # 深浅双主题
 ├── tools/
 │   ├── render_check.js        # 无浏览器的渲染烟测（见下）
-│   └── ledger_check.py        # token 账本的折叠规则自检（见下）
+│   ├── ledger_check.py        # token 账本的折叠规则自检（见下）
+│   └── sync_hermes_key.py     # 把 router 当前的 port / api-key 抄进 config.json
 ├── config.json
 ├── stats.json                 # token 账本数据（自动生成）
 ├── start_monitor.bat          # 普通启动（功耗控制只读）
@@ -328,9 +389,9 @@ HTTP 接口：
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` | 面板页面 |
-| GET | `/api/snapshot` | 当前采样 + 历史序列 + 配置（含 `elevated` 与 `power_presets`） |
+| GET | `/api/snapshot` | 当前采样 + 历史序列 + 配置（含 `elevated`、按卡推导的 `power_presets`、`power_settable`） |
 | GET | `/api/stream` | SSE，每个采样周期推一帧 `{snapshot, point}`（见「自动刷新是怎么保证的」） |
-| POST | `/api/power-limit` | 设置功耗档位，body `{"watts": 450}`，需 `X-LLM-Monitor: 1` 头 |
+| POST | `/api/power-limit` | 设置功耗档位，body `{"watts": 140}`（值必须是当前菜单里的一档），需 `X-LLM-Monitor: 1` 头 |
 
 历史保留 900 个采样点（默认 2 秒间隔约 30 分钟），刷新页面不会丢曲线。
 
@@ -348,10 +409,14 @@ HTTP 接口：
   生成速度/Prefill 两张卡就会长这样。
 - y 轴上限是"只升不降得快"的迟滞上限：新峰值立刻抬高上限，之后按 0.88 倍慢慢回落，
   否则曲线每 2 秒会因为上限重算而整体跳一下。
-- **功耗档位是固定的 150 / 300 / 450 / 600 W**（`collectors/power.py` 的 `PRESETS`）。
-  换成功耗范围不同的卡时，面板会直接显示"可用范围 x–y W"，越界档位被拒绝 —— 要加档位
-  改那个常量即可，前端的中文标签在 `app.js` 的 `POWER_LABELS` 里（后端刻意不含中文，
-  所以标签与错误文案都在前端映射）。
+- **功耗档位不是固定的**：`collectors/power.py` 的 `presets_for()` 按显卡自己上报的
+  `power.min_limit` / `power.max_limit` 生成菜单 —— 600 W 级卡用标定过的 150/300/400/600 W，
+  其它卡按上限的 40/60/80/100% 取整到 5 W。换卡不用改任何代码，面板上的"可用范围 x–y W"
+  和按钮会跟着变。前端的中文档位名与错误文案都在 `app.js` 的 `POWER_LABELS` / `POWER_ERRORS`
+  里（后端刻意不含中文）。
+- **有些卡根本没有软件功耗墙**（笔记本 GPU）：驱动会拒绝 `-pl`，面板识别到之后撤掉档位按钮，
+  改为显示驱动实际生效的上限（标「动态」）和出厂默认。此时功耗卡的分母也换成这个生效上限，
+  不是留空。
 - **token 账本是"面板观察到的增量"，不是引擎自己的账**：面板停机期间如果 server 也重启过，
   那段时间的量会归到重启后的计数上，无法精确切分。首次见到某个模型时，会把它当时已有的
   累计值整体计入 —— 不这么做那部分就永久丢了。跨天归集按**本机日期**切分，不是 UTC。

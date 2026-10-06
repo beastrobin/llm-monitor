@@ -321,8 +321,15 @@ function readFrames(base, count, timeoutMs) {
   if (powerBox && powerBox.innerHTML) {
     const buttons = powerBox.querySelectorAll('button[data-watts]');
     const active = powerBox.querySelector('.pw-btn.on');
-    say('  档位按钮: ' + buttons.length + ' 个' +
-      (active ? '，当前生效 ' + text(active) : '，无高亮'));
+    // The live readout is the half of the row that changes with every sample,
+    // so it is the half a blank-page bug would take out first.
+    say('  实时读数: ' + (text(powerBox.querySelector('.pw-live')) || '（无）'));
+    if (buttons.length) {
+      say('  档位按钮: ' + buttons.length + ' 个' +
+        (active ? '，当前生效 ' + text(active) : '，无高亮'));
+    } else {
+      say('  档位按钮: 未提供（驱动不接受软件功耗墙）');
+    }
     say('  状态区: ' + text(powerBox.querySelector('.pw-status')));
     say('  范围: ' + text(powerBox.querySelector('.pw-range')));
     say('  权限: ' + (powerBox.querySelector('.pw-hint') ? '只读' : '可写'));
