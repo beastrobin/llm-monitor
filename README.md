@@ -284,10 +284,12 @@ python tools/sync_hermes_key.py --check  # 只报告差异，不动文件
 ```
 
 - `api_key_env` 里的环境变量**优先于** `api_key` 字段。不想把密钥留在文件里就设它。
-- `live.log` 是 router 的启动日志，`live` 端点尾随它找出当前模型。**一般不用手填**：启动时
-  `tools/sync_hermes_key.py` 会探测并写回。候选是 `%LOCALAPPDATA%\hermes\logs\llama-server.log`
-  与 `D:\AI\hermes\logs\llama-server.log`，取存在的里面最新的一个；显式配了 `live.log` 且文件
-  在，就以它为准。真配错了也不会只剩一句报错 —— 卡片上会直接写出它找过的位置。
+- `live.log` 是 router 的启动日志。`live` 端点**优先直接问 router 的 `/v1/models`** 判断当前
+  模型，日志只是兜底；但日志路径还兼一个用途 —— 从它反推出 hermes 的 `config.yaml` 在哪，
+  端点地址就从那份配置里读。**一般不用手填**：启动时 `tools/sync_hermes_key.py` 会探测并写回。
+  候选是 `%LOCALAPPDATA%\hermes\logs\llama-server.log` 与 `D:\AI\hermes\logs\llama-server.log`，
+  取存在的里面最新的一个；显式配了 `live.log` 且文件在，就以它为准。真配错了也不会只剩一句报错
+  —— 卡片上会直接写出它找过的位置。
 - 端点可以配多个，router 模式和单模型模式会自动识别。
 - 服务未启动的端点不会拖慢采样，只是显示为离线。
 - `stats.enabled` 设成 `false` 就关掉 token 账本（既不读也不写）；`stats.path` 的相对路径按项目
@@ -296,14 +298,23 @@ python tools/sync_hermes_key.py --check  # 只报告差异，不动文件
 
 ### 怎么拿到 hermes 当前的端口和密钥
 
-hermes 每次启动都会重新分配端口和 api-key，`config.yaml` 里的 `base_url` 不一定是实际值。以启动日志为准（具体路径看面板启动日志里的 `live model log:` 那行）：
+两件事分开看：
+
+**端口（端点地址）不用管。** hermes 每次启动都会换一个端口，并把结果写回自己的
+`config.yaml`（`model.base_url`）。面板以那一刻的 `config.yaml` 为准，并且**每 15 秒重读一次**，
+所以 hermes 重启后地址变了会自动跟上；上一次采样发现 router 没应答时更会**立刻重读**，不等
+这 15 秒。`config.json` 里的 `base_url` 只是兜底（机器上没有 `config.yaml` 时用）。哪个文件被
+采纳写在启动日志的 `hermes router:` 那行；地址真的变了会另起一行 `hermes router moved:`。
+
+**密钥仍以启动日志为准。** api-key 不写在 `config.yaml` 里，只在日志的 `# spawn: [...]` 行：
 
 ```bash
 grep -- "--api-key" "D:/AI/hermes/logs/llama-server.log" | tail -1
 ```
 
-日志里那行 `# spawn: [...]` 同时给出了 `--port` 和 `--api-key`。这件事已由
-`tools/sync_hermes_key.py` 自动完成，上面两行只在排查时用得上。
+这行同时给出 `--port` 和 `--api-key`。同步这件事已由 `tools/sync_hermes_key.py` 自动完成，
+上面这行只在排查时用得上。注意**端口跟着 `config.yaml`、密钥跟着日志**：拿它手工对配置时别把
+两者混在一起用。
 
 ### 让 llamacpp-loader 也能被监控
 
@@ -504,6 +515,25 @@ python 的控制台，而那个窗口样式只对 `conhost` 生效 —— Window
 - `tools/sync_hermes_key.py` 改用同一套解析，并且在 **`config.json` 里根本没有 `live` 段**时
   也按有效默认值比对再回写 —— 旧版本写出的 `config.json` 正是这种情况，原先的漏洞恰好会在
   有问题的机器上被跳过。
+
+**端点地址跟着 hermes 走，判据改成直接问 router。** 上面那套修完，卡片还在报**错的**模型：
+机器上同时存在两组独立 router（桌面端的和手工起的），而 `config.json` 里钉死的是其中一个的
+端口。实测那个端口上跑的模型已经不是面板显示的那个 —— 面板报的是**没人在用**的模型，真正在
+服务的那个反而不出现。
+
+- 判据从"读日志尾部的 `proxying request to model X on port N`"改成**问 router 自己的
+  `/v1/models`**：`status.value` 是否 `loaded`、`status.args` 里的 `--port` 就是它派生的子进程
+  端口。router 只能被问它自己的事，两个 router 不可能互相代答；日志是**按实例**写的，共用一个
+  日志文件时最新那行可能属于另一台，这正是误报的来源。日志留作兜底（老的构建、或前面根本没
+  router 的裸 llama-server）。
+- 地址从 `hermes` 自己的 `config.yaml` 读 `model.base_url`（不引 YAML 库，只手解这一个键），
+  文件位置由 live 日志路径推导；找不到就回落 `config.json`，并在启动日志里写明用了哪个。
+- **地址每 15 秒重读一次，不可达时立即重读**：hermes 每次启动换端口，只在启动时解析一次的话，
+  重启后就再也对不上了。重读只在前端地址真的变化时才下发；下发时同时清掉 router 端点上的
+  模型列表/`/props` 缓存与失败退避（换了地址还把退避带过去，会让新地址最多 15 个周期不被采样），
+  以及 live 端点里缓存的"哪个模型在跑"的结论。
+- 地址里带的 `/v1` 会被去掉再交给采集器：采集器自己拼 `/v1/models`、`/props`、`/metrics`，
+  留着后缀会去请求 `/v1/v1/models`，拿回一个 404 —— 而 404 长得和"router 上什么都没加载"一模一样。
 
 ### v1.0
 

@@ -697,24 +697,45 @@ const LIVE_REASON = {
   'log empty': '日志是空的',
   'log unreadable': '日志读不出来',
   'no proxy line in tail': '日志尾部没有模型请求记录',
+  'router reports no loaded model': 'router 上没有任何预设处于加载状态',
+  'router unreachable': 'router 没有应答',
+};
+
+// The reasons that came from asking the router rather than from reading a file.
+// These are the ones where the address matters and the log path does not.
+const ROUTER_REASON = {
+  'router unreachable': true,
+  'router reports no loaded model': true,
 };
 
 function liveNote(endpoint) {
   if (!endpoint || !endpoint.error) return '';
-  if (endpoint.error === 'router log reports no active model') {
+  if (endpoint.error === 'no active model') {
     const why = LIVE_REASON[endpoint.log_reason] || endpoint.log_reason || '原因未知';
-    const where = endpoint.log_path
-      ? '；查找位置 <code>' + esc(endpoint.log_path) + '</code>'
-      : '';
-    return '<div class="err">未在 router 日志里找到当前模型：' + esc(why) + where + '</div>';
+    // Show where we looked, and show the right thing: a log-shaped answer is
+    // about a file, so it names the path; an answer that came from the router
+    // names the address that was asked.  Printing the log path beside a router
+    // verdict would send the reader to a file that is not the problem -- and a
+    // stale address is exactly what "router 没有应答" almost always means.
+    let where = '';
+    if (ROUTER_REASON[endpoint.log_reason]) {
+      if (endpoint.router_url) {
+        where = '；已询问 <code title="' + esc(endpoint.router_url) + '">' +
+          esc(endpoint.router_url) + '</code>';
+      }
+    } else if (endpoint.log_path) {
+      where = '；查找位置 <code title="' + esc(endpoint.log_path) + '">' +
+        esc(shortPath(endpoint.log_path)) + '</code>';
+    }
+    return '<div class="err">未找到当前模型：' + esc(why) + where + '</div>';
   }
-  // The router named a model but nothing answers on that port any more -- the
-  // normal state right after a model is unloaded, and otherwise indistinguishable
-  // from a broken panel.
+  // A model is named as loaded, but nothing answers on its port yet -- the
+  // normal state for the seconds a child takes to come up, and otherwise
+  // indistinguishable from a broken panel.
   if (endpoint.target_model) {
-    return '<div class="err">router 日志里最后一次请求的模型是 <code>' +
-      esc(endpoint.target_model) + '</code>（:' + esc(endpoint.target_port) +
-      '），但该端口现在没人应答 —— 模型已卸载或正在加载。发一次请求后这里会出现实时指标。</div>';
+    return '<div class="err">router 已把 <code>' + esc(endpoint.target_model) +
+      '</code>（:' + esc(endpoint.target_port) + '）标记为已加载，但该端口还没应答 —— ' +
+      '正在加载中，通常几秒后这里会出现实时指标。</div>';
   }
   return '<div class="err">' + esc(endpoint.error) + '</div>';
 }

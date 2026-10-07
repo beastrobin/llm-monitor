@@ -29,7 +29,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from collectors import gpu, power, stats, system
-from collectors.llama import LlamaEndpoint
+from collectors.llama import LlamaEndpoint, _resolve_api_key
 from collectors.hermes_live import LiveEndpoint
 
 # The desktop launcher starts this through pythonw.exe, which has no console at
@@ -91,6 +91,102 @@ def resolve_live_log(configured=None):
         return found[0][1], "newest of %d candidate(s) on disk" % len(found)
     return Path(configured or DEFAULT_LIVE_LOG), "no candidate exists -- tried " + \
         ", ".join(str(c) for c in LIVE_LOG_CANDIDATES)
+
+
+# Hermes picks a free port for its router on every start and writes the one it
+# settled on into its own config.yaml.  A dashboard pinned to a fixed address
+# therefore ends up describing whichever instance happens to own that port --
+# and with a second router alive (the desktop app's beside a hand-started one)
+# the pinned address is not even running the same model, so the panel reports a
+# model nobody is serving while the one in use never appears.  The file sits
+# beside the log the live endpoint already follows, so it is derived from that
+# rather than baked into the tree.
+HERMES_CONFIG_NAME = "config.yaml"
+# How often that file is re-read.  Hermes binds its router to a free port on
+# every start and rewrites base_url to match, so a dashboard that resolves the
+# address once describes a socket nobody is listening on from the first restart
+# on.  Re-reading is a stat plus a 4 KB parse -- cheap enough to simply repeat,
+# and far too cheap to be worth watching the file.  Fifteen seconds keeps a
+# restart invisible without putting a file read on every two-second sample; a
+# router that has stopped answering short-circuits the wait entirely (see
+# Hub._refresh_router).
+ROUTER_REFRESH_SECONDS = 15.0
+
+
+def hermes_config_candidates(live_log=None):
+    """The config.yaml paths to try, most specific first."""
+    candidates = []
+    if live_log is not None:
+        # <hermes-home>/logs/llama-server.log -> <hermes-home>/config.yaml
+        candidates.append(Path(live_log).parent.parent / HERMES_CONFIG_NAME)
+    candidates.append(Path(_LOCAL_APPDATA) / "hermes" / HERMES_CONFIG_NAME)
+    return candidates
+
+
+def read_model_base_url(text):
+    """The ``model.base_url`` from a Hermes config.yaml, or None.
+
+    Parsed by hand instead of with a YAML library: this is the only key the
+    dashboard wants, the file is machine-written with two levels of indentation
+    at most, and pulling in PyYAML for one line would add the first dependency
+    to a tree that deliberately has none.
+    """
+    in_model = False
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line[:1].isspace():
+            # A top-level key: only model: opens the block we care about.
+            in_model = stripped.split(":", 1)[0].strip() == "model"
+            continue
+        if not in_model:
+            continue
+        key, separator, value = stripped.partition(":")
+        if separator and key.strip() == "base_url":
+            value = value.strip().strip("'\"")
+            if value:
+                return value
+    return None
+
+
+def strip_api_suffix(url):
+    """A llama.cpp base_url, from the endpoint URL Hermes writes.
+
+    Hermes stores the address the way a client calls it -- ``host:port/v1`` --
+    while every collector here appends its own path (``/v1/models``, ``/props``,
+    ``/metrics``).  Keeping the suffix would ask the router for
+    ``/v1/v1/models`` and get a 404 that reads exactly like a router with no
+    models loaded.
+    """
+    trimmed = url.rstrip("/")
+    if trimmed.lower().endswith("/v1"):
+        trimmed = trimmed[:-3].rstrip("/")
+    return trimmed
+
+
+def resolve_hermes_router(configured, live_log=None):
+    """The router Hermes is serving from right now, and why that one.
+
+    Hermes' own config.yaml wins: it names the router the application is
+    actually talking to, which is the one whose loaded model this panel exists
+    to show.  ``config.json`` stays the fallback for a box where Hermes keeps no
+    config.yaml (or where this dashboard is pointed at a hand-rolled router
+    directly), because a pinned address is still better than none -- the reason
+    string says which of the two was used, and it goes to run.log so the choice
+    is never silent.
+    """
+    for candidate in hermes_config_candidates(live_log):
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        url = read_model_base_url(text)
+        if url:
+            return strip_api_suffix(url), "model.base_url in %s" % candidate
+    return strip_api_suffix(configured or ""), "no Hermes config.yaml -- using config.json"
+
 
 ROOT = Path(__file__).resolve().parent
 FRONTEND = ROOT / "frontend"
@@ -302,7 +398,6 @@ class Hub(object):
 
     def __init__(self, config):
         self.config = config
-        self.endpoints = [LlamaEndpoint(spec) for spec in config["endpoints"]]
         live = config.get("live") or {}
         # Resolved once at startup, not per sample: the choice depends on which
         # files exist, and re-deciding it every two seconds would follow a log
@@ -310,7 +405,48 @@ class Hub(object):
         self.live_log, self.live_log_reason = None, ""
         if live.get("enabled", True):
             self.live_log, self.live_log_reason = resolve_live_log(live.get("log"))
-            self.endpoints.append(LiveEndpoint(self.live_log))
+        # The hermes endpoint follows the router Hermes names in its own
+        # config.yaml, because that is the instance the application is talking
+        # to.  The router comes up on a fresh port on every restart, so the
+        # address in config.json goes stale; with a second router alive at once
+        # (the desktop app's beside a hand-started one) the stale address
+        # describes an instance running a different model, and the panel then
+        # reports a model nobody is serving.  The live endpoint is anchored to
+        # the same router: asked about themselves, two routers cannot answer for
+        # each other, and a log names whichever instance writes it.
+        specs = []
+        self.router_url, self.router_reason, self.router_api_key = "", "", ""
+        # The address config.json names, kept as the fallback for a later
+        # re-resolve: it is what resolve_hermes_router falls back to, and the
+        # hermes spec cannot supply it again once it has been overwritten.
+        self.hermes_config_base = ""
+        for spec in config["endpoints"]:
+            spec = dict(spec)
+            if spec.get("id") == "hermes":
+                self.hermes_config_base = spec.get("base_url") or ""
+                spec["base_url"], self.router_reason = resolve_hermes_router(
+                    spec.get("base_url"), self.live_log)
+                self.router_url = spec["base_url"]
+                self.router_api_key = _resolve_api_key(spec)
+            specs.append(spec)
+        self.endpoints = [LlamaEndpoint(spec) for spec in specs]
+        # Held by reference so a router that moves can be followed: the address
+        # is not a constant, and the two objects quoting it have to be told.
+        self.hermes_endpoint = next(
+            (endpoint for endpoint in self.endpoints if endpoint.id == "hermes"),
+            None)
+        self.live_endpoint = None
+        if self.live_log is not None:
+            self.live_endpoint = LiveEndpoint(
+                self.live_log,
+                router_url=self.router_url,
+                api_key=self.router_api_key)
+            self.endpoints.append(self.live_endpoint)
+        # When the router address was last re-read, and whether the last sample
+        # found it unreachable -- which forces the next re-read instead of
+        # waiting out ROUTER_REFRESH_SECONDS.
+        self._router_checked_at = time.time()
+        self._router_unreachable = False
         self.system = system.SystemCollector()
         self.collect_gpu = bool(config["gpu"].get("enabled", True))
         self.collect_host = bool(config["system"].get("enabled", True))
@@ -354,6 +490,41 @@ class Hub(object):
         # the Hub that touches the disk, and a slow or malformed stats file
         # must not delay the first sample.  None when the feature is disabled.
         self.ledger = build_ledger(config)
+
+    def _refresh_router(self, force=False):
+        """Re-read the router address Hermes is serving from right now.
+
+        Hermes binds the router to a free port on every start and rewrites
+        ``model.base_url`` to match.  An address resolved once at startup is
+        therefore correct only until the first restart, after which the panel
+        describes a socket nobody is listening on.  This is the whole fix: the
+        file is re-read on the sampler's own cadence, and a change is pushed
+        into both objects that quote the address.
+
+        ``force`` skips the interval.  The caller sets it when the last sample
+        found the router unreachable, because "the address has moved" and "the
+        router is down" are indistinguishable from here, and the first case is
+        the one that must not wait fifteen seconds to be corrected.
+        """
+        if self.hermes_endpoint is None:
+            return
+        now = time.time()
+        if not force and now - self._router_checked_at < ROUTER_REFRESH_SECONDS:
+            return
+        self._router_checked_at = now
+        url, reason = resolve_hermes_router(self.hermes_config_base, self.live_log)
+        self.router_reason = reason
+        if url == self.router_url:
+            # Same address: nothing to tell the collectors, but the reason may
+            # have changed (a config.yaml that has just appeared, say) and it is
+            # what the panel shows when the card is empty.
+            return
+        log("hermes router moved: %s -> %s (%s)" % (
+            self.router_url or "none", url or "none", reason))
+        self.router_url = url
+        self.hermes_endpoint.set_base_url(url)
+        if self.live_endpoint is not None:
+            self.live_endpoint.set_router_url(url, self.router_api_key)
 
     def _push(self, key, value):
         series = self._series.get(key)
@@ -411,6 +582,12 @@ class Hub(object):
         started = time.time()
         payload = {"ts": started, "interval": self.config["server"]["interval_seconds"]}
 
+        # Before the endpoints are polled, not after: the router can move at any
+        # time, and a cycle that reads the new address is a cycle that never
+        # shows the old one as unreachable.  A router that failed last time
+        # skips the interval so a restart costs one frame, not fifteen seconds.
+        self._refresh_router(force=self._router_unreachable)
+
         gpu_future = (self._pool.submit(_timed(gpu.collect))
                       if self.collect_gpu else None)
         host_future = (self._pool.submit(_timed(self.system.collect))
@@ -441,6 +618,14 @@ class Hub(object):
 
         payload["timings"] = timings
         payload["sample_ms"] = (time.time() - started) * 1000.0
+
+        # Remember whether the router answered, for the next cycle's re-read.
+        # The first entry carrying this id is the router endpoint itself; the
+        # live card shares the id and is not what is being asked about.
+        for endpoint in endpoints:
+            if endpoint.get("id") == "hermes":
+                self._router_unreachable = not endpoint.get("up")
+                break
 
         # The tier this sample gets booked under, computed once: the ledger
         # stamps it and the UI marks the tier row it is standing on with it, so
@@ -871,7 +1056,9 @@ def main():
     for endpoint in hub.endpoints:
         log("watching %s -> %s" % (
             endpoint.id, endpoint.base_url or getattr(endpoint, "log_path", None)))
-    if hub.live_log is not None:
+    if hub.router_url:
+        log("hermes router: %s (%s)" % (hub.router_url, hub.router_reason))
+    elif hub.live_log is not None:
         log("live model log: %s (%s)" % (hub.live_log, hub.live_log_reason))
     try:
         server.serve_forever()

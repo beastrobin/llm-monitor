@@ -252,6 +252,28 @@ class LlamaEndpoint(object):
         self._models_cache = (0.0, [])
         self._props_cache = {}
 
+    def set_base_url(self, base_url):
+        """Move this endpoint to a new address, e.g. a router that changed port.
+
+        Everything cached here describes the instance that answered the old
+        address, so all of it is dropped: the preset list and the props bodies
+        belong to a process that is gone, and the failure counter would carry a
+        backoff into the new address -- keeping it unpolled for up to fifteen
+        cycles over a move that was never its fault.  Returns whether the
+        address actually changed.
+        """
+        base_url = (base_url or "").rstrip("/")
+        if base_url == self.base_url:
+            return False
+        self.base_url = base_url
+        self._samplers = {}
+        self._models_cache = (0.0, [])
+        self._props_cache = {}
+        self._failures = 0
+        self._skip_cycles = 0
+        self._last_error = None
+        return True
+
     def _offline_payload(self):
         return {
             "id": self.id,
