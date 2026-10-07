@@ -30,6 +30,7 @@ from urllib.parse import unquote, urlparse
 
 from collectors import gpu, power, stats, system
 from collectors.llama import LlamaEndpoint, _resolve_api_key
+from collectors.strata import StrataEndpoint
 from collectors.hermes_live import LiveEndpoint
 
 # The desktop launcher starts this through pythonw.exe, which has no console at
@@ -186,6 +187,58 @@ def resolve_hermes_router(configured, live_log=None):
         if url:
             return strip_api_suffix(url), "model.base_url in %s" % candidate
     return strip_api_suffix(configured or ""), "no Hermes config.yaml -- using config.json"
+
+
+# Which collector reads an endpoint, named in that endpoint's own spec.  Nearly
+# every llama.cpp-shaped server exports Prometheus text at /metrics; Strata
+# returns JSON instead, and a collector that assumes the wrong one reports an
+# endpoint that is up with a model loaded and not one number to show for it --
+# the whole model card blank, with nothing on screen to say why.  The dialect
+# belongs to the server, so it is configured rather than sniffed: a probe would
+# have to run on every start, including the starts where that server is down,
+# and would still have to guess for anything that answers like llama.cpp.
+# An unset or unknown kind reads as llama.cpp, so an old config.json keeps
+# working untouched.
+ENDPOINT_KINDS = {"llama": LlamaEndpoint, "strata": StrataEndpoint}
+
+
+def address_key(url):
+    """A comparable key for an endpoint address, or None for no address.
+
+    Two endpoints watching one server have to be recognised as one server even
+    when they spell it differently: Hermes writes whatever its own config holds,
+    and ``localhost`` and ``127.0.0.1`` are the same machine.  Only the host and
+    the port take part -- they are the entire address as far as connecting goes,
+    so nothing else may decide whether two cards describe one server.
+    """
+    text = (url or "").strip()
+    if not text:
+        return None
+    parsed = urlparse(text if "//" in text else "//" + text)
+    host = (parsed.hostname or "").lower()
+    if host in ("localhost", "::1"):
+        host = "127.0.0.1"
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return host, port
+
+
+def same_address(left, right):
+    """Whether two endpoint URLs name the same host and port."""
+    key = address_key(left)
+    return key is not None and key == address_key(right)
+
+
+def build_endpoint(spec):
+    """The collector for one endpoint spec, chosen by its declared dialect."""
+    kind = (spec.get("kind") or "llama").strip().lower()
+    collector = ENDPOINT_KINDS.get(kind)
+    if collector is None:
+        log("endpoint %s: unknown kind %r, reading it as llama.cpp" % (
+            spec.get("id"), spec.get("kind")))
+        collector = LlamaEndpoint
+    return collector(spec)
 
 
 ROOT = Path(__file__).resolve().parent
@@ -429,7 +482,7 @@ class Hub(object):
                 self.router_url = spec["base_url"]
                 self.router_api_key = _resolve_api_key(spec)
             specs.append(spec)
-        self.endpoints = [LlamaEndpoint(spec) for spec in specs]
+        self.endpoints = [build_endpoint(spec) for spec in specs]
         # Held by reference so a router that moves can be followed: the address
         # is not a constant, and the two objects quoting it have to be told.
         self.hermes_endpoint = next(
@@ -447,6 +500,10 @@ class Hub(object):
         # waiting out ROUTER_REFRESH_SECONDS.
         self._router_checked_at = time.time()
         self._router_unreachable = False
+        # Which endpoint, if any, already covers the address Hermes follows.
+        # Filled in by _active_endpoints() on every sample; named so the
+        # startup log can say why the hermes card is not on screen.
+        self.router_covered_by = ""
         self.system = system.SystemCollector()
         self.collect_gpu = bool(config["gpu"].get("enabled", True))
         self.collect_host = bool(config["system"].get("enabled", True))
@@ -514,10 +571,14 @@ class Hub(object):
         self._router_checked_at = now
         url, reason = resolve_hermes_router(self.hermes_config_base, self.live_log)
         self.router_reason = reason
-        if url == self.router_url:
-            # Same address: nothing to tell the collectors, but the reason may
-            # have changed (a config.yaml that has just appeared, say) and it is
-            # what the panel shows when the card is empty.
+        if same_address(url, self.router_url):
+            # Same host and port, so the same server: nothing to tell the
+            # collectors.  Compared by address rather than by string, because a
+            # config rewritten as `localhost` instead of `127.0.0.1` is a change
+            # of spelling and not of server -- re-pushing it would drop every
+            # cache and reset the rate baseline for nothing.  The reason still
+            # updates: it may have changed (a config.yaml that has just
+            # appeared, say) and it is what the panel shows on an empty card.
             return
         log("hermes router moved: %s -> %s (%s)" % (
             self.router_url or "none", url or "none", reason))
@@ -525,6 +586,49 @@ class Hub(object):
         self.hermes_endpoint.set_base_url(url)
         if self.live_endpoint is not None:
             self.live_endpoint.set_router_url(url, self.router_api_key)
+
+    def _active_endpoints(self):
+        """The endpoints one sample polls, with an address shown only once.
+
+        Hermes need not front a router of its own: pointed at a direct provider
+        it names a plain server, and this dashboard very likely already watches
+        that server through its own endpoint.  Polling both would put one
+        machine on screen twice and -- because the ledger keys a reading by
+        (endpoint, model) -- book every token twice.  So the address Hermes
+        follows yields to an endpoint that already covers it, and the live card
+        goes with it: that card exists to find the child process behind a
+        router, and a server that is asked directly has no child to find.
+
+        Decided per sample rather than at startup, because Hermes can be
+        repointed (or can fall back to a router on its own port) at any moment,
+        and both cards have to return the moment the addresses differ again.
+        """
+        addresses = set()
+        for endpoint in self.endpoints:
+            if endpoint is self.hermes_endpoint or endpoint is self.live_endpoint:
+                continue
+            key = address_key(endpoint.base_url)
+            if key is not None:
+                addresses.add(key)
+        followed = address_key(self.router_url)
+        covered = followed is not None and followed in addresses
+
+        # Named without falling back on the followed endpoint itself: it carries
+        # the same address by definition, and naming it would explain the
+        # duplicate with the very card that is being hidden.
+        self.router_covered_by = ""
+        if covered:
+            self.router_covered_by = next(
+                endpoint.id for endpoint in self.endpoints
+                if endpoint not in (self.hermes_endpoint, self.live_endpoint)
+                and same_address(endpoint.base_url, self.router_url))
+
+        active = []
+        for endpoint in self.endpoints:
+            if covered and endpoint in (self.hermes_endpoint, self.live_endpoint):
+                continue
+            active.append(endpoint)
+        return active
 
     def _push(self, key, value):
         series = self._series.get(key)
@@ -587,13 +691,17 @@ class Hub(object):
         # shows the old one as unreachable.  A router that failed last time
         # skips the interval so a restart costs one frame, not fifteen seconds.
         self._refresh_router(force=self._router_unreachable)
+        # Which endpoints to poll this cycle.  Read after the refresh: whether
+        # Hermes' address is a duplicate of another endpoint's is the very thing
+        # the refresh can change.
+        active = self._active_endpoints()
 
         gpu_future = (self._pool.submit(_timed(gpu.collect))
                       if self.collect_gpu else None)
         host_future = (self._pool.submit(_timed(self.system.collect))
                        if self.collect_host else None)
         endpoint_futures = [self._pool.submit(_timed(endpoint.poll))
-                            for endpoint in self.endpoints]
+                            for endpoint in active]
 
         timings = {"endpoints": []}
         endpoints = []
@@ -619,13 +727,17 @@ class Hub(object):
         payload["timings"] = timings
         payload["sample_ms"] = (time.time() - started) * 1000.0
 
-        # Remember whether the router answered, for the next cycle's re-read.
-        # The first entry carrying this id is the router endpoint itself; the
-        # live card shares the id and is not what is being asked about.
-        for endpoint in endpoints:
-            if endpoint.get("id") == "hermes":
-                self._router_unreachable = not endpoint.get("up")
-                break
+        # Remember whether the address Hermes follows answered, for the next
+        # cycle's re-read.  Taken from the payload rather than from one endpoint
+        # object so it holds either way round: when Hermes is followed directly
+        # the answer comes from its own card, and when another endpoint already
+        # covers that address -- and so is the one being polled -- it comes from
+        # that one.
+        followed = address_key(self.router_url)
+        answered = [ep.get("up") for ep in endpoints
+                    if followed is not None
+                    and same_address(ep.get("base_url"), self.router_url)]
+        self._router_unreachable = followed is not None and not any(answered)
 
         # The tier this sample gets booked under, computed once: the ledger
         # stamps it and the UI marks the tier row it is standing on with it, so
@@ -1053,13 +1165,20 @@ def main():
     else:
         log("power limit control: read-only -- nvidia-smi -pl needs an "
             "elevated token; start via start_monitor_admin.vbs to enable it")
-    for endpoint in hub.endpoints:
+    # The endpoints the first sample will poll.  A card that is left out is a
+    # deliberate decision, so the line below says which one and why instead of
+    # letting the reader wonder where it went.
+    for endpoint in hub._active_endpoints():
         log("watching %s -> %s" % (
             endpoint.id, endpoint.base_url or getattr(endpoint, "log_path", None)))
     if hub.router_url:
         log("hermes router: %s (%s)" % (hub.router_url, hub.router_reason))
     elif hub.live_log is not None:
         log("live model log: %s (%s)" % (hub.live_log, hub.live_log_reason))
+    if hub.router_covered_by:
+        log("hermes card hidden: %s is already watched as %s -- one address, one "
+            "card, and the ledger counts its tokens once" % (
+                hub.router_url, hub.router_covered_by))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

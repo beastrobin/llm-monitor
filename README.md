@@ -291,6 +291,15 @@ python tools/sync_hermes_key.py --check  # 只报告差异，不动文件
   取存在的里面最新的一个；显式配了 `live.log` 且文件在，就以它为准。真配错了也不会只剩一句报错
   —— 卡片上会直接写出它找过的位置。
 - 端点可以配多个，router 模式和单模型模式会自动识别。
+- `kind` 声明这个端点说的是哪种方言。**不写就是 `llama`**（Prometheus 文本 `/metrics`），
+  `"kind": "strata"` 表示 Strata 服务（JSON `/metrics`）。方言是服务端的属性，所以配在配置里
+  而不是靠探测 —— 探测要在每次启动时都跑一遍（包括那个服务没起的启动），而且对"长得像
+  llama.cpp 但不是"的服务照样会猜错。写错的 `kind` 会在启动日志里点出来并退回 `llama`。
+
+```json
+{ "id": "strata", "label": "Strata", "kind": "strata", "base_url": "http://127.0.0.1:8200" }
+```
+
 - 服务未启动的端点不会拖慢采样，只是显示为离线。
 - `stats.enabled` 设成 `false` 就关掉 token 账本（既不读也不写）；`stats.path` 的相对路径按项目
   根目录解析，父目录不存在会自动创建；`stats.keep_days` 控制每日明细的保留天数，超期的"日桶"
@@ -349,9 +358,13 @@ loader 起的 server 默认**不带** `/metrics` 端点，需要在 GUI 的 **Ad
    猜法本身就不可靠**：`%LOCALAPPDATA%` 在任何 Windows 上都有，Hermes 却不一定往里写东西，
    猜错的后果又只是"卡片空白"。现在改成候选列表 + 最新者优先（见 v1.2），key 由
    `tools/sync_hermes_key.py` 在每次启动前同步。
-8. **`for /f` 的命令集里再嵌一层引号，cmd 会解析错**：启动脚本原本用它探测端口，于是每次启动
-   都先打印一行 `'C:\...\python.exe" -c "..."' is not recognized`（探测因此永远失败）。
-   直接调用、看退出码就够了。
+ 8. **`for /f` 的命令集里再嵌一层引号，cmd 会解析错**：启动脚本原本用它探测端口，于是每次启动
+    都先打印一行 `'C:\...\python.exe" -c "..."' is not recognized`（探测因此永远失败）。
+    直接调用、看退出码就够了。
+ 9. **"端点在线"不等于"取到了数"**：采集器的每一种失败都会变成 `null`，而 `null` 在页面上和
+    "服务空闲"长得一样。Strata 那次就是这样 —— `up=True`、模型名、上下文窗口全对，
+    `/metrics` 却是 JSON，所有的 counter 都解析成 `None`，**整张模型卡空白而没有任何报错**。
+    所以"数不对"要先看**协议**（是不是这种方言），再看字段名。同理，端点的自报状态只说明它答话了。
 
 ## 目录结构
 
@@ -534,6 +547,48 @@ python 的控制台，而那个窗口样式只对 `conhost` 生效 —— Window
   以及 live 端点里缓存的"哪个模型在跑"的结论。
 - 地址里带的 `/v1` 会被去掉再交给采集器：采集器自己拼 `/v1/models`、`/props`、`/metrics`，
   留着后缀会去请求 `/v1/v1/models`，拿回一个 404 —— 而 404 长得和"router 上什么都没加载"一模一样。
+
+**Strata 端点：同一个模型卡片，另一种 `/metrics` 方言。** Hermes 的 provider 换成 strata 之后，
+面板上 `strata` 那台**在线、模型名也对，但一个数都没有**：`/metrics` 是 JSON，而采集器按
+Prometheus 文本解析，每个 counter 都解析失败 → 恒为 `null`。页面上完全看不出这是协议不匹配，
+和"服务挂了"长得一样。
+
+- `collectors/strata.py` 用 JSON 的字段喂出**同一套 counter 名字**，速率仍由 `ModelSampler` 算 ——
+  "counter → 瞬时速率"全仓只有一份实现，两种线格式共用。
+- 口径按 `serve/server.py` 的定义接：`prompt_ms` 只覆盖**没命中缓存**的那部分（`prompt_n =
+  prompt_tokens - cache_n` 就写在同一处），所以 prompt 与 cached 互斥、prefill 只统计前者 ——
+  与面板原有口径一致。`kv_hit_ratio` / `mtp_accept_ratio` 因此和 llama.cpp 那套可比。
+- **Strata 的两个瞬时速率取自引擎自己报的**（`live.tok_s` / `prefill_tok_s_mean`），不是 counter
+  差分：`totals` 是**请求结束时**才累加的（`serve/server.py` 在写 history 那一段加），两次采样之间
+  几乎恒为 0，用差分会让曲线永远是空的。累计均值仍由 counter 算，两者在引擎忙时一致。
+- `MTP 每步接受` 恒为 `—`：Strata 报草稿"给了多少、收了多少"，不报验证步数，所以既不显示也
+  不硬凑。`n_decode_total` 同理。
+- 已知限制：`totals` 在服务重启时归零（`ModelSampler`/账本已按"counter 回退 = 重启"处理），但
+  同一进程内换模型不会归零 —— 那一段会被记到先加载的那个模型名下。与 llama.cpp 的 counter 同性质。
+
+**一张卡，一份账：按地址去重。** Hermes 直连 Strata 时，`config.yaml` 里的 `model.base_url` 就是
+Strata 的地址，于是看板会把它当成两个来源（跟随卡 + 显式配置的 `strata` 卡）。后果不只是画面
+重复：账本按 `(endpoint, model)` 记账，两张卡各记一次就是**同一批 token 记两遍**。
+
+- 跟随到的地址若已被别的端点覆盖，就把 hermes 卡与 live「当前模型」卡一起让出来，并在启动日志
+  写明 `hermes card hidden: <地址> is already watched as <id>`。live 卡一起让出的理由：它的职责是
+  找 router 派生出来的子进程，直连的单模型服务没有子进程可找。
+- **每个采样周期重判**，不是启动时定一次：Hermes 随时可能被改回 router（那时地址不同，两张卡
+  立刻回来）。
+- 地址比较用 host+port，`localhost` 与 `127.0.0.1` 视为同一台；只比字符串会让同一台服务在换一种
+  写法后重新裂成两张卡。
+
+**Strata 端点接上，卡不再"在线但空白"。** provider 换成 strata 之后，面板上那台服务模型名都对、
+数字一个没有：`/metrics` 是 JSON，而采集器把正文当 Prometheus 文本解析，所有 counter 恒为 `null`。
+现在多了一种方言，同一套卡片、同一套速率算法，且按地址去重 —— 详见上文「Strata 端点」与
+「一张卡，一份账」两节。
+
+- `collectors/strata.py`：JSON → llama.cpp 的 counter 名字，速率仍由 `ModelSampler` 算。
+- `kind` 写进 `config.json` 的端点声明；不写就是 `llama`，老配置不用改。
+- 两个瞬时速率改取引擎自报的 `live.tok_s` / `prefill_tok_s_mean`：`totals` 是请求**结束时**
+  才累加的，用 counter 差分会让曲线永远是空的。
+- 字段映射与地址去重两处都是**静默**失败：读错一个字段、判错一次去重，卡片照常显示一个像样
+  的数字或数量，没有任何异常可抓 —— 所以这两处只能拿真实端点逐字段核对验收。
 
 ### v1.0
 
