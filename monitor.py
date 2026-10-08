@@ -5,8 +5,9 @@ Serves a single-page dashboard plus three JSON endpoints:
 * ``GET  /api/snapshot``     -- the current sample and the retained history,
   used once on page load so a refresh does not wipe the charts.
 * ``GET  /api/stream``       -- server-sent events, one sample every interval.
-* ``POST /api/power-limit``  -- apply a GPU power preset.  The only write on
-  this server; see ``Handler._write_refusal`` for how it is fenced off.
+* ``POST /api/power-limit``  -- apply a GPU power preset.
+* ``POST /api/restart``      -- relaunch this process and exit.  The two
+  writes are fenced off the same way; see ``Handler._write_refusal``.
 
 Everything is built on the standard library: the collectors shell out to
 nvidia-smi and call Win32 through ctypes, and the server is
@@ -18,6 +19,7 @@ import json
 import os
 import queue
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -46,7 +48,7 @@ del _stream_name
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.2"
+VERSION = "1.3"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
@@ -967,6 +969,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if path == "/api/restart":
+            self._restart()
+            return
         if path != "/api/power-limit":
             self.close_connection = True
             self._send_json({"ok": False, "error": "not_found"}, 404)
@@ -987,6 +992,44 @@ class Handler(BaseHTTPRequestHandler):
 
         result = self.hub.set_power_limit(body.get("watts"))
         self._send_json(result, 200 if result.get("ok") else 409)
+
+    def _restart(self):
+        """Relaunch this process, then let go of the port.
+
+        The button exists because the launcher refuses to start a second copy
+        while the dashboard answers (and the collector code only loads at
+        startup), so applying a code change meant hunting the pid down by hand.
+        The replacement is spawned detached -- it must outlive this process,
+        which is its parent -- with the same interpreter and arguments, and an
+        environment marker that makes it retry the bind: SO_EXCLUSIVEADDRUSE
+        means the first attempts collide with this listener, and the retry
+        rides out the handover.  The response goes out before the shutdown so
+        the button learns the restart was accepted, not that the server died.
+        """
+        refusal = self._write_refusal()
+        if refusal:
+            log("rejected restart: %s" % refusal)
+            self.close_connection = True
+            self._send_json({"ok": False, "error": refusal}, 403)
+            return
+
+        self._send_json({"ok": True}, 200)
+        env = os.environ.copy()
+        env["LLM_MONITOR_RESTART"] = "1"
+        flags = 0
+        if os.name == "nt":
+            flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        try:
+            subprocess.Popen([sys.executable] + sys.argv, env=env, cwd=str(ROOT),
+                             creationflags=flags, close_fds=True)
+        except OSError as exc:
+            log("restart failed to spawn the replacement: %s" % exc)
+            return
+        log("restart requested from the dashboard -- handing the port over")
+        # shutdown() returns once serve_forever stops; main()'s finally then
+        # flushes the ledger and closes the socket, which frees the port for
+        # the replacement's retry loop.
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -1129,33 +1172,43 @@ def main():
 
     host = config["server"]["host"]
     port = int(config["server"]["port"])
-    try:
-        server = DashboardServer((host, port), Handler)
-    except OSError as exc:
-        log("cannot listen on %s:%d -- %s" % (host, port, exc))
-        existing = _probe_existing(host, port)
-        if existing is None:
-            log("the port is taken, but it does not answer like a dashboard; "
-                "stop whatever holds it, or start with --port <other>")
-            code = EXIT_PORT_BUSY_FOREIGN
-        else:
-            holder_pid = existing.get("pid", "unknown")
-            elevated = bool(existing.get("elevated"))
-            log("a dashboard is already running on this port "
-                "(pid %s, power limit control: %s)"
-                % (holder_pid, "enabled" if elevated else "read-only"))
-            if elevated:
-                log("open http://%s:%d in the browser -- it can already "
-                    "change the GPU power limit, no second copy needed"
-                    % (host, port))
-                code = EXIT_PORT_BUSY
-            else:
-                log("that copy can only monitor. To get the power control, "
-                    "stop it first:")
-                log("    taskkill /PID %s /F" % holder_pid)
-                log("then double-click start_monitor_admin.vbs")
-                code = EXIT_PORT_BUSY_READONLY
-        raise SystemExit(code)
+    # A replacement spawned by /api/restart starts while its parent still
+    # holds the port, and SO_EXCLUSIVEADDRUSE makes every early bind fail --
+    # so it retries for a few seconds and rides out the handover, instead of
+    # reading its own parent as an intruder on the port.  A plain launch gets
+    # no retries: the "already running" report below should be instant.
+    retry_until = time.monotonic() + 10.0 if os.environ.get("LLM_MONITOR_RESTART") else 0.0
+    while True:
+        try:
+            server = DashboardServer((host, port), Handler)
+            break
+        except OSError as exc:
+            if time.monotonic() >= retry_until:
+                log("cannot listen on %s:%d -- %s" % (host, port, exc))
+                existing = _probe_existing(host, port)
+                if existing is None:
+                    log("the port is taken, but it does not answer like a dashboard; "
+                        "stop whatever holds it, or start with --port <other>")
+                    code = EXIT_PORT_BUSY_FOREIGN
+                else:
+                    holder_pid = existing.get("pid", "unknown")
+                    elevated = bool(existing.get("elevated"))
+                    log("a dashboard is already running on this port "
+                        "(pid %s, power limit control: %s)"
+                        % (holder_pid, "enabled" if elevated else "read-only"))
+                    if elevated:
+                        log("open http://%s:%d in the browser -- it can already "
+                            "change the GPU power limit, no second copy needed"
+                            % (host, port))
+                        code = EXIT_PORT_BUSY
+                    else:
+                        log("that copy can only monitor. To get the power control, "
+                            "stop it first:")
+                        log("    taskkill /PID %s /F" % holder_pid)
+                        log("then double-click start_monitor_admin.vbs")
+                        code = EXIT_PORT_BUSY_READONLY
+                raise SystemExit(code)
+            time.sleep(0.5)
     server.daemon_threads = True
 
     log("llm-monitor v%s -- dashboard on http://%s:%d  (interval %.1fs, pid %d)" % (

@@ -184,7 +184,6 @@ function readFrames(base, count, timeoutMs) {
       ? ' ✓ 与服务端 config.version 一致'
       : ' ✗ 服务端下发 "' + serverVersion + '"，徽章却是 "' + badgeText + '"'));
   say('页面 meta: ' + text(doc.getElementById('meta')));
-  say('历史脚注: ' + text(doc.getElementById('foot-note')));
 
   // --------------------------------------------------------- live update check
   // A pushed frame has to move the *numbers*, not only the charts.  This
@@ -215,8 +214,13 @@ function readFrames(base, count, timeoutMs) {
         }).join(' | ');
     };
     const pointsOf = function () {
-      const match = doc.getElementById('foot-note').textContent.match(/(\d+) \//);
-      return match ? Number(match[1]) : null;
+      // The footer line that used to print "曲线历史 N / 900 点" is gone, so
+      // read the retained length straight off a system card's spark payload:
+      // drawSpark parks the raw series on the canvas on every tick, and every
+      // series stays aligned with the shared timestamps.
+      const canvas = doc.querySelector('#sys canvas');
+      if (!canvas || !canvas._spark) return null;
+      return (canvas._spark.values || []).length || null;
     };
 
     const before = cardText();
@@ -308,7 +312,7 @@ function readFrames(base, count, timeoutMs) {
   // so report that first; any additional models keep their own title row.
   const hero = doc.querySelector('.hero');
   if (hero) {
-    say('  当前模型: ' + text(hero.querySelector('.hero-name')) +
+    say('  running 模型: ' + text(hero.querySelector('.hero-name')) +
       ' :' + text(hero.querySelector('.hero-port')) +
       ' | 标签: ' + Array.prototype.map.call(hero.querySelectorAll('.tag'), text).join(' / '));
   }
@@ -332,9 +336,6 @@ function readFrames(base, count, timeoutMs) {
   if (powerBox && powerBox.innerHTML) {
     const buttons = powerBox.querySelectorAll('button[data-watts]');
     const active = powerBox.querySelector('.pw-btn.on');
-    // The live readout is the half of the row that changes with every sample,
-    // so it is the half a blank-page bug would take out first.
-    say('  实时读数: ' + (text(powerBox.querySelector('.pw-live')) || '（无）'));
     if (buttons.length) {
       say('  档位按钮: ' + buttons.length + ' 个' +
         (active ? '，当前生效 ' + text(active) : '，无高亮'));
@@ -351,7 +352,7 @@ function readFrames(base, count, timeoutMs) {
   }
 
   say('');
-  say('—— Token 账本 ——');
+  say('—— 历史信息 ——');
   const statsGrid = doc.getElementById('token-stats');
   if (statsGrid && statsGrid.innerHTML) {
     statsGrid.querySelectorAll('.stat').forEach(function (cell) {
@@ -361,7 +362,6 @@ function readFrames(base, count, timeoutMs) {
     });
     const noteBox = doc.getElementById('token-note');
     say('  说明: [' + (noteBox ? noteBox.className : '') + '] ' + text(noteBox));
-    say('  汇总: ' + text(doc.getElementById('stats-summary')));
     const tierCards = doc.querySelectorAll('#token-tiers .tier');
     const tierLine = function (card) {
       return text(card.querySelector('.tier-head')) + ' — ' +

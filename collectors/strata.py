@@ -177,6 +177,29 @@ class StrataEndpoint(LlamaEndpoint):
         detail["model_ftype"] = props.get("model_ftype")
         detail["modalities"] = {"vision": True} if engine.get("images") else None
         detail["spec_types"] = None
+        # Strata's own Monitor tab leads with the engine's self-reported state:
+        # generating or idle, thinking or answering, how far the prompt read or
+        # the generation has come.  The counters can say what happened; only
+        # the engine says what it is doing right now, and this panel has no
+        # equivalent row -- so the fields ride through under their own key
+        # rather than being folded into the counters.
+        state = {}
+        for key in ("state", "phase", "parallel", "queued", "waiting",
+                    "elapsed_s", "max_tokens", "prompt_tokens", "prompt_read",
+                    "prompt_total", "generated", "tok_s"):
+            value = live.get(key)
+            if value is not None:
+                state[key] = value
+        detail["live_state"] = state or None
+        # The idle half of that panel reads "last: 839 tokens at 218.7 tok/s"
+        # -- the live block says nothing once the last request is done, so the
+        # engine's own request log (newest first) is where that comes from.
+        recent = payload.get("requests")
+        first = recent[0] if isinstance(recent, list) and recent and isinstance(recent[0], dict) else None
+        detail["last_request"] = {
+            "output_tokens": first.get("output_tokens"),
+            "decode_tok_s": first.get("decode_tok_s"),
+        } if first else None
         detail["slots"] = self._slots(payload)
         metrics = self._sampler(model_id).feed(self._series(payload), now)
         # The instantaneous series needs the engine's own rate, not a counter
@@ -189,8 +212,14 @@ class StrataEndpoint(LlamaEndpoint):
         # window this card plots, so that is what the instantaneous value is
         # built from; the cumulative average stays counter-derived, exactly as
         # it is for llama.cpp, and the two agree whenever the engine is busy.
-        if isinstance(live.get("tok_s"), (int, float)):
-            metrics["decode_tps_inst"] = float(live["tok_s"])
+        # And when the engine reports no rate either -- the scrape where the
+        # last request finishes and the engine turns idle -- the value is
+        # **None**, never the sampler's delta: that one scrape carries the whole
+        # request's token count, and dividing it by the window is the 10,000
+        # t/s spike that used to squash every real reading into a flat line.
+        tok_s = live.get("tok_s")
+        prefill = live.get("prefill_tok_s_mean")
+        metrics["decode_tps_inst"] = float(tok_s) if isinstance(tok_s, (int, float)) else None
         # `prefill_tok_s_mean` is reported only while the engine is busy, and it
         # holds the current request's prefill rate from the moment it reads the
         # prompt until the request ends.  Not narrowed to the "reading" phase:
@@ -199,8 +228,7 @@ class StrataEndpoint(LlamaEndpoint):
         # whole of the first one's decode.  A flat line through the decode phase
         # is what this card already gets from llama.cpp, whose prompt counter
         # likewise stops while the engine generates.
-        if isinstance(live.get("prefill_tok_s_mean"), (int, float)):
-            metrics["prefill_tps_inst"] = float(live["prefill_tok_s_mean"])
+        metrics["prefill_tps_inst"] = float(prefill) if isinstance(prefill, (int, float)) else None
         detail["metrics"] = metrics
         # The draft counters are the ground truth for "is MTP running": Strata
         # reports no --spec-type launch argument to read it off, and a nonzero

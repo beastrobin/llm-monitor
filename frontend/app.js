@@ -218,6 +218,19 @@ function drawSpark(canvas, data, options) {
       if (clean[i] < lo) lo = clean[i];
       if (clean[i] > hi) hi = clean[i];
     }
+    // Outlier filter: one completion burst an order of magnitude above the
+    // rest (a stepped counter landing whole in one scrape, a cache-hit flash)
+    // used to own the y-axis and squash every real reading into a flat line.
+    // The ceiling comes from the 98th percentile with headroom instead; the
+    // spike still draws, pinned to the top edge, and the hover tooltip still
+    // reports its true value -- filtered scale, not hidden data.  A series
+    // whose p98 is zero (mostly idle) is left alone: there the high points
+    // are the signal, not the noise.
+    if (hi > 0) {
+      const sorted = clean.slice().sort(function (a, b) { return a - b; });
+      const p98 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.98))];
+      if (p98 > 0 && hi > p98 * 3) hi = p98 * 1.25;
+    }
     const refSpan = Math.max(max - min, 1e-6);
     let span = hi - lo;
     if (span < refSpan * 0.12) {
@@ -286,11 +299,16 @@ function drawSpark(canvas, data, options) {
     return { x: x, y: yOf(value), lo: yOf(p.lo), hi: yOf(p.hi), value: value };
   };
 
+  // Empty samples (engine idle, no rate reported) are skipped without
+  // breaking the line: the last reading before a gap connects straight to the
+  // first one after it, the way Strata's own sparklines read.  Treating them
+  // as breaks shattered the speed curves into confetti every time a request
+  // ended and the engine went quiet between calls.
   const runs = [];
   let run = null;
   for (let k = 0; k < count; k++) {
     const point = pointAt(k);
-    if (!point) { run = null; continue; }
+    if (!point) continue;
     if (!run) { run = []; runs.push(run); }
     run.push(point);
   }
@@ -645,6 +663,43 @@ function cleanSpecTypes(value) {
   return parts.join('+');
 }
 
+// Strata's Monitor tab leads with a model-state panel: five lamps over its
+// state machine plus one line about what the request is doing.  The lamps are
+// the engine's own vocabulary (serve/web/app.js picks them the same way:
+// queued wins over the state when requests are waiting); the compact shape --
+// lamps and one line squeezed onto the hero row's right -- is ours.
+const STATE_LAMPS = [
+  ['idle', '空闲'], ['reading', '读prompt'], ['generating', '生成中'],
+  ['queued', '排队'], ['error', '出错'],
+];
+function heroStateHtml(model) {
+  const live = model && model.live_state;
+  if (!live || !live.state) return '';
+  const on = live.queued > 0 ? 'queued' : live.state;
+  const lamps = STATE_LAMPS.map(function (l) {
+    const lit = l[0] === on || l[0] === live.state;
+    return '<span class="state-lamp' + (lit ? ' on s-' + l[0] : '') + '">' +
+      '<i></i>' + l[1] + '</span>';
+  }).join('');
+  let note = '等待请求';
+  if (live.state === 'reading') {
+    note = live.prompt_total
+      ? '读 ' + countText(live.prompt_read) + '/' + countText(live.prompt_total) + ' tok'
+      : '读 prompt ' + countText(live.prompt_tokens) + ' tok';
+  } else if (live.state === 'generating') {
+    note = (live.phase || '生成中') + ' · ' + countText(live.generated) + ' tok' +
+      (live.tok_s != null ? ' @ ' + num(live.tok_s, 1) + ' t/s' : '');
+  } else {
+    const last = model.last_request;
+    if (last && last.output_tokens != null) {
+      note = '上次 ' + countText(last.output_tokens) + ' tok' +
+        (last.decode_tok_s != null ? ' @ ' + num(last.decode_tok_s, 1) + ' t/s' : '');
+    }
+  }
+  return '<span class="hero-state" title="引擎自报状态（Strata /metrics live 块）">' +
+    lamps + '<span class="state-note">' + esc(note) + '</span></span>';
+}
+
 // The spec tags shown next to a model name (quant / context / slots / MTP).
 // Shared by the hero line and the per-model title so both read identically.
 function modelTags(model) {
@@ -665,6 +720,25 @@ function modelTags(model) {
 function shortModelName(id) {
   const seg = String(id || 'model').split(/[\\/]/).pop();
   return seg.replace(/\.gguf$/i, '');
+}
+
+// "source / short name" for the ledger tables.  The source prefix carries a
+// per-endpoint colour (strata blue, hermes green, loader amber) so a glance
+// at a column of names says which server produced the tokens without reading
+// each prefix.  Unknown sources stay neutral.
+function sourceName(row) {
+  if (!row.endpoint) return esc(shortModelName(row.model));
+  const key = String(row.endpoint).toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+  return '<span class="src-tag src-' + esc(key) + '">' + esc(row.endpoint) + '/</span>' +
+    esc(shortModelName(row.model));
+}
+
+// Power-tier chip class for the detail table: one colour per ceiling, cool
+// for the eco tiers, hot for the full-power one.  The watts value is baked
+// into the class so the CSS -- not the row builder -- owns the palette.
+function tierChipClass(watts) {
+  if (!watts) return ' unknown';
+  return ' t-' + Math.round(Number(watts));
 }
 
 function portOf(url) {
@@ -908,19 +982,23 @@ function applyModel(root, endpoint, model) {
     // opening the per-position list does not snap shut two seconds later.
     const openDetail = detail.querySelector('details');
     const wasOpen = !!(openDetail && openDetail.open);
+    // The row used to carry context ceiling and speculative-decoding chips --
+    // both already sit on the hero line as spec tags (262K 上下文 / MTP ...),
+    // and empty items drew a bare "—" that read as noise.  So: no duplicates,
+    // and an item only appears when the engine actually reported a number.
     const items = [
       { label: '累计均值', value: num(metrics.decode_tps_avg, 1), unit: 't/s' },
       { label: 'prefill 均值', value: num(metrics.prefill_tps_avg, 0), unit: 't/s' },
-      { label: '序列峰值', value: countText(metrics.n_tokens_max), unit: 'tok' },
-      { label: '上下文上限', value: countText(model.n_ctx), unit: 'tok' },
-      { label: '处理中', value: num(metrics.requests_processing, 0), unit: '请求' },
-      { label: '批内 slot', value: num(metrics.busy_slots_per_decode, 2), unit: '个' },
-      {
-        label: '投机解码',
-        value: model.mtp_enabled ? (cleanSpecTypes(model.mtp_type) || '启用') : '关闭',
-        title: '取自 preset 的启动参数 --spec-type；/props 的 speculative.types 不可靠',
-      },
     ];
+    if (typeof metrics.n_tokens_max === 'number') {
+      items.push({ label: '序列峰值', value: countText(metrics.n_tokens_max), unit: 'tok' });
+    }
+    if (typeof metrics.requests_processing === 'number') {
+      items.push({ label: '处理中', value: num(metrics.requests_processing, 0), unit: '请求' });
+    }
+    if (typeof metrics.busy_slots_per_decode === 'number') {
+      items.push({ label: '批内 slot', value: num(metrics.busy_slots_per_decode, 2), unit: '个' });
+    }
     const positions = metrics.mtp_positions || {};
     const posKeys = Object.keys(positions).sort(function (a, b) {
       return Number(a) - Number(b);
@@ -938,11 +1016,8 @@ function applyModel(root, endpoint, model) {
         }),
       });
     }
-    if (model.model_path) {
-      items.push({
-        label: '权重', value: shortPath(model.model_path), wide: true, title: model.model_path,
-      });
-    }
+    // The weights chip is gone: the file name repeats what the hero name and
+    // the engine already say, and the full path only added a breadcrumb.
     if (model.metrics_error) {
       items.push({ label: '指标采集失败', value: model.metrics_error, wide: true, alert: true });
     }
@@ -1087,17 +1162,18 @@ function renderEndpoints(snapshot) {
     container.dataset.signature = signature;
     // The hero line doubles as the model's title: label + name + port + spec
     // tags all on one row, so the per-model title below no longer repeats it.
-    // Only the current source wears the "当前模型" pill; the others title
-    // themselves with their own label.
+    // Only the current source wears the "running" pill (the model hermes is
+    // actually using); the others title themselves with their own label.
     const note = liveNote(live);
     const blocks = serving.map(function (e) {
       const heroModel = (e.models || [])[0] || null;
       const hero = heroModel
         ? '<div class="hero" data-role="hero">' +
-          '<span class="hero-label">' + esc(e === current ? '当前模型' : e.label) + '</span>' +
+          '<span class="hero-label">' + esc(e === current ? 'running' : e.label) + '</span>' +
           '<span class="hero-name">' + esc(shortModelName(heroModel.id)) + '</span>' +
           '<span class="hero-port">' + esc(portOf(e.base_url) || '?') + '</span>' +
           modelTags(heroModel) +
+          '<span data-role="hero-state"></span>' +
           '</div>'
         : '';
       // The live tracker's failure note belongs on its own source's card:
@@ -1140,6 +1216,16 @@ function renderEndpoints(snapshot) {
           '[data-model="' + CSS.escape(model.id || 'model') + '"]');
         if (modelRoot) applyModel(modelRoot, e, model);
       });
+    }
+    // The engine's state lamps change faster than the block signature (idle
+    // and generating share one card), so they get their own per-tick slot.
+    const stateBox = root.querySelector('[data-role="hero-state"]');
+    if (stateBox) {
+      const html = heroStateHtml((e.models || [])[0]);
+      if (stateBox._sig !== html) {
+        stateBox._sig = html;
+        stateBox.innerHTML = html;
+      }
     }
   });
 }
@@ -1383,17 +1469,6 @@ function powerMessage() {
   return (Date.now() - message.at < 8000) ? message : null;
 }
 
-// "current 31 W · limit 125 W (dynamic)" -- the live half of the power row,
-// patched in place on every sample rather than baked into the markup.
-function livePowerText(live, ceiling, dynamic) {
-  const parts = [];
-  if (live !== null) parts.push('当前 ' + num(live, 0) + ' W');
-  if (ceiling !== null) {
-    parts.push('上限 ' + num(ceiling, 0) + ' W' + (dynamic ? '（动态）' : ''));
-  }
-  return parts.join(' · ');
-}
-
 function renderPowerControl(snapshot) {
   const box = document.getElementById('power-control');
   if (!box) return;
@@ -1446,9 +1521,6 @@ function renderPowerControl(snapshot) {
       ceiling: ceiling, dynamic: dynamic,
     });
   }
-
-  const liveBox = box.querySelector('.pw-live');
-  if (liveBox) liveBox.textContent = livePowerText(live, ceiling, dynamic);
 }
 
 // The structural half of the power row: buttons, labels, status and range.
@@ -1515,8 +1587,8 @@ function powerMarkup(presets, state) {
     tipText += '驱动已经明确拒绝过软件设限，所以档位按钮不再提供。';
   }
   const tip = '<span class="tip" tabindex="0" data-tip="' + esc(tipText) + '">i</span>';
-  const liveHtml = '<span class="pw-live muted">' +
-    esc(livePowerText(state.live, state.ceiling, state.dynamic)) + '</span>';
+  // The live "当前 X W · 上限 Y W" readout used to sit here; the power card
+  // right above already shows both numbers, so the row is buttons only.
 
   if (compact) {
     // No room for the admin-rights paragraph here, so it becomes a lock icon
@@ -1527,7 +1599,7 @@ function powerMarkup(presets, state) {
       ? '<div class="pw-group">' + buttons + '</div>' : '';
     return '<div class="pw-row">' +
         '<span class="pw-title">显卡功耗' + tip + lock + '</span>' +
-        group + liveHtml + status +
+        group + status +
       '</div>';
   }
 
@@ -1535,7 +1607,7 @@ function powerMarkup(presets, state) {
     ? '<div class="pw-group">' + buttons + '</div>' : '';
   return '<div class="pw-row">' +
       '<span class="pw-title">功耗上限' + tip + '</span>' +
-      group + liveHtml + status +
+      group + status +
       (range ? '<span class="pw-range">' + range + '</span>' : '') +
     '</div>' +
     (state.elevated ? '' : '<div class="pw-hint">当前进程没有管理员权限，改不了功耗上限' +
@@ -1638,8 +1710,9 @@ function tokenExact(value) {
 // A recorded power limit is just a number; the preset name is a frontend
 // concern (the backend deliberately carries no Chinese).  A limit that is not
 // one of the presets -- someone can set any value with nvidia-smi directly, and
-// a card with no software limit records the ceiling it happened to be holding
-// -- still renders, with a tilde to say "measured, not chosen".
+// a card with no software limit records the ceiling it happened to be holding.
+// The tilde that used to mark "measured, not chosen" is gone at the user's
+// request; the preset name still tells the two cases apart.
 function wattsLabel(watts) {
   const value = Number(watts);
   if (!isFinite(value) || value <= 0) return '档位未知';
@@ -1649,8 +1722,7 @@ function wattsLabel(watts) {
   })[0];
   const meta = hit ? POWER_LABELS[hit.id] : null;
   const name = hit ? presetName(hit) : '';
-  return (hit ? '' : '≈') + Math.round(value) + ' W' +
-    (name ? ' ' + name : '');
+  return Math.round(value) + ' W' + (name ? ' ' + name : '');
 }
 
 function rateText(value) {
@@ -1680,7 +1752,6 @@ function renderTokenStats(snapshot) {
   const combos = document.getElementById('token-combos');
   const rankOutput = document.getElementById('token-rank-output');
   const rankSpeed = document.getElementById('token-rank-speed');
-  const summary = document.getElementById('stats-summary');
   if (!grid || !note || !days) return;
 
   const data = snapshot.stats;
@@ -1689,7 +1760,7 @@ function renderTokenStats(snapshot) {
       ? 'config.json 里 stats.enabled 设成了 false'
       : '本次采样没有上报账本';
     grid.innerHTML = '<div class="stat">' +
-      '<span class="stat-label">Token 账本</span>' +
+      '<span class="stat-label">历史信息</span>' +
       '<span class="stat-value">未启用</span>' +
       '<span class="stat-foot">' + esc(reason) + '</span></div>';
     note.className = 'stat-note';
@@ -1701,7 +1772,6 @@ function renderTokenStats(snapshot) {
     if (rankSpeed) rankSpeed.innerHTML = '';
     if (tierNote) tierNote.textContent = '';
     if (tierSummary) tierSummary.textContent = '';
-    if (summary) summary.textContent = '';
     return;
   }
 
@@ -1736,25 +1806,17 @@ function renderTokenStats(snapshot) {
   }).join('');
 
   // Persistence is the entire point of the ledger, so a failure to write has
-  // to be visible on the page rather than tucked into a hover.
-  const where = data.path ? '账本文件 ' + data.path : '账本文件位置未配置';
+  // to be visible on the page rather than tucked into a hover.  Everything
+  // else this line used to carry -- reset count, ledger path, coverage -- was
+  // ambient chatter, now removed at the user's request; it still lives in
+  // run.log and in stats.json itself.
   if (!data.persisted) {
     note.className = 'stat-note warn';
     note.textContent = '账本未落盘（' + (data.error || '未知原因') +
       '）：当前只记在内存里，工作台重启后会清零。';
-  } else if (data.resets > 0) {
-    note.className = 'stat-note';
-    note.textContent = '检测到 ' + data.resets +
-      ' 次计数器归零（server 重启或模型卸载），已自动从零续算 · ' + where;
   } else {
     note.className = 'stat-note';
-    note.textContent = where;
-  }
-
-  if (summary) {
-    const models = Object.keys(data.models || {}).length;
-    summary.textContent = '覆盖 ' + (data.days || 0) + ' 天 · ' +
-      models + ' 个模型分账';
+    note.textContent = '';
   }
 
   // TOP-3 rankings straight off the per-model ledger: one table by output
@@ -1773,11 +1835,8 @@ function renderTokenStats(snapshot) {
     return '<table><thead><tr><th>#</th><th>模型</th><th class="num">' +
       title + '</th></tr></thead><tbody>' +
       rows.map(function (row, i) {
-        const name = (row.endpoint
-          ? '<span class="muted">' + esc(row.endpoint) + '/</span>' : '') +
-          esc(shortModelName(row.model));
         return '<tr><td class="num rank-no">' + (i + 1) + '</td>' +
-          '<td>' + name + '</td>' +
+          '<td>' + sourceName(row) + '</td>' +
           '<td class="num" title="' + esc(metricLabel) + '">' + display(row) + '</td></tr>';
       }).join('') + '</tbody></table>';
   };
@@ -1847,20 +1906,15 @@ function renderTokenStats(snapshot) {
       : '';
   }
   if (tierNote) {
+    // Only the warning stays on the page: a tier whose ceiling could not be
+    // read is a conclusion, not a detail -- part of the total cannot be
+    // attributed at all.  The "collecting since" and "nothing yet" lines were
+    // ambient chatter and are gone.
     const unknown = tierRows.filter(function (row) { return !row.watts; }).length;
-    if (!tierRows.length) {
-      tierNote.className = 'stat-note subtle';
-      tierNote.textContent = '还没有按档位归集的记录，本功能启用后才开始累计。';
-    } else if (unknown) {
-      // A tier that could not be read is a conclusion, not a detail: it means
-      // part of the total cannot be attributed at all.
+    if (unknown) {
       tierNote.className = 'stat-note warn';
       tierNote.textContent = '有 ' + unknown + ' 组记录读不到功耗上限' +
         '（显卡采集被关闭或驱动查询失败），已单独计为『档位未知』。';
-    } else if (data.tier_since) {
-      tierNote.className = 'stat-note subtle';
-      tierNote.textContent = '档位归集自 ' + data.tier_since +
-        ' 起；更早的 token 未记录当时档位，所以各档之和小于累计总量。';
     } else {
       tierNote.className = 'stat-note subtle';
       tierNote.textContent = '';
@@ -1877,17 +1931,12 @@ function renderTokenStats(snapshot) {
       '</tr></thead><tbody>' +
       comboRows.map(function (row) {
         const isNow = limit !== null && Math.abs(limit - row.watts) < 1;
-        // Same "source / short name" format as the rankings and model cards,
-        // so a loader path id no longer dominates the column.
-        const name = (row.endpoint
-          ? '<span class="muted">' + esc(row.endpoint) + '/</span>' : '') +
-          esc(shortModelName(row.model));
         return '<tr>' +
           '<td>' + esc(row.day) + '</td>' +
-          '<td><span class="tier-chip' + (row.watts ? '' : ' unknown') +
+          '<td><span class="tier-chip' + tierChipClass(row.watts) +
             (isNow ? ' now' : '') + '">' + esc(wattsLabel(row.watts)) +
             '</span></td>' +
-          '<td>' + name + '</td>' +
+          '<td>' + sourceName(row) + '</td>' +
           '<td class="num" title="' + esc(tokenExact(row.predicted_tokens)) + '">' +
             tokenText(row.predicted_tokens) + '</td>' +
           '<td class="num" title="' + esc(tokenExact(row.prompt_tokens)) + '">' +
@@ -1957,19 +2006,9 @@ function render() {
   // used to be set here from endpoint state too, so the two overwrote each
   // other on every sample and the lamp said nothing dependable.
 
-  const total = (snapshot.endpoints || []).reduce(function (acc, e) {
-    return acc + (e.models || []).length;
-  }, 0);
-  const interval = snapshot.interval || (S.config && S.config.interval_seconds) || 2;
-  const points = S.history.timestamps.length;
-  const agingSec = S.history.timestamps.length ?
-    Math.max(0, PEAK_WINDOW_SEC - (S.history.timestamps[S.history.timestamps.length - 1] - S.history.timestamps[0])) : 0;
-  const aging = agingSec > 0 ? ' · 峰值窗口 ' + Math.floor(agingSec / 60) + 'm' : '';
-  const note = document.getElementById('foot-note');
-  note.textContent = '已加载模型 ' + total + ' 个 · 曲线历史 ' + points + ' / ' +
-    HISTORY_LIMIT + ' 点（约 ' + Math.round(points * interval / 60) + ' 分钟，每 ' +
-    interval + ' 秒一采样）' + aging;
-  note.title = '曲线可悬停取值；每张卡片右侧的 i 是该项口径说明。';
+  // The footer line (model count, history depth, peak-window age) was
+  // ambient chatter and is gone; the numbers it showed are visible in the
+  // charts themselves.
 }
 
 // ----------------------------------------------------------------------- theme
@@ -1991,10 +2030,57 @@ function initTheme() {
   });
 }
 
+// ---------------------------------------------------------------------- restart
+
+// The launcher refuses to start a second copy while the dashboard answers,
+// and collector code only loads at startup -- so applying a code change used
+// to mean hunting the pythonw pid down by hand.  The button POSTs
+// /api/restart: the server spawns a detached replacement (which retries the
+// bind until this process lets go of the port) and exits.  The page waits for
+// a dashboard to answer again and reloads itself.
+function initRestart() {
+  const button = document.getElementById('restart-btn');
+  if (!button) return;
+  button.addEventListener('click', function () {
+    if (button.disabled) return;
+    if (!window.confirm('重启 monitor 进程？内存里的曲线历史会被清空，页面随后自动刷新。')) return;
+    button.disabled = true;
+    button.textContent = '重启中…';
+    fetch('/api/restart', { method: 'POST', headers: { 'X-LLM-Monitor': '1' } })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j.ok) {
+          resetRestartButton('重启被拒绝：' + (j.error || '未知原因'));
+        }
+      })
+      .catch(function () { /* the connection dying *is* the restart working */ });
+    const deadline = Date.now() + 30000;
+    const probe = function () {
+      fetch('/api/snapshot', { cache: 'no-store' })
+        .then(function (r) { if (r.ok) window.location.reload(); })
+        .catch(function () {});
+      if (Date.now() < deadline) {
+        setTimeout(probe, 1000);
+      } else {
+        resetRestartButton('重启超时：新进程没有应答');
+      }
+    };
+    setTimeout(probe, 800);
+  });
+}
+
+function resetRestartButton(message) {
+  const button = document.getElementById('restart-btn');
+  if (button) { button.disabled = false; button.textContent = '重启'; }
+  const meta = document.getElementById('meta');
+  if (meta && message) meta.textContent = message;
+}
+
 // ------------------------------------------------------------------------ boot
 
 async function boot() {
   initTheme();
+  initRestart();
   document.addEventListener('pointermove', onPointerMove, { passive: true });
 
   // Delegated once: the control row rebuilds itself, so per-button listeners
@@ -2034,7 +2120,7 @@ async function boot() {
     // 0-9: toggle collapsible sections
     if (e.key >= '0' && e.key <= '9') {
       const idx = parseInt(e.key) - 1;
-      const details = document.querySelectorAll('#token-details details');
+      const details = document.querySelectorAll('details.collapsible');
       if (details[idx]) details[idx].toggle();
     }
   });

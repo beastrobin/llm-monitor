@@ -164,12 +164,12 @@ main {
   align-items: center;
   gap: 8px;
   margin: 0;
-  font-size: 13px;
+  font-size: 16px;
   font-weight: 600;
 }
 .block-head h2::before {
   content: '';
-  width: 3px; height: 13px;
+  width: 3px; height: 16px;
   border-radius: 2px;
   background: var(--chart-a);
 }
@@ -271,16 +271,6 @@ main {
   white-space: nowrap;
 }
 
-/* The live half of the row: what the card draws now and the ceiling it is
-   holding.  Sits next to the buttons, and keeps its width so the samples
-   ticking underneath it do not make the row jitter. */
-.pw-live {
-  font-size: 11.5px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
 .pw-hint {
   margin-top: 8px;
   padding: 9px 12px;
@@ -319,7 +309,6 @@ main {
   border-radius: 6px;
 }
 .power-control.top .pw-watts { font-size: 11.5px; line-height: 1.2; }
-.power-control.top .pw-live { font-size: 11px; }
 .power-control.top .pw-status { font-size: 11px; margin-left: auto; }
 .pw-lock {
   display: inline-flex;
@@ -391,29 +380,41 @@ main {
 
 /* The bar is a vertical rail on the card's left edge, filling from the
    bottom up.  Reserving the slot (visibility, not display) keeps every card
-   in a row exactly the same width. */
+   in a row exactly the same width.  The fill is not a flat block: a
+   cross-rail gradient (light edge -> colour -> shaded edge) reads as a
+   rounded column, the top 20% catches a highlight like a lit tip, and a
+   soft glow in the rail's own colour separates it from the card.  The
+   colour lives in --bar-c so every tone variant reuses one gradient. */
 .bar {
   flex: none;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  width: 4px;
+  width: 6px;
   border-radius: 999px;
   background: var(--track);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.22);
   overflow: hidden;
 }
 .card.no-bar .bar { visibility: hidden; }
 .bar > i {
+  --bar-c: var(--accent);
   display: block;
   width: 100%;
   height: 0%;
   border-radius: 999px;
-  background: var(--accent);
-  transition: height .4s ease, background-color .3s ease;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bar-c) 55%, white) 0%, transparent 22%),
+    linear-gradient(90deg,
+      color-mix(in srgb, var(--bar-c) 78%, white) 0%,
+      var(--bar-c) 42%,
+      color-mix(in srgb, var(--bar-c) 85%, black) 100%);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--bar-c) 40%, transparent);
+  transition: height .4s ease;
 }
-.bar.good > i { background: var(--good); }
-.bar.warn > i { background: var(--warn); }
-.bar.bad > i { background: var(--bad); }
+.bar.good > i { --bar-c: var(--good); }
+.bar.warn > i { --bar-c: var(--warn); }
+.bar.bad > i { --bar-c: var(--bad); }
 
 .card-visual {
   display: flex;
@@ -577,6 +578,57 @@ main {
 .hero-port {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 12px;
+  color: var(--muted);
+}
+
+/* Engine self-reported state lamps, pinned to the right end of the hero row
+   (Strata's Monitor tab, compacted to fit beside the spec tags).  Five lamps
+   for the engine's state machine; only the active one wears its colour and
+   full opacity, the rest stay ghosted so the row reads as a gauge, not a
+   legend.  The note carries what the request is doing right now. */
+[data-role="hero-state"] {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.hero-state { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.state-lamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  opacity: .45;
+}
+.state-lamp i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.state-lamp.on {
+  opacity: 1;
+  border-color: color-mix(in srgb, currentColor 35%, var(--border));
+}
+.state-lamp.on.s-idle,
+.state-lamp.on.s-idle i { color: var(--muted); }
+.state-lamp.on.s-idle i { background: var(--muted); }
+.state-lamp.on.s-reading { color: var(--accent); }
+.state-lamp.on.s-reading i { background: var(--accent); }
+.state-lamp.on.s-generating { color: var(--good); }
+.state-lamp.on.s-generating i { background: var(--good); }
+.state-lamp.on.s-queued { color: var(--warn); }
+.state-lamp.on.s-queued i { background: var(--warn); }
+.state-lamp.on.s-error { color: var(--bad); }
+.state-lamp.on.s-error i { background: var(--bad); }
+.state-note {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
   color: var(--muted);
 }
 
@@ -797,7 +849,8 @@ main {
 
 /* --- token ledger: tier and detail sections --- */
 
-.stat-section { margin-top: 15px; }
+/* The ranking title lives in a details.collapsible like the other
+   sub-sections, so it inherits the summary h3 style; no bespoke rule. */
 .stat-head {
   display: flex;
   align-items: baseline;
@@ -918,8 +971,42 @@ main {
   border-color: color-mix(in srgb, var(--chart-e) 48%, transparent);
   background: color-mix(in srgb, var(--chart-e) 9%, transparent);
   color: var(--chart-e);
+  /* The per-tier colours below override border/background/colour, so the
+     "current tier" marker rides on a ring in the chip's own colour instead --
+     it survives whatever the tier colour is. */
+  box-shadow: 0 0 0 1.5px currentColor;
 }
 .tier-chip.unknown { border-style: dashed; color: var(--muted); }
+/* One colour per ceiling, cool for the eco tiers, hot for full power.  The
+   detail table's tier bubbles are the same wattages as the tier cards above,
+   so the colours let the eye group rows without reading each chip. */
+.tier-chip.t-150 {
+  color: var(--chart-h);
+  border-color: color-mix(in srgb, var(--chart-h) 45%, transparent);
+  background: color-mix(in srgb, var(--chart-h) 9%, transparent);
+}
+.tier-chip.t-300 {
+  color: var(--chart-b);
+  border-color: color-mix(in srgb, var(--chart-b) 45%, transparent);
+  background: color-mix(in srgb, var(--chart-b) 9%, transparent);
+}
+.tier-chip.t-400 {
+  color: var(--chart-e);
+  border-color: color-mix(in srgb, var(--chart-e) 45%, transparent);
+  background: color-mix(in srgb, var(--chart-e) 9%, transparent);
+}
+.tier-chip.t-600 {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 45%, transparent);
+  background: color-mix(in srgb, var(--bad) 9%, transparent);
+}
+
+/* Ledger table model names: the source prefix wears its endpoint's colour
+   (strata blue, hermes green, loader amber); unknown sources stay muted. */
+.src-tag { color: var(--muted); }
+.src-tag.src-strata { color: var(--chart-a); }
+.src-tag.src-hermes { color: var(--good); }
+.src-tag.src-loader { color: var(--warn); }
 
 /* Sixty detail rows would push the rest of the dashboard off screen, so the
    table scrolls and its header stays put. */
@@ -929,10 +1016,28 @@ main {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--panel);
+  padding: 0;
 }
-#token-combos table { border: none; border-radius: 0; }
+#token-combos table { border: none; border-radius: 0; overflow: visible; }
 #token-combos thead th { position: sticky; top: 0; z-index: 1; }
 #token-combos p { margin: 10px 13px; font-size: 12px; }
+
+/* Same treatment for the day list: it grows one row per day, and the header
+   should not scroll away once it does.  overflow:visible on the table is not
+   cosmetic -- the generic table rule clips, and a clipping ancestor between
+   the sticky header and the scroll box makes sticky pin to the table itself
+   (which never scrolls), so the header would silently never stick. */
+#token-days {
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 0;
+}
+#token-days table { border: none; border-radius: 0; overflow: visible; }
+#token-days thead th { position: sticky; top: 0; z-index: 1; }
+#token-days p { margin: 10px 13px; font-size: 12px; }
 
 table {
   width: 100%;
@@ -987,14 +1092,11 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
   text-align: center;
 }
 
-.foot { padding: 8px 22px 22px; }
-
 @media (max-width: 720px) {
   main { padding: 14px 14px 4px; gap: 16px; }
   .topbar { padding: 10px 14px; }
   .topbar-right .muted { display: none; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(152px, 1fr)); }
-  .foot { padding: 6px 14px 18px; }
 }
 
 /* ---------------------------------------------------------------- collapsible sections */
