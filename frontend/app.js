@@ -992,9 +992,10 @@ function renderEndpoints(snapshot) {
   const container = document.getElementById('endpoints');
   const endpoints = snapshot.endpoints || [];
   // The section answers one question: which llamacpp is serving which model
-  // right now.  So it renders as a single merged block -- the active source's
-  // model card leads, and every source (router / loader / spawned child) is
-  // reduced to one status chip instead of its own card.
+  // right now.  Every source with a loaded model gets its own card -- more
+  // than one server can serve at once (hermes and Strata do) -- and every
+  // source (router / loader / spawned child) is also reduced to one status
+  // chip in the section head.
   const live = endpoints.find(function (e) { return e.live; }) || null;
   // Endpoints that share an id (hermes router + the child the router spawned)
   // fold into one source: the live endpoint carries real metrics, the router
@@ -1052,7 +1053,17 @@ function renderEndpoints(snapshot) {
     });
     return out;
   });
-  const active = deduped.find(function (e) { return (e.models || []).length; }) || null;
+  // Every server with a loaded model gets its own card.  Taking only the
+  // first one dropped the others entirely: with hermes and strata both up,
+  // strata's chip said 在线 while its model, rates and context sat on no
+  // card at all -- the section described one server on a machine running two.
+  const serving = deduped.filter(function (e) { return (e.models || []).length; });
+  // The "当前模型" hero belongs to the source hermes is actually using -- the
+  // one the live tracker follows -- not to whichever endpoint happens to come
+  // first in config.json.  When the live card yields to a direct server (one
+  // address, one card), that server becomes the current one.
+  const current = (live && serving.find(function (e) { return e.id === live.id; })) ||
+    serving[0] || null;
   // The reason line belongs in the signature too: a wrong log path changes
   // nothing else on screen, so without it the card would keep its first
   // explanation for the rest of the run.
@@ -1076,43 +1087,61 @@ function renderEndpoints(snapshot) {
     container.dataset.signature = signature;
     // The hero line doubles as the model's title: label + name + port + spec
     // tags all on one row, so the per-model title below no longer repeats it.
-    const heroModel = active && (active.models || [])[0] || null;
-    const hero = heroModel
-      ? '<div class="hero" data-role="hero">' +
-        '<span class="hero-label">当前模型</span>' +
-        '<span class="hero-name">' + esc(shortModelName(heroModel.id)) + '</span>' +
-        '<span class="hero-port">' + esc(portOf(active.base_url) || '?') + '</span>' +
-        modelTags(heroModel) +
-        '</div>'
-      : '';
-    const empty = !active
-      ? '<div class="empty">当前没有已加载的模型 —— 服务在线时指标会自动出现在这里。</div>'
-      : '';
+    // Only the current source wears the "当前模型" pill; the others title
+    // themselves with their own label.
     const note = liveNote(live);
-    container.innerHTML = '<div class="endpoint is-live" data-endpoint="' + esc(active ? active.id : 'none') + '">' +
-      hero + empty + note +
-      '<div data-role="models" data-hero-model="' + esc(heroModel ? heroModel.id : '') + '"></div>' +
-      '</div>';
+    const blocks = serving.map(function (e) {
+      const heroModel = (e.models || [])[0] || null;
+      const hero = heroModel
+        ? '<div class="hero" data-role="hero">' +
+          '<span class="hero-label">' + esc(e === current ? '当前模型' : e.label) + '</span>' +
+          '<span class="hero-name">' + esc(shortModelName(heroModel.id)) + '</span>' +
+          '<span class="hero-port">' + esc(portOf(e.base_url) || '?') + '</span>' +
+          modelTags(heroModel) +
+          '</div>'
+        : '';
+      // The live tracker's failure note belongs on its own source's card:
+      // printing it on another server's card would blame the wrong machine.
+      const own = (live && e.id === live.id) ? note : '';
+      return '<div class="endpoint' + (e === current ? ' is-live' : '') + '"' +
+        ' data-endpoint="' + esc(e.id) + '">' +
+        hero + own +
+        '<div data-role="models" data-hero-model="' + esc(heroModel ? heroModel.id : '') + '"></div>' +
+        '</div>';
+    }).join('');
+    // A live tracker that found nothing has no card of its own -- and its
+    // explanation is the whole point of that state (the blank card must say
+    // why, or it reads exactly like "the server is down").  Give the note a
+    // home of its own rather than dropping it or parking it on another
+    // server's card.
+    const stranded = blocks && note &&
+      !serving.some(function (e) { return e.id === live.id; })
+      ? '<div class="endpoint">' + note + '</div>'
+      : '';
+    container.innerHTML = blocks + stranded ||
+      '<div class="endpoint">' +
+      '<div class="empty">当前没有已加载的模型 —— 服务在线时指标会自动出现在这里。</div>' +
+      note + '</div>';
   }
 
-  if (active) {
-    const root = container.querySelector('[data-endpoint="' + CSS.escape(active.id) + '"]');
+  serving.forEach(function (e) {
+    const root = container.querySelector('[data-endpoint="' + CSS.escape(e.id) + '"]');
     if (!root) return;
     const before = root.dataset.modelsSig || '';
-    const after = modelSignature(active);
+    const after = modelSignature(e);
     if (before !== after) {
       root.dataset.modelsSig = after;
-      renderEndpointModels(root.querySelector('[data-role="models"]'), active);
+      renderEndpointModels(root.querySelector('[data-role="models"]'), e);
     } else {
       // Values refresh on every tick and the DOM is reused, so the canvases
       // (and their accumulated scale) survive.
-      (active.models || []).forEach(function (model) {
+      (e.models || []).forEach(function (model) {
         const modelRoot = root.querySelector(
           '[data-model="' + CSS.escape(model.id || 'model') + '"]');
-        if (modelRoot) applyModel(modelRoot, active, model);
+        if (modelRoot) applyModel(modelRoot, e, model);
       });
     }
-  }
+  });
 }
 
 const SYS_SPECS = [

@@ -159,11 +159,22 @@ class StrataEndpoint(LlamaEndpoint):
         live = payload.get("live") or {}
         detail["n_ctx"] = engine.get("context") or engine.get("max_context")
         detail["total_slots"] = len(live.get("slots") or []) or None
-        # Strata serves one GGUF chosen at launch, and its JSON names neither
-        # the file nor its quantisation.  Left empty rather than filled with
-        # the alias, which would read as a path on the card.
-        detail["model_path"] = None
-        detail["model_ftype"] = None
+        # The JSON metrics name neither the file nor its quantisation, but
+        # /props does name the file -- read it through the inherited TTL cache
+        # so the card's weight row says which GGUF is actually loaded, instead
+        # of leaving the reader to trust a label hand-typed into config.json.
+        # The quantisation stays empty rather than parsed out of the file
+        # name: that would be guessing at a naming convention, not reading a
+        # field.  A failed /props costs the label only, never the numbers.
+        try:
+            props = self._cached_props(params, now)
+            if props is None:
+                props = _get_json(self._url("/props", params), self.api_key)
+                self._props_cache[self._props_key(params)] = (now, props)
+        except Exception:  # noqa: BLE001 - the path is a label, not a measurement
+            props = {}
+        detail["model_path"] = props.get("model_path")
+        detail["model_ftype"] = props.get("model_ftype")
         detail["modalities"] = {"vision": True} if engine.get("images") else None
         detail["spec_types"] = None
         detail["slots"] = self._slots(payload)
