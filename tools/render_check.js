@@ -155,7 +155,7 @@ function readFrames(base, count, timeoutMs) {
     return Promise.resolve({ json: function () { return Promise.resolve(payload); } });
   };
 
-  win.eval(script);
+  win.eval(script + '\nwindow.renderEndpointsForTest = renderEndpoints;');
   await new Promise(function (resolve) { setTimeout(resolve, 60); });
 
   // ------------------------------------------------------------------ report
@@ -163,6 +163,31 @@ function readFrames(base, count, timeoutMs) {
   const lines = [];
   function say(text) { lines.push(text); }
   const text = function (el) { return (el && el.textContent || '').replace(/\s+/g, ' ').trim(); };
+
+  // Switching between two already-loaded providers changes only the current
+  // source marker. It must invalidate the DOM even when model data is identical.
+  const routingFixture = {
+    current_endpoint_id: 'second',
+    endpoints: ['first', 'second'].map(function (id, i) {
+      return { id: id, label: id, up: true, base_url: 'http://localhost:' + (9000 + i),
+        models: [{ id: 'model-' + id, loaded: true, slots: [] }] };
+    }),
+  };
+  win.renderEndpointsForTest(routingFixture);
+  const selected = function () {
+    const card = doc.querySelector('#endpoints .is-live');
+    return card && card.dataset.endpoint;
+  };
+  const selectedSecond = selected() === 'second';
+  routingFixture.current_endpoint_id = 'first';
+  win.renderEndpointsForTest(routingFixture);
+  const switchedFirst = selected() === 'first';
+  routingFixture.current_endpoint_id = 'unavailable';
+  win.renderEndpointsForTest(routingFixture);
+  const noFalseCurrent = selected() === null;
+  const routingOk = selectedSecond && switchedFirst && noFalseCurrent;
+  win.renderEndpointsForTest(payload.snapshot);
+  say('当前模型来源切换: ' + (routingOk ? '通过' : '失败'));
 
   say('错误: ' + (errors.length ? errors.join(' | ') : '无'));
   say('SSE 已连接: ' + (streamUrl || '未连接'));
@@ -439,7 +464,7 @@ function readFrames(base, count, timeoutMs) {
   const frozenLedger = live.pushed && live.ledgerPatched && !live.ledgerChanged;
   const brokenContract = contract.frames >= 2 &&
     (!contract.hasSnapshot || !contract.hasPoint);
-  const code = (errors.length || frozenCards || frozenLedger ||
+  const code = (errors.length || !routingOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the

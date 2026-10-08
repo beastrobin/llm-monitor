@@ -31,9 +31,10 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from collectors import gpu, power, stats, system
-from collectors.llama import LlamaEndpoint, _resolve_api_key
+from collectors.llama import LlamaEndpoint, _get_json, _resolve_api_key
 from collectors.strata import StrataEndpoint
 from collectors.hermes_live import LiveEndpoint
+from collectors.hermes_session import latest_desktop_selection
 
 # The desktop launcher starts this through pythonw.exe, which has no console at
 # all and therefore leaves sys.stdout and sys.stderr as None.  argparse writes
@@ -105,15 +106,9 @@ def resolve_live_log(configured=None):
 # beside the log the live endpoint already follows, so it is derived from that
 # rather than baked into the tree.
 HERMES_CONFIG_NAME = "config.yaml"
-# How often that file is re-read.  Hermes binds its router to a free port on
-# every start and rewrites base_url to match, so a dashboard that resolves the
-# address once describes a socket nobody is listening on from the first restart
-# on.  Re-reading is a stat plus a 4 KB parse -- cheap enough to simply repeat,
-# and far too cheap to be worth watching the file.  Fifteen seconds keeps a
-# restart invisible without putting a file read on every two-second sample; a
-# router that has stopped answering short-circuits the wait entirely (see
-# Hub._refresh_router).
-ROUTER_REFRESH_SECONDS = 15.0
+# Re-read session routing on the normal sampling cadence. A desktop model
+# switch can change state.db without touching the default in config.yaml.
+ROUTER_REFRESH_SECONDS = 2.0
 
 
 def hermes_config_candidates(live_log=None):
@@ -169,18 +164,39 @@ def strip_api_suffix(url):
     return trimmed
 
 
-def resolve_hermes_router(configured, live_log=None):
+def resolve_hermes_router(configured, live_log=None, api_key=""):
     """The router Hermes is serving from right now, and why that one.
 
-    Hermes' own config.yaml wins: it names the router the application is
-    actually talking to, which is the one whose loaded model this panel exists
-    to show.  ``config.json`` stays the fallback for a box where Hermes keeps no
-    config.yaml (or where this dashboard is pointed at a hand-rolled router
-    directly), because a pinned address is still better than none -- the reason
-    string says which of the two was used, and it goes to run.log so the choice
-    is never silent.
+    The latest desktop session wins over config.yaml: changing a conversation's
+    model does not change the global default. If that session has only a model
+    name, a configured router may still be identified by its loaded preset.
+    Otherwise Hermes' global config.yaml wins, then config.json. The reason
+    string records which source supplied the address.
     """
-    for candidate in hermes_config_candidates(live_log):
+    candidates = hermes_config_candidates(live_log)
+    selected_model, selected_provider = None, None
+    for candidate in candidates:
+        session_url, selected_model, selected_provider = latest_desktop_selection(
+            candidate.parent)
+        if session_url:
+            return strip_api_suffix(session_url), "latest desktop session in %s" % (
+                candidate.parent / "state.db")
+        if selected_model:
+            break
+    # Some Hermes sessions persist the provider and model but omit base_url.
+    # Check the configured router's loaded preset before falling back to the
+    # global default, which may still point at a service the user has stopped.
+    if selected_model and selected_provider in ("llamacpp", "llamacpp-loader") and configured:
+        try:
+            payload = _get_json(strip_api_suffix(configured) + "/v1/models",
+                                api_key, timeout=0.5)
+            if any(item.get("id") == selected_model
+                   and (item.get("status") or {}).get("value") == "loaded"
+                   for item in payload.get("data", [])):
+                return strip_api_suffix(configured), "loaded session model on config.json router"
+        except Exception:
+            pass  # No verified match: let the normal config.yaml fallback run.
+    for candidate in candidates:
         try:
             text = candidate.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -479,10 +495,10 @@ class Hub(object):
             spec = dict(spec)
             if spec.get("id") == "hermes":
                 self.hermes_config_base = spec.get("base_url") or ""
-                spec["base_url"], self.router_reason = resolve_hermes_router(
-                    spec.get("base_url"), self.live_log)
-                self.router_url = spec["base_url"]
                 self.router_api_key = _resolve_api_key(spec)
+                spec["base_url"], self.router_reason = resolve_hermes_router(
+                    spec.get("base_url"), self.live_log, self.router_api_key)
+                self.router_url = spec["base_url"]
             specs.append(spec)
         self.endpoints = [build_endpoint(spec) for spec in specs]
         # Held by reference so a router that moves can be followed: the address
@@ -551,19 +567,11 @@ class Hub(object):
         self.ledger = build_ledger(config)
 
     def _refresh_router(self, force=False):
-        """Re-read the router address Hermes is serving from right now.
+        """Follow session switches and router restarts on the sampling cadence.
 
-        Hermes binds the router to a free port on every start and rewrites
-        ``model.base_url`` to match.  An address resolved once at startup is
-        therefore correct only until the first restart, after which the panel
-        describes a socket nobody is listening on.  This is the whole fix: the
-        file is re-read on the sampler's own cadence, and a change is pushed
-        into both objects that quote the address.
-
-        ``force`` skips the interval.  The caller sets it when the last sample
-        found the router unreachable, because "the address has moved" and "the
-        router is down" are indistinguishable from here, and the first case is
-        the one that must not wait fifteen seconds to be corrected.
+        An unreachable router forces an immediate retry. Address changes clear
+        both collectors' caches; a source/reason change at the same address
+        preserves the counters used to calculate rates.
         """
         if self.hermes_endpoint is None:
             return
@@ -571,7 +579,8 @@ class Hub(object):
         if not force and now - self._router_checked_at < ROUTER_REFRESH_SECONDS:
             return
         self._router_checked_at = now
-        url, reason = resolve_hermes_router(self.hermes_config_base, self.live_log)
+        url, reason = resolve_hermes_router(
+            self.hermes_config_base, self.live_log, self.router_api_key)
         self.router_reason = reason
         if same_address(url, self.router_url):
             # Same host and port, so the same server: nothing to tell the
@@ -712,6 +721,8 @@ class Hub(object):
             endpoints.append(value)
             timings["endpoints"].append(round(cost))
         payload["endpoints"] = endpoints
+        payload["current_endpoint_id"] = self.router_covered_by or (
+            self.hermes_endpoint.id if self.hermes_endpoint is not None else None)
 
         if gpu_future is not None:
             payload["gpu"], cost = gpu_future.result()

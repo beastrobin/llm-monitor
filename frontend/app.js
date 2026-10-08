@@ -1137,14 +1137,15 @@ function renderEndpoints(snapshot) {
   // one the live tracker follows -- not to whichever endpoint happens to come
   // first in config.json.  When the live card yields to a direct server (one
   // address, one card), that server becomes the current one.
-  const current = (live && serving.find(function (e) { return e.id === live.id; })) ||
-    serving[0] || null;
+  const current = snapshot.current_endpoint_id
+    ? serving.find(function (e) { return e.id === snapshot.current_endpoint_id; }) || null
+    : (live && serving.find(function (e) { return e.id === live.id; })) || serving[0] || null;
   // The reason line belongs in the signature too: a wrong log path changes
   // nothing else on screen, so without it the card would keep its first
   // explanation for the rest of the run.
   const signature = deduped.map(function (e) {
     return e.id + '@' + e.up + '#' + modelSignature(e) + '!' + (e.error || '');
-  }).join('|');
+  }).join('|') + '|current=' + (current ? current.id : '');
 
   // The source chips live in the section head (right-aligned), so they are
   // refreshed on their own tick -- up/down state changes without rebuilding

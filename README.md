@@ -89,6 +89,13 @@ wscript.exe start_monitor.vbs --port 8090 --interval 2
 
 ## 监控什么
 
+Hermes 桌面端在会话里切换模型时，不一定修改全局默认配置。monitor 每约 2 秒
+只读 `state.db` 中最近活动、未结束且未归档的桌面会话路由，优先跟随它的本地服务；
+会话只记录模型名而没有服务地址时，先核对 monitor 已配置的 router 是否加载了该模型，
+然后才回退到 `config.yaml` 和端点配置。多个会话并存时
+按最近活动时间选择，不判断前台标签页。其他仍加载着模型的服务继续展示，但只有
+被跟随的来源标为 `running`；与已有端点地址相同时仍合并为一张卡。
+
 **推理**（来源：llama-server 的 `/metrics`、`/slots`、`/props`）
 
 | 指标 | 口径 |
