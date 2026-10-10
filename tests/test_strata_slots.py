@@ -159,6 +159,18 @@ class SlotAttributionTests(unittest.TestCase):
         self.assertEqual(ep._slots(self.payload([later]))[0]['kv_hit'],
                          ep._slots(self.payload([first]))[0]['kv_hit'])
 
+    def test_kv_hit_cannot_exceed_the_prompt_it_matched(self):
+        # A slot's held prefix is at most as long as the prompt it was matched
+        # against. held > prompt means a different conversation arrived, so the
+        # slot contributed nothing -- a hit rate above 100% is not a rate.
+        ep = endpoint()
+        ep._slots(self.payload([{'slot': 0, 'state': 'idle',
+                                  'held_tokens': 69417}]))
+        fresh = {'slot': 0, 'state': 'decoding', 'prompt_tokens': 30000,
+                 'generated': 12, 'elapsed_s': 3.0, 'tok_s': 210.0}
+        slot = ep._slots(self.payload([fresh]))[0]
+        self.assertEqual(slot['kv_hit'], 0.0)
+
     def test_kv_hit_is_none_for_a_slot_that_held_nothing(self):
         ep = endpoint()
         ep._slots(self.payload([{'slot': 0, 'state': 'idle',

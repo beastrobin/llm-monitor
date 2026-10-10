@@ -150,6 +150,33 @@ function defaultFormat(value, decimals) {
   return value.toFixed(decimals === undefined ? 0 : decimals);
 }
 
+// A vertical gradient for the area under a curve: the colour the card's line
+// already uses, stronger near the curve and fading toward the baseline.  The
+// CSS custom properties are hex strings, so the alpha has to be built by hand
+// (a gradient stop cannot take `color` plus an alpha the way a fill can).
+// A colour the parser cannot read falls back to the solid colour rather than
+// an empty string, which would fill nothing at all.
+function gradientUnder(g, color, yTop, yBase) {
+  if (!g.createLinearGradient) return color;
+  const rgb = hexToRgb(color);
+  const grad = g.createLinearGradient(0, yTop, 0, yBase);
+  if (!rgb) {
+    grad.addColorStop(0, color);
+    grad.addColorStop(1, color);
+    return grad;
+  }
+  grad.addColorStop(0, 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',0.30)');
+  grad.addColorStop(1, 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',0.06)');
+  return grad;
+}
+
+function hexToRgb(value) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(String(value || '').trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
 function roundRect(g, x, y, w, h, r) {
   g.beginPath();
   g.moveTo(x + r, y);
@@ -314,34 +341,42 @@ function drawSpark(canvas, data, options) {
   }
 
   if (runs.length) {
+    // Colour UNDER the curve, not just a band hugging it.  The old fill was the
+    // per-column high/low envelope, which on a nearly flat series is a few
+    // pixels thick -- so most cards looked like a lonely line with nothing
+    // beneath it.  The area now fills from the curve down to the baseline with
+    // a vertical gradient (stronger at the curve, fading toward the floor),
+    // which is what makes the chart read as "how much of the window this
+    // reading occupies".  The noise envelope survives as a thin stroke instead
+    // of a fill, so a spiky series still shows its spikes.
+    const area = gradientUnder(g, color, yTop, yBase);
+    runs.forEach(function (r) {
+      if (r.length < 1) return;
+      g.beginPath();
+      g.moveTo(r[0].x, r[0].y);
+      for (let i = 1; i < r.length; i++) g.lineTo(r[i].x, r[i].y);
+      g.lineTo(r[r.length - 1].x, yBase);
+      g.lineTo(r[0].x, yBase);
+      g.closePath();
+      g.fillStyle = area;
+      g.fill();
+      canvas._areaFill = true;
+    });
+
     if (dense) {
-      // The per-column extremes form a band that keeps the noise envelope; the
-      // mean traces the trend through the middle of it.
-      g.globalAlpha = 0.2;
-      g.fillStyle = color;
+      g.globalAlpha = 0.4;
+      g.strokeStyle = color;
+      g.lineWidth = 1;
       runs.forEach(function (r) {
         if (r.length < 2) return;
         g.beginPath();
         g.moveTo(r[0].x, r[0].hi);
         for (let i = 1; i < r.length; i++) g.lineTo(r[i].x, r[i].hi);
-        for (let i = r.length - 1; i >= 0; i--) g.lineTo(r[i].x, r[i].lo);
-        g.closePath();
-        g.fill();
-      });
-      g.globalAlpha = 1;
-    } else {
-      // Sparse data gets a soft area instead of a band, which would collapse to
-      // a zero-height sliver anyway.
-      g.globalAlpha = 0.14;
-      g.fillStyle = color;
-      runs.forEach(function (r) {
+        g.stroke();
         g.beginPath();
-        g.moveTo(r[0].x, r[0].y);
-        for (let i = 1; i < r.length; i++) g.lineTo(r[i].x, r[i].y);
-        g.lineTo(r[r.length - 1].x, yBase);
-        g.lineTo(r[0].x, yBase);
-        g.closePath();
-        g.fill();
+        g.moveTo(r[0].x, r[0].lo);
+        for (let i = 1; i < r.length; i++) g.lineTo(r[i].x, r[i].lo);
+        g.stroke();
       });
       g.globalAlpha = 1;
     }

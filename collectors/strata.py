@@ -180,7 +180,18 @@ class StrataEndpoint(LlamaEndpoint):
                         kv_hit = previous[1]
                     else:
                         held = self._slot_held.get(sid)
-                        kv_hit = _ratio(held, prompt) if held else None
+                        # A prefix cannot be longer than the string it is a
+                        # prefix of.  held > prompt therefore means this request
+                        # is NOT continuing the conversation the slot held -- a
+                        # different one arrived, and the slot gave nothing back.
+                        # Reporting held/prompt there produced 244% and 19224%
+                        # on the card, which is not a hit rate at all.
+                        if not held or not prompt:
+                            kv_hit = None
+                        elif held > prompt:
+                            kv_hit = 0.0
+                        else:
+                            kv_hit = held / prompt
                     self._slot_req[sid] = (prompt, kv_hit)
                 else:
                     self._slot_held[sid] = row.get("held_tokens")

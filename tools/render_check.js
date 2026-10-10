@@ -110,18 +110,33 @@ function readFrames(base, count, timeoutMs) {
   });
 
   // --- canvas stub, recording what the chart engine actually drew
-  const paint = { strokes: 0, fills: 0, texts: [] };
+  const paint = { strokes: 0, fills: 0, texts: [], fillStyles: [] };
   win.HTMLCanvasElement.prototype.getContext = function () {
+    const canvas = this;
     const ctx = {
       measureText: function (t) { return { width: String(t).length * 6 }; },
       fillText: function (t) { paint.texts.push(String(t)); },
       stroke: function () { paint.strokes += 1; },
-      fill: function () { paint.fills += 1; },
+      fill: function () {
+        paint.fills += 1;
+        paint.fillStyles.push(ctx.fillStyle);
+        // A curve that fills nothing is the failure the user reported: the old
+        // code only painted the per-column high/low band, which on a flat
+        // series is a few pixels and reads as a lonely line.
+        if (ctx.fillStyle && ctx.fillStyle._stops) canvas._areaFill = true;
+      },
       setTransform: function () {}, clearRect: function () {}, beginPath: function () {},
       closePath: function () {}, moveTo: function () {}, lineTo: function () {},
       strokeRect: function () {}, fillRect: function () {}, arc: function () {},
       quadraticCurveTo: function () {}, save: function () {}, restore: function () {},
       setLineDash: function () {},
+      createLinearGradient: function () {
+        // A real gradient, recorded: the assertion can tell the area fill from
+        // the solid-colour fallback the stub would otherwise accept.
+        const stops = [];
+        return { addColorStop: function (pos, col) { stops.push([pos, col]); },
+          _stops: stops };
+      },
     };
     return ctx;
   };
@@ -618,6 +633,22 @@ function readFrames(base, count, timeoutMs) {
   say('  ⓘ 提示数量: ' + doc.querySelectorAll('.tip').length);
   say('  canvas 绘制: stroke ' + paint.strokes + ' 次 / fill ' + paint.fills +
     ' 次 / fillText ' + paint.texts.length + ' 次');
+  // Every card with data must fill the area under its curve, not draw a bare
+  // line: that was the reported failure (the old fill was only the per-column
+  // high/low band, a few pixels on a flat series).  Cards with no data are
+  // allowed to show the "暂无数据" placeholder instead.
+  const areaCards = Array.prototype.filter.call(
+    doc.querySelectorAll('.card canvas.spark'), function (c) {
+      return c._spark && (c._spark.values || []).some(function (v) {
+        return v !== null && v !== undefined;
+      });
+    });
+  const areaFilled = areaCards.filter(function (c) { return c._areaFill; });
+  const gradientStops = paint.fillStyles.filter(function (s) { return s && s._stops; });
+  say('  曲线下方填充: ' + (areaFilled.length === areaCards.length && areaCards.length ? '通过' : '失败') +
+    ' (' + areaFilled.length + '/' + areaCards.length + ' 张有数据的卡)' +
+    ' | 渐变停靠点 ' + (gradientStops.length ? gradientStops[0]._stops.map(function (s) {
+      return s[0] + ' ' + s[1]; }).join(' -> ') : '无'));
   say('  轴标签样例: ' + paint.texts.slice(0, 12).join(' '));
 
   // None of these throw: the page loads fine and just stops being useful.
@@ -632,8 +663,11 @@ function readFrames(base, count, timeoutMs) {
   const frozenLedger = live.pushed && live.ledgerPatched && !live.ledgerChanged;
   const brokenContract = contract.frames >= 2 &&
     (!contract.hasSnapshot || !contract.hasPoint);
+  // A card that draws a line but fills nothing under it is the failure the user
+  // reported, so the fill assertion counts as much as the render exception.
+  const noFill = areaCards.length && areaFilled.length !== areaCards.length;
   const code = (errors.length || !routingOk || frozenCards || frozenLedger ||
-    brokenContract || !degrade.ok) ? 1 : 0;
+    brokenContract || !degrade.ok || noFill) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own
