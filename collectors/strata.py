@@ -102,6 +102,25 @@ class StrataEndpoint(LlamaEndpoint):
             "llamacpp:requests_deferred": live.get("waiting"),
         }
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Two memories across scrapes, both needed because ``slots_view()`` is a
+        # snapshot of one instant and says nothing about what came before it:
+        #
+        # ``_slot_held``  what each slot held the last time it was idle.  When
+        #            that same slot turns busy, the engine's ``pick_slot`` has
+        #            just reused exactly that prefix (serve/server.py matches
+        #            the prompt against ``slot_held`` and takes it), so
+        #            held ÷ prompt is that slot's own prefix hit rate -- the
+        #            per-slot reading of the same idea the headline KV card
+        #            measures globally off ``totals.reused``.
+        # ``_slot_req``  the in-flight request per slot (its prompt length and
+        #            the hit computed for it), so the number survives the
+        #            2 s frames rather than flickering as the slot's counters
+        #            move underneath it.
+        self._slot_held = {}
+        self._slot_req = {}
+
     def _slots(self, payload):
         """One entry per batch slot, in the shape the context card reads.
 
@@ -111,6 +130,21 @@ class StrataEndpoint(LlamaEndpoint):
         case measures ``prompt_tokens + generated``.  Both are therefore "what
         this slot is holding", which is exactly what llama.cpp's slot view
         reports and what this panel's context card has always meant.
+
+        Two readings the engine does NOT report per slot are attributed here
+        rather than left blank, and both attributions rest on how the server
+        actually works:
+
+        * ``prefill_tok_s`` -- ``live.prefill_tok_s_mean`` is a single global
+          number, but the engine admits **one prompt read at a time**: the
+          control lines are a semaphore (``_take_control``), so while exactly
+          one slot is in ``reading`` that rate belongs to that slot.  With two
+          reading at once -- which the semaphore forbids, but a future engine
+          may not keep -- the attribution is dropped rather than guessed.
+        * ``kv_hit`` -- see ``_slot_held`` above.
+
+        Both stay ``None`` when the engine gives nothing to attribute, and the
+        card then reads "—" instead of a borrowed global average.
         """
         engine = payload.get("engine") or {}
         live = payload.get("live") or {}
@@ -122,15 +156,41 @@ class StrataEndpoint(LlamaEndpoint):
             rows = [{"slot": 0, "state": live.get("state"),
                      "prompt_tokens": live.get("prompt_tokens"),
                      "generated": live.get("generated")}]
+        prefill = live.get("prefill_tok_s_mean")
+        if not isinstance(prefill, (int, float)):
+            prefill = None
+        reading = [row for row in rows if row.get("state") == "reading"]
+        prefill_for = prefill if (prefill is not None and len(reading) == 1) else None
         slots = []
+        seen = set()
         for row in rows:
+            sid = row.get("slot")
             busy = row.get("state") != "idle"
+            if sid is not None:
+                seen.add(sid)
+            # The slot's own prefix hit, carried across the frames of one
+            # request: computed once when the request appears, then reused
+            # while its prompt length is unchanged.
+            kv_hit = None
+            if sid is not None:
+                if busy:
+                    prompt = row.get("prompt_tokens")
+                    previous = self._slot_req.get(sid)
+                    if previous is not None and previous[0] == prompt:
+                        kv_hit = previous[1]
+                    else:
+                        held = self._slot_held.get(sid)
+                        kv_hit = _ratio(held, prompt) if held else None
+                    self._slot_req[sid] = (prompt, kv_hit)
+                else:
+                    self._slot_held[sid] = row.get("held_tokens")
+                    self._slot_req.pop(sid, None)
             if busy:
                 used = (row.get("prompt_tokens") or 0) + (row.get("generated") or 0)
             else:
                 used = row.get("held_tokens")
             slots.append({
-                "id": row.get("slot"),
+                "id": sid,
                 "n_ctx": context,
                 "is_processing": busy,
                 "n_prompt_tokens": row.get("prompt_tokens"),
@@ -142,8 +202,30 @@ class StrataEndpoint(LlamaEndpoint):
                 "n_decoded": row.get("generated"),
                 "ctx_used": used,
                 "ctx_ratio": _ratio(used, context),
+                # Per-slot rate and age, reported by the engine only while the
+                # slot is busy (`slots_view()`): `tok_s` is generated divided by
+                # the seconds since that request's first token -- the community
+                # tg formula, but per slot instead of summed across slots, so a
+                # parallel run stays comparable to a single-request benchmark.
+                # Absent while idle, and the card shows "—" rather than 0.
+                "state": row.get("state"),
+                "tok_s": row.get("tok_s"),
+                "elapsed_s": row.get("elapsed_s"),
+                # Attributed, not measured per slot (see the docstring): the
+                # engine's one-at-a-time prompt read makes the global prefill
+                # rate belong to the slot that is reading, and the prefix the
+                # slot held before this request is exactly what the engine
+                # reused for it.
+                "prefill_tok_s": prefill_for if (busy and row.get("state") == "reading") else None,
+                "kv_hit": kv_hit,
                 "spec_types": None,
             })
+        # A slot the engine stopped reporting (a smaller --batch after a
+        # restart) must not keep a prefix that no longer exists: its id could
+        # come back attached to a different conversation.
+        for stale in set(self._slot_held) - seen:
+            self._slot_held.pop(stale, None)
+            self._slot_req.pop(stale, None)
         return slots
 
     def _model_detail(self, model_id, params, now, preset_args=None):

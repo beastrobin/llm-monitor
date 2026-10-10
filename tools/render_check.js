@@ -155,7 +155,8 @@ function readFrames(base, count, timeoutMs) {
     return Promise.resolve({ json: function () { return Promise.resolve(payload); } });
   };
 
-  win.eval(script + '\nwindow.renderEndpointsForTest = renderEndpoints;');
+  win.eval(script + '\nwindow.renderEndpointsForTest = renderEndpoints;' +
+    '\nwindow.appendPointForTest = appendPoint;');
   await new Promise(function (resolve) { setTimeout(resolve, 60); });
 
   // ------------------------------------------------------------------ report
@@ -187,6 +188,170 @@ function readFrames(base, count, timeoutMs) {
   const noFalseCurrent = selected() === null;
   const routingOk = selectedSecond && switchedFirst && noFalseCurrent;
   win.renderEndpointsForTest(payload.snapshot);
+
+  // --- slot detail: the one section the live snapshot may leave empty, so it
+  // gets a fixture of its own.  Both slot shapes Strata reports have to render
+  // without throwing: a busy slot (state/tok_s/elapsed_s present) and an idle
+  // one (held_tokens only, every other field null).  A fixture that only ever
+  // carries busy slots would let the idle path rot unnoticed -- which is
+  // exactly the state the panel spends most of its time in.
+  const slotFixture = {
+    current_endpoint_id: 'strata',
+    endpoints: [{
+      id: 'strata', label: 'Strata', up: true, base_url: 'http://127.0.0.1:8200',
+      models: [{
+        id: 'slot-fixture', loaded: true, n_ctx: 524288,
+        metrics: { counters: {} },
+        slots: [
+          { id: 0, n_ctx: 524288, is_processing: true, state: 'decoding',
+            n_prompt_tokens: 36287, n_decoded: 1582, ctx_used: 37869,
+            ctx_ratio: 0.0722, tok_s: 1498.3, elapsed_s: 1.4,
+            prefill_tok_s: null, kv_hit: 0.9312 },
+          { id: 1, n_ctx: 524288, is_processing: true, state: 'reading',
+            n_prompt_tokens: 67489, n_decoded: 0, ctx_used: 67489,
+            ctx_ratio: 0.1287, tok_s: null, elapsed_s: 1.1,
+            prefill_tok_s: 1191.8, kv_hit: 0.8871 },
+          // A near-empty slot: 833 of 524288 tokens is 0.2 %, which is the
+          // case that used to draw an invisible rail and read as "no data".
+          { id: 2, n_ctx: 524288, is_processing: false, state: 'idle',
+            n_prompt_tokens: null, n_decoded: null, ctx_used: 833,
+            ctx_ratio: 0.0016, tok_s: null, elapsed_s: null,
+            prefill_tok_s: null, kv_hit: null },
+        ],
+      }],
+    }],
+  };
+  const slotErrorsBefore = errors.length;
+  win.renderEndpointsForTest(slotFixture);
+  // Re-render so the slot series have more than one sample: a canvas that has
+  // never been drawn reports count 0 and would pass a check meant to prove the
+  // trend is actually wired up.  All six keys go in, because the panel only
+  // pushes what the hub flattened -- a fixture that seeds one key would leave
+  // the other five curves empty and prove nothing about them.
+  slotFixture.endpoints[0].models[0].slots[0].n_decoded = 1900;
+  slotFixture.endpoints[0].models[0].slots[0].tok_s = 1510.5;
+  win.appendPointForTest({ ts: Math.floor(Date.now() / 1000) + 5, values: {
+    'strata/slot-fixture.slot0.ctx': 37869,
+    'strata/slot-fixture.slot0.ratio': 0.0722,
+    'strata/slot-fixture.slot0.decoded': 1900,
+    'strata/slot-fixture.slot0.tok_s': 1510.5,
+    'strata/slot-fixture.slot0.prefill': 1191.8,
+    'strata/slot-fixture.slot0.kv': 0.9312,
+  } });
+  win.renderEndpointsForTest(slotFixture);
+
+  const SLOT_KEYS = ['tok_s', 'prefill', 'ctx', 'ratio', 'kv', 'decoded'];
+  const slotFold = doc.querySelector('.slot-fold');
+  const slotRows = doc.querySelectorAll('.slot-row');
+  const busyRow = slotRows[0];
+  const readRow = slotRows[1];
+  const idleRow = slotRows[2];
+  const slotCard = function (row, key) {
+    return row && row.querySelector('[data-card="' + key + '"]');
+  };
+  const slotValue = function (row, key) {
+    const card = slotCard(row, key);
+    return card ? text(card.querySelector('.card-value')) : null;
+  };
+  const railOf = function (row, key) {
+    const fill = slotCard(row, key) && slotCard(row, key).querySelector('.bar > i');
+    return fill ? fill.style.height : null;
+  };
+  const sparkDrawn = function (row, key) {
+    const canvas = slotCard(row, key) && slotCard(row, key).querySelector('canvas.spark');
+    return !!(canvas && canvas._geom && canvas._geom.count > 0);
+  };
+  // The fold leads open: the per-slot breakdown is what the user comes to the
+  // panel for, and asking for a click before it appears is a click too many.
+  const foldOpen = !!(slotFold && slotFold.open);
+  // The six cards carry the headline cards' names wherever the engine can give
+  // a per-slot value, and the row is addressed as "slot N".  These labels were
+  // an explicit request, so they are asserted rather than assumed to stick.
+  const EXPECTED_LABELS = ['生成速度', 'Prefill 速度', '上下文',
+    '上下文占比', 'KV 缓存命中', '已生成'];
+  const labelsOf = function (row) {
+    return SLOT_KEYS.map(function (k) {
+      const card = slotCard(row, k);
+      return card ? text(card.querySelector('.card-label')) : null;
+    });
+  };
+  const labelsOk = busyRow && labelsOf(busyRow).join('|') === EXPECTED_LABELS.join('|');
+  const slotIdOk = busyRow && text(busyRow.querySelector('.slot-id')) === 'slot 0';
+  // Every slot card must carry the same anatomy as the six headline cards:
+  // a rail, a label, a value and a trend canvas.  A missing rail means paintCards
+  // never ran for this row.
+  const anatomyOk = busyRow && SLOT_KEYS.every(function (key) {
+    const card = slotCard(busyRow, key);
+    return card && card.querySelector('.bar') && card.querySelector('.card-label') &&
+      card.querySelector('.card-value') && card.querySelector('canvas.spark');
+  });
+  const busyOk = busyRow &&
+    slotValue(busyRow, 'ctx') === '37,869tok' &&
+    slotValue(busyRow, 'decoded') === '1,900tok' &&
+    slotValue(busyRow, 'tok_s') === '1510.5t/s' &&
+    slotValue(busyRow, 'kv') === '93.1%' &&
+    text(busyRow.querySelector('.slot-state')) === 'decoding' &&
+    busyRow.querySelector('.slot-state').className.indexOf('on') >= 0;
+  // The reading slot owns the engine's one-at-a-time prefill rate.
+  const readOk = readRow && slotValue(readRow, 'prefill') === '1192t/s';
+  // An idle slot has held_tokens and nothing else: it must say so with "—"
+  // rather than zeros, and its rail must not claim a reading.
+  const idleOk = idleRow &&
+    slotValue(idleRow, 'ctx') === '833tok' &&
+    slotValue(idleRow, 'decoded') === '—' &&
+    slotValue(idleRow, 'tok_s') === '—' &&
+    slotValue(idleRow, 'prefill') === '—' &&
+    slotValue(idleRow, 'kv') === '—' &&
+    text(idleRow.querySelector('.slot-state')) === 'idle';
+  const idleRailEmpty = idleRow && railOf(idleRow, 'tok_s') === '0%';
+  // The visibility floor: this slot holds 833 of 524288 tokens -- 0.16%, which
+  // is a tenth of a pixel of rail and used to read as an empty card.  The rail
+  // must show, and the headline number must stay exact.
+  const tinyRailVisible = idleRow &&
+    parseFloat(railOf(idleRow, 'ratio')) >= 2 &&
+    slotValue(idleRow, 'ratio') === '0.2%';
+  // A busy slot well under the limit must not paint a full bar.
+  const ratioRail = busyRow && railOf(busyRow, 'ratio');
+  const ratioRailSane = !!ratioRail && parseFloat(ratioRail) > 2 && parseFloat(ratioRail) < 100;
+  const sparkOk = SLOT_KEYS.filter(function (k) { return k !== 'prefill'; })
+    .every(function (key) { return sparkDrawn(busyRow, key); });
+  // The failure report carries the per-card point counts: a curve that draws
+  // nothing usually means the series key the frontend asks for does not match
+  // the one the hub flattened (the slot cards once keyed themselves
+  // ".slotundefined.*" and every curve sat empty while the numbers worked).
+  const sparkCounts = SLOT_KEYS.map(function (k) {
+    const canvas = slotCard(busyRow, k) && slotCard(busyRow, k).querySelector('canvas.spark');
+    return k + '=' + (canvas && canvas._geom ? canvas._geom.count : 'none') +
+      '/' + (canvas && canvas._spark ? (canvas._spark.values || []).length : '?');
+  }).join(' ');
+  const slotOk = foldOpen && labelsOk && slotIdOk && anatomyOk && busyOk && readOk &&
+    idleOk && idleRailEmpty && tinyRailVisible && ratioRailSane && sparkOk &&
+    errors.length === slotErrorsBefore;
+  say('slot 明细: ' + (slotOk ? '通过' : '失败') +
+    ' | 行 ' + slotRows.length +
+    ' | 默认展开 ' + (foldOpen ? '✓' : '✗') +
+    ' | 标签 ' + (labelsOk ? '✓' : '✗ ' + labelsOf(busyRow).join('/')) +
+    ' | slot id ' + (slotIdOk ? '✓' : '✗') +
+    ' | 结构 ' + (anatomyOk ? '✓' : '✗') +
+    ' | 忙碌槽 ' + (busyOk ? '✓' : '✗') +
+    ' | 读入槽 prefill ' + (readOk ? '✓' : '✗') +
+    ' | 空闲槽 "—" ' + (idleOk ? '✓' : '✗') +
+    ' | 空闲血条空 ' + (idleRailEmpty ? '✓' : '✗') +
+    ' | 0.2% 血条可见 ' + (tinyRailVisible ? '✓' : '✗') +
+    ' | 曲线已绘制 ' + (sparkOk ? '✓' : '✗ ' + sparkCounts));
+  if (busyRow) {
+    say('   忙碌槽 0: ' + SLOT_KEYS
+      .map(function (k) { return text(slotCard(busyRow, k).querySelector('.card-label')) +
+        '=' + slotValue(busyRow, k); }).join(' | ') +
+      ' | 上下文占比血条 ' + ratioRail);
+  }
+  if (idleRow) {
+    say('   空闲槽 2: ' + SLOT_KEYS
+      .map(function (k) { return text(slotCard(idleRow, k).querySelector('.card-label')) +
+        '=' + slotValue(idleRow, k) + '(' + railOf(idleRow, k) + ')'; }).join(' | '));
+  }
+  win.renderEndpointsForTest(payload.snapshot);
+
   say('当前模型来源切换: ' + (routingOk ? '通过' : '失败'));
 
   say('错误: ' + (errors.length ? errors.join(' | ') : '无'));
@@ -314,7 +479,10 @@ function readFrames(base, count, timeoutMs) {
   say('—— 卡片 ——');
   const grids = [
     ['系统', '#sys'],
-    ['推理', '.endpoint .grid'],
+    // The per-slot breakdown reuses .grid.compact for its own six-card rows, so
+    // scope this to the model's headline grid (direct child of .model), which
+    // is the only one carrying a spark canvas.
+    ['推理', '.endpoint .model > .grid'],
   ];
   grids.forEach(function (entry) {
     const cards = doc.querySelectorAll(entry[1] + ' .card');

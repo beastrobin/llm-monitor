@@ -691,6 +691,26 @@ class Hub(object):
                 ratios = [s.get("ctx_ratio") for s in slots
                           if s.get("ctx_ratio") is not None]
                 values[base + ".ctx"] = max(ratios) if ratios else None
+                # Per-slot series, so a slot card can draw the same kind of
+                # trend the big cards do.  Keyed by slot id rather than by list
+                # position: ids are what the engine reports and what the UI
+                # addresses a row by, so the curve stays attached to its slot
+                # even when the engine renumbers or a slot drops out of the
+                # batch.  A slot that goes idle reports nulls rather than zeros,
+                # which is what leaves a gap in its curve instead of a dive to
+                # the floor -- see slotCardValues.
+                for slot in slots:
+                    if slot.get("id") is None:
+                        continue
+                    sbase = "%s.slot%s" % (base, slot["id"])
+                    values[sbase + ".ctx"] = slot.get("ctx_used")
+                    values[sbase + ".ratio"] = slot.get("ctx_ratio")
+                    values[sbase + ".prompt"] = slot.get("n_prompt_tokens")
+                    values[sbase + ".decoded"] = slot.get("n_decoded")
+                    values[sbase + ".tok_s"] = slot.get("tok_s")
+                    values[sbase + ".prefill"] = slot.get("prefill_tok_s")
+                    values[sbase + ".kv"] = slot.get("kv_hit")
+                    values[sbase + ".elapsed"] = slot.get("elapsed_s")
         return values
 
     def sample(self):

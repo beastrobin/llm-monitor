@@ -613,7 +613,9 @@ function paintCards(refs, values) {
     if (ref.fill) {
       const ratio = (value.bar === undefined || value.bar === null) ? null : value.bar;
       // The rail fills from the bottom up, so it is a height, not a width.
-      ref.fill.style.height = ratio === null ? '0%' : Math.max(0, Math.min(100, ratio * 100)) + '%';
+      // railHeight keeps a small but real reading visible: a 0.2% context
+      // share is a tenth of a pixel and reads as an empty card.
+      ref.fill.style.height = railHeight(ratio);
       ref.bar.className = 'bar' + (value.barClass ? ' ' + value.barClass : '');
     }
     if (ref.spark && value.series) {
@@ -624,6 +626,11 @@ function paintCards(refs, values) {
 
 function kvChips(items) {
   return (items || []).map(function (item) {
+    // Raw passthrough: the item is already-built markup, for chips that keep
+    // the hero line's own look (the spec tags) instead of the label/value shape.
+    if (item.raw) {
+      return item.html || '';
+    }
     // Expandable chip: a <details> whose summary is the chip itself and whose
     // body holds the child rows.  Used for the long MTP per-position list so
     // it does not sprawl across the detail row by default.
@@ -672,7 +679,15 @@ const STATE_LAMPS = [
   ['idle', '空闲'], ['reading', '读prompt'], ['generating', '生成中'],
   ['queued', '排队'], ['error', '出错'],
 ];
-function heroStateHtml(model) {
+// The five lamps stay on the hero line, right-aligned, and never move: they
+// are the fixed-width part of the state gauge.  The note that used to sit
+// beside them does NOT -- its length changes every tick ("读 1.2k/4.4k tok",
+// "生成中 · 812 tok @ 205.7 t/s", "上次 386 tok @ 127.3 t/s"), and with the
+// row pushed to the far right by margin-left:auto that growth shoved the
+// lamps left and back on every sample.  So the note moved to the detail row
+// below, left-aligned and free to change width, exactly like the value chips
+// already there.  The lamps keep the identity; the note keeps the detail.
+function heroLampsHtml(model) {
   const live = model && model.live_state;
   if (!live || !live.state) return '';
   const on = live.queued > 0 ? 'queued' : live.state;
@@ -681,27 +696,38 @@ function heroStateHtml(model) {
     return '<span class="state-lamp' + (lit ? ' on s-' + l[0] : '') + '">' +
       '<i></i>' + l[1] + '</span>';
   }).join('');
-  let note = '等待请求';
-  if (live.state === 'reading') {
-    note = live.prompt_total
-      ? '读 ' + countText(live.prompt_read) + '/' + countText(live.prompt_total) + ' tok'
-      : '读 prompt ' + countText(live.prompt_tokens) + ' tok';
-  } else if (live.state === 'generating') {
-    note = (live.phase || '生成中') + ' · ' + countText(live.generated) + ' tok' +
-      (live.tok_s != null ? ' @ ' + num(live.tok_s, 1) + ' t/s' : '');
-  } else {
-    const last = model.last_request;
-    if (last && last.output_tokens != null) {
-      note = '上次 ' + countText(last.output_tokens) + ' tok' +
-        (last.decode_tok_s != null ? ' @ ' + num(last.decode_tok_s, 1) + ' t/s' : '');
-    }
-  }
-  return '<span class="hero-state" title="引擎自报状态（Strata /metrics live 块）">' +
-    lamps + '<span class="state-note">' + esc(note) + '</span></span>';
+  return '<span class="hero-lamps" title="引擎自报状态（Strata /metrics live 块）">' +
+    lamps + '</span>';
 }
 
-// The spec tags shown next to a model name (quant / context / slots / MTP).
-// Shared by the hero line and the per-model title so both read identically.
+// The live note for one model: what the engine is doing right now, and what it
+// did last when it is idle.  Rendered into the detail row, where its width is
+// nobody else's problem.
+function stateNoteText(model) {
+  const live = model && model.live_state;
+  if (!live || !live.state) return '';
+  if (live.state === 'reading') {
+    return live.prompt_total
+      ? '读 ' + countText(live.prompt_read) + '/' + countText(live.prompt_total) + ' tok'
+      : '读 prompt ' + countText(live.prompt_tokens) + ' tok';
+  }
+  if (live.state === 'generating') {
+    return (live.phase || '生成中') + ' · ' + countText(live.generated) + ' tok' +
+      (live.tok_s != null ? ' @ ' + num(live.tok_s, 1) + ' t/s' : '');
+  }
+  const last = model.last_request;
+  if (last && last.output_tokens != null) {
+    return '上次 ' + countText(last.output_tokens) + ' tok' +
+      (last.decode_tok_s != null ? ' @ ' + num(last.decode_tok_s, 1) + ' t/s' : '');
+  }
+  return '等待请求';
+}
+
+// The spec tags (quant / context / slots / MTP).  They belong on the hero
+// line: they describe what the engine IS, and the hero line is the row that
+// names the engine.  Keeping them next to the name means the right-hand end
+// of that row holds a fixed set of chips -- the state lamps -- so the row no
+// longer changes width as the numbers elsewhere do.
 function modelTags(model) {
   const mtpTag = model.mtp_enabled
     ? '<span class="tag on">MTP ' + esc(cleanSpecTypes(model.mtp_type) || '启用') + '</span>'
@@ -840,7 +866,7 @@ const MODEL_SPECS = [
     tip: '前缀缓存命中率 = 命中缓存的 token ÷ 全部提示 token。' +
       '多轮对话里重复前缀越多这个值越高，命中的部分不需要重新 prefill。',
   }),
-  cardSpec('ctx', '上下文水位', {
+  cardSpec('ctx', '上下文占比', {
     bar: true,
     tip: '各 slot 里已用上下文的最大值（提示词 + 已生成）÷ 模型上下文上限。' +
       '超过 85% 变红，再涨就该清理对话了。' +
@@ -982,14 +1008,24 @@ function applyModel(root, endpoint, model) {
     // opening the per-position list does not snap shut two seconds later.
     const openDetail = detail.querySelector('details');
     const wasOpen = !!(openDetail && openDetail.open);
-    // The row used to carry context ceiling and speculative-decoding chips --
-    // both already sit on the hero line as spec tags (262K 上下文 / MTP ...),
-    // and empty items drew a bare "—" that read as noise.  So: no duplicates,
-    // and an item only appears when the engine actually reported a number.
+    // The spec tags (context / slots / MTP) used to sit on the hero line; they
+    // moved here so that row reads like the numbers it belongs with -- what the
+    // engine is (specs), then how it is doing (rates).  They lead the row for
+    // that reason.  Everything below still only appears when the engine
+    // actually reported a value, so nothing draws a bare "—".
+    // The spec tags live on the hero line now (see modelTags).  This row is
+    // the engine's live numbers, and it leads with the state note: that text
+    // changes width every tick, so it gets the whole free space on the left
+    // and the value chips right-align after it -- which is the whole reason
+    // the note left the hero line in the first place.  Everything below still
+    // only appears when the engine actually reported a value, so nothing
+    // draws a bare "—".
+    const note = stateNoteText(model);
     const items = [
+      note ? { raw: true, html: '<span class="kv-note">' + esc(note) + '</span>' } : null,
       { label: '累计均值', value: num(metrics.decode_tps_avg, 1), unit: 't/s' },
       { label: 'prefill 均值', value: num(metrics.prefill_tps_avg, 0), unit: 't/s' },
-    ];
+    ].filter(Boolean);
     if (typeof metrics.n_tokens_max === 'number') {
       items.push({ label: '序列峰值', value: countText(metrics.n_tokens_max), unit: 'tok' });
     }
@@ -1025,7 +1061,248 @@ function applyModel(root, endpoint, model) {
       items.push({ label: 'slot 采集失败', value: model.slots_error, wide: true, alert: true });
     }
     detail.innerHTML = kvChips(items);
+    renderSlotDetail(root.querySelector('[data-role="slots"]'), model, base);
   }
+}
+
+// ---------------------------------------------------------------- slot detail
+
+// The per-slot breakdown: one collapsible section under the model card, one
+// row per batch slot, six small cards each.  The engine has always reported
+// this (llama.cpp's /slots, Strata's /metrics live.slots) and the collector
+// always forwards it -- until now the panel only read the largest
+// ctx_ratio out of the array, so two of three slots were rendered and thrown
+// away.  With parallel requests running, which slot holds the long context
+// and what each one is actually generating at is the interesting question,
+// and "max of three" cannot answer it.
+//
+// Folded OPEN by default: the user asked to see the per-slot breakdown
+// without a click, and each row is one line of six small cards.
+function renderSlotDetail(host, model, base) {
+  if (!host) return;
+  const slots = model.slots || [];
+  if (slots.length < 1) {
+    host.innerHTML = '';
+    return;
+  }
+
+  // Rebuild only when the shape changes: the row count and each slot's id.
+  // The values inside are repainted every tick without touching the DOM, so
+  // the fold state and the canvases survive.
+  const signature = 'slots:' + slots.length + ':' +
+    slots.map(function (s) { return s.id; }).join(',');
+  if (host.dataset.sig !== signature) {
+    host.dataset.sig = signature;
+    host.innerHTML =
+      '<details class="collapsible slot-fold" open>' +
+      '<summary><h3>slot 明细 <span class="muted">' +
+        esc(slots.length + ' 个槽 · ' +
+          slots.filter(function (s) { return s.is_processing; }).length + ' 个在跑') +
+      '</span></h3></summary>' +
+      '<div class="slot-rows">' +
+      slots.map(function (slot) {
+        return '<div class="slot-row" data-slot="' + esc(String(slot.id)) + '">' +
+          '<div class="slot-title"><span class="slot-id">slot ' + esc(String(slot.id)) + '</span>' +
+          '<span class="slot-state" data-role="state"></span></div>' +
+          '<div class="slot-cards grid compact" data-role="cards"></div>' +
+          '</div>';
+      }).join('') +
+      '</div></details>';
+  }
+
+  // Same job as applyModel, one row at a time: the slot cards are built by the
+  // shared buildCards/paintCards pair, so a slot row carries the identical
+  // anatomy as the six headline cards -- left rail, label, value, mini trend,
+  // and an info tooltip that explains the metric.  Hand-rolling a plainer card
+  // here is what made this section read as a second-class table next to the
+  // cards above it.
+  host.querySelectorAll('.slot-row').forEach(function (row) {
+    const id = row.getAttribute('data-slot');
+    const slot = slots.filter(function (s) { return String(s.id) === id; })[0];
+    if (!slot) return;
+    const stateEl = row.querySelector('[data-role="state"]');
+    if (stateEl) {
+      const label = slot.is_processing ? (slot.state || 'processing') : 'idle';
+      stateEl.className = 'slot-state' + (slot.is_processing ? ' on' : '');
+      stateEl.textContent = label;
+    }
+    const refs = ensureCards(row.querySelector('[data-role="cards"]'), SLOT_SPECS);
+    if (!refs) return;
+    paintCards(refs, slotCardValues(slot, base, id));
+  });
+}
+
+// One slot's six readings, in the shape paintCards expects: headline, rail
+// ratio, trend series and a tooltip that carries the live breakdown.
+//
+// The six readings, in the same order and under the same names as the six
+// headline cards wherever the engine can give a per-slot value: 生成速度 /
+// Prefill 速度 / 上下文 / 上下文占比 / KV 缓存命中, plus 已生成 in place of the
+// headline's MTP 每步接受 -- MTP counters are engine-global (Strata's C++ sums
+// drafts across slots and never says which slot a draft belonged to), so a
+// per-slot MTP card would be the same number three times over.  已生成 is the
+// one reading that is genuinely per slot and has no headline equivalent.
+//
+// Every field is optional.  An idle Strata slot reports held_tokens and nothing
+// else (server.py's slots_view idle branch has a single length to give), so the
+// row shows what it has and "—" for the rest rather than zeros that read like
+// real measurements -- and the trend skips those samples instead of diving to
+// the floor, because a null sample is dropped rather than drawn as a zero.
+const SLOT_SPECS = [
+  cardSpec('tok_s', '生成速度', {
+    bar: true,
+    tip: '该 slot 自己的生成速度 = 已生成 ÷ 首个 token 之后的秒数，' +
+      '就是社区 tg 那个公式，但**按槽**而非跨槽求和 —— 并发时仍能与单请求基准比较。' +
+      'Strata 只在槽忙时上报；llama.cpp 的 /slots 没有这一项，显示 — 而不是 0。' +
+      '血条是该槽当前速度 ÷ 该槽本会话峰值。',
+  }),
+  cardSpec('prefill', 'Prefill 速度', {
+    bar: true,
+    tip: '该 slot 读入提示词的速率。引擎只报一个全局 prefill 速率，' +
+      '但它一次只读一个提示词（控制行是信号量），所以正在 reading 的那个槽就是这条速率的主人。' +
+      '没有槽在读、或同时有几个在读时不猜，显示 —。',
+  }),
+  cardSpec('ctx', '上下文', {
+    bar: true,
+    tip: '这个 slot 手上留着的 token 数：在跑时是「提示词 + 已生成」，' +
+      '空闲时是服务端为下一轮保留的那段前缀。曲线是它随对话增长的样子。' +
+      '血条是它占模型上下文上限的比例（下一张卡是同一个数的百分比读法）。',
+  }),
+  cardSpec('ratio', '上下文占比', {
+    bar: true,
+    tip: '该 slot 留着的 token ÷ 模型上下文上限。超过 85% 转红。' +
+      '注意这是**单个** slot 的占比，主卡的「上下文占比」取的是各 slot 的最大值。' +
+      '低于 2% 时血条按 2% 画，否则 6px 宽的柱在 0.2% 上根本看不见——数字本身没被改。',
+  }),
+  cardSpec('kv', 'KV 缓存命中', {
+    bar: true,
+    tip: '这个 slot 本轮提示词里，前缀缓存直接给回、不需要重新 prefill 的比例。' +
+      'llama.cpp 的 /slots 直接报这个拆分；Strata 按槽不报，这里取的是「该槽上一轮留下的前缀 ÷ 本轮提示词」——' +
+      '正是引擎 pick_slot 复用的那一段。主卡的 KV 缓存命中是全局累计口径，两者算法不同，不必相等。',
+  }),
+  cardSpec('decoded', '已生成', {
+    tip: '这个 slot 已经生成的 token 数。锯齿状上升就是它在出字。',
+  }),
+];
+
+// The smallest rail a nonzero reading can draw.  The bar is 6px wide and fills
+// from the bottom, so a 0.2% context share is 0.1px of height: invisible, which
+// reads as "no data" on a card that has data.  The floor is a visibility floor
+// on the drawing only -- the headline number and the curve stay exact.
+const BAR_VISIBLE_MIN = 0.02;
+
+function railHeight(ratio) {
+  if (ratio === null || ratio === undefined) return '0%';
+  const clamped = Math.max(0, Math.min(1, ratio));
+  if (clamped === 0) return '0%';
+  return (Math.max(clamped, BAR_VISIBLE_MIN) * 100) + '%';
+}
+
+function slotCardValues(slot, base, slotId) {
+  const prefix = base + '.slot' + slotId;
+  const out = {};
+  const used = slot.ctx_used;
+  const busy = !!slot.is_processing;
+  const ceiling = slot.n_ctx;
+
+  const ctxSeries = seriesOf(prefix + '.ctx');
+  out.ctx = {
+    text: used === null || used === undefined ? '—' : countText(used),
+    unit: used === null || used === undefined ? '' : 'tok',
+    foot: ceiling ? '上限 ' + countText(ceiling) + ' tok' : '',
+    bar: (used === null || used === undefined || !ceiling) ? null : used / ceiling,
+    barClass: (ceiling && used / ceiling > 0.85) ? 'bad' : '',
+    series: ctxSeries,
+    sparkOptions: {
+      min: 0, color: cssVar('--chart-c'), autoscale: true,
+      format: function (v) { return countText(v); },
+    },
+  };
+
+  const ratio = slot.ctx_ratio;
+  out.ratio = {
+    text: ratio === null || ratio === undefined ? '—' : pct(ratio),
+    bar: ratio,
+    barClass: (ratio !== null && ratio !== undefined && ratio > 0.85) ? 'bad' : '',
+    foot: busy ? '本槽占比' : '空闲残留',
+    series: seriesOf(prefix + '.ratio'),
+    sparkOptions: {
+      min: 0, max: 1, color: cssVar('--chart-c'), autoscale: true,
+      format: function (v) { return num(v * 100, 0) + '%'; },
+    },
+  };
+
+  const decodedSeries = seriesOf(prefix + '.decoded');
+  out.decoded = {
+    text: slot.n_decoded === null || slot.n_decoded === undefined
+      ? '—' : countText(slot.n_decoded),
+    unit: slot.n_decoded === null || slot.n_decoded === undefined ? '' : 'tok',
+    foot: busy ? '本轮已出字' : '空闲无请求',
+    series: decodedSeries,
+    sparkOptions: {
+      min: 0, color: cssVar('--chart-a'), autoscale: true,
+      format: function (v) { return countText(v); },
+    },
+  };
+
+  // The slot's own rate, when the engine reports one.  The rail is "how close
+  // to this slot's own best", the same reading the headline rate card gives --
+  // a rate has no natural 0-100% range, so the peak is the only honest full
+  // scale.  Idle slots report no rate at all, and neither does llama.cpp's
+  // /slots, so both show an empty rail and "—" rather than 0.
+  const rate = slot.tok_s;
+  const rateSeries = seriesOf(prefix + '.tok_s');
+  const ratePeak = rollingPeakOf(rateSeries, S.history.timestamps);
+  out.tok_s = {
+    text: typeof rate === 'number' ? num(rate, 1) : '—',
+    unit: typeof rate === 'number' ? 't/s' : '',
+    bar: (typeof rate !== 'number' || !ratePeak) ? null
+      : Math.max(0, Math.min(1, rate / ratePeak)),
+    foot: typeof rate !== 'number'
+      ? '引擎未上报'
+      : ('峰值 ' + num(ratePeak, 1) + ' t/s'),
+    series: rateSeries,
+    sparkOptions: {
+      min: 0, color: cssVar('--chart-a'), autoscale: true,
+      format: function (v) { return num(v, 1); },
+    },
+  };
+
+  // Prefill is attributed by the collector (see strata.py's _slots): the
+  // engine reads one prompt at a time, so the global rate belongs to the slot
+  // that is reading.  Same rail rule as the decode card -- this slot's own
+  // session peak is the full scale.
+  const prefill = slot.prefill_tok_s;
+  const prefillSeries = seriesOf(prefix + '.prefill');
+  const prefillPeak = rollingPeakOf(prefillSeries, S.history.timestamps);
+  out.prefill = {
+    text: typeof prefill === 'number' ? num(prefill, 0) : '—',
+    unit: typeof prefill === 'number' ? 't/s' : '',
+    bar: (typeof prefill !== 'number' || !prefillPeak) ? null
+      : Math.max(0, Math.min(1, prefill / prefillPeak)),
+    foot: typeof prefill !== 'number'
+      ? (busy ? '不在读提示词' : '空闲无请求')
+      : ('峰值 ' + num(prefillPeak, 0) + ' t/s'),
+    series: prefillSeries,
+    sparkOptions: {
+      min: 0, color: cssVar('--chart-b'), autoscale: true,
+      format: function (v) { return num(v, 0); },
+    },
+  };
+
+  const kv = slot.kv_hit;
+  out.kv = {
+    text: typeof kv === 'number' ? pct(kv) : '—',
+    bar: typeof kv === 'number' ? kv : null,
+    barClass: typeof kv === 'number' ? 'good' : '',
+    foot: typeof kv === 'number' ? '' : (busy ? '引擎未上报' : '空闲无请求'),
+    series: seriesOf(prefix + '.kv'),
+    sparkOptions: {
+      min: 0, max: 1, color: cssVar('--chart-d'), autoscale: true,
+      format: function (v) { return num(v * 100, 0) + '%'; },
+    },
+  };
+  return out;
 }
 
 function renderEndpointModels(container, endpoint) {
@@ -1049,6 +1326,7 @@ function renderEndpointModels(container, endpoint) {
       title +
       '<div class="grid" data-role="cards"></div>' +
       '<div class="kv" data-role="detail"></div>' +
+      '<div data-role="slots"></div>' +
       '</div>';
   }).join('');
 
@@ -1161,10 +1439,9 @@ function renderEndpoints(snapshot) {
 
   if (container.dataset.signature !== signature) {
     container.dataset.signature = signature;
-    // The hero line doubles as the model's title: label + name + port + spec
-    // tags all on one row, so the per-model title below no longer repeats it.
-    // Only the current source wears the "running" pill (the model hermes is
-    // actually using); the others title themselves with their own label.
+    // The hero line carries the identity only: label + name + port + state.
+    // The spec tags moved down to the detail row (see modelTags), so the state
+    // pill sits right next to the name instead of being pushed off the row.
     const note = liveNote(live);
     const blocks = serving.map(function (e) {
       const heroModel = (e.models || [])[0] || null;
@@ -1174,7 +1451,7 @@ function renderEndpoints(snapshot) {
           '<span class="hero-name">' + esc(shortModelName(heroModel.id)) + '</span>' +
           '<span class="hero-port">' + esc(portOf(e.base_url) || '?') + '</span>' +
           modelTags(heroModel) +
-          '<span data-role="hero-state"></span>' +
+          '<span data-role="hero-lamps"></span>' +
           '</div>'
         : '';
       // The live tracker's failure note belongs on its own source's card:
@@ -1220,12 +1497,12 @@ function renderEndpoints(snapshot) {
     }
     // The engine's state lamps change faster than the block signature (idle
     // and generating share one card), so they get their own per-tick slot.
-    const stateBox = root.querySelector('[data-role="hero-state"]');
-    if (stateBox) {
-      const html = heroStateHtml((e.models || [])[0]);
-      if (stateBox._sig !== html) {
-        stateBox._sig = html;
-        stateBox.innerHTML = html;
+    const lampBox = root.querySelector('[data-role="hero-lamps"]');
+    if (lampBox) {
+      const html = heroLampsHtml((e.models || [])[0]);
+      if (lampBox._sig !== html) {
+        lampBox._sig = html;
+        lampBox.innerHTML = html;
       }
     }
   });

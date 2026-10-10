@@ -585,15 +585,15 @@ main {
    (Strata's Monitor tab, compacted to fit beside the spec tags).  Five lamps
    for the engine's state machine; only the active one wears its colour and
    full opacity, the rest stay ghosted so the row reads as a gauge, not a
-   legend.  The note carries what the request is doing right now. */
-[data-role="hero-state"] {
+   legend. */
+[data-role="hero-lamps"] {
   margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
 }
-.hero-state { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.hero-lamps { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .state-lamp {
   display: inline-flex;
   align-items: center;
@@ -626,11 +626,6 @@ main {
 .state-lamp.on.s-queued i { background: var(--warn); }
 .state-lamp.on.s-error { color: var(--bad); }
 .state-lamp.on.s-error i { background: var(--bad); }
-.state-note {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 11px;
-  color: var(--muted);
-}
 
 /* One chip per source instead of a full card each: the section only answers
    "which llamacpp is serving which model", so router/loader/spawned child
@@ -709,10 +704,25 @@ main {
   border-color: color-mix(in srgb, var(--good) 30%, transparent);
   background: color-mix(in srgb, var(--good) 10%, transparent);
 }
+.tag.off { color: var(--faint); }
 
 /* -------------------------------------------------------------- detail chips */
 
 .kv { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+
+/* The live note ("读 1.2k/4.4k tok", "生成中 · 812 tok @ 205.7 t/s") changes
+   width every tick, so it takes the free space on the left of the detail row
+   and pushes the value chips after it.  It used to sit on the hero line next
+   to the state lamps, where every length change shoved those lamps sideways
+   -- the row's right-hand end has to hold still, and that is what the lamps
+   are for. */
+.kv-note {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--muted);
+  margin-right: auto;
+  padding: 2px 0;
+}
 
 .kv-item {
   display: inline-flex;
@@ -1175,6 +1185,56 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
   padding: 8px 14px 14px;
   margin: 0;
 }
+
+/* ------------------------------------------------------------- slot breakdown */
+
+/* One row per batch slot under the model card.  Folded open by default (see
+   renderSlotDetail): "which slot holds what" is the question the user asks
+   first, and each row is one line of six small cards. */
+.slot-fold { margin-top: 10px; }
+.slot-fold summary h3::before { background: var(--chart-t); }
+.slot-rows { display: flex; flex-direction: column; gap: 10px; }
+.slot-row + .slot-row {
+  border-top: 1px solid var(--border-soft);
+  padding-top: 10px;
+}
+.slot-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+.slot-id {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+.slot-state {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  color: var(--faint);
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.slot-state.on {
+  color: var(--good);
+  border-color: color-mix(in srgb, var(--good) 30%, transparent);
+  background: color-mix(in srgb, var(--good) 10%, transparent);
+}
+/* Six readings per slot, built by the same buildCards/paintCards pair as the
+   headline cards so a slot row has the identical anatomy: left rail, label,
+   value, mini trend and an info tooltip.  Sized down one notch because these
+   sit under a card that already carries the same six ideas in aggregate --
+   the fold is a drill-down, not a second dashboard. */
+.slot-cards { gap: 10px; }
+.slot-cards .card { padding: 8px 11px 7px; gap: 8px; }
+.slot-cards .card-value { font-size: 15px; }
+.slot-cards .card-head { gap: 4px; }
+.slot-cards .card-label { font-size: 11px; }
+.slot-cards .card-visual { margin-top: 6px; gap: 5px; }
+.slot-cards .spark { height: 34px; }
 
 /* ---------------------------------------------------------------- fade animation */
 

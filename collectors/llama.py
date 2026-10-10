@@ -397,6 +397,22 @@ class LlamaEndpoint(object):
                     "n_decoded": decoded,
                     "ctx_used": used,
                     "ctx_ratio": _ratio(used, detail.get("n_ctx")),
+                    # llama.cpp's slot view splits this request's prompt into
+                    # the part the cache served and the part that went through
+                    # the forward pass, so the slot's own prefix hit rate is a
+                    # direct measurement here -- not an attribution, as it has
+                    # to be for Strata.  A slot that has read nothing yet gives
+                    # None rather than a division by zero.
+                    "kv_hit": _ratio(slot.get("n_prompt_tokens_cache"),
+                                     (slot.get("n_prompt_tokens_cache") or 0) +
+                                     (slot.get("n_prompt_tokens_processed") or 0))
+                            if (slot.get("n_prompt_tokens_cache") is not None or
+                                slot.get("n_prompt_tokens_processed") is not None)
+                            else None,
+                    "prefill_tok_s": None,   # llama.cpp reports no per-slot rate
+                    "state": None,
+                    "tok_s": None,
+                    "elapsed_s": None,
                     "spec_types": (slot.get("params") or {}).get("speculative.types"),
                 })
             detail["slots"] = slots
