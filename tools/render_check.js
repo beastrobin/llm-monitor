@@ -87,10 +87,25 @@ function readFrames(base, count, timeoutMs) {
   // steady-state frame means frozen cards even though nothing throws.
   const frames = await readFrames(BASE, 2, 9000);
   const steady = frames[1] || null;
+  const hello = frames[0] || null;
   const contract = {
     frames: frames.length,
     hasSnapshot: !!(steady && steady.snapshot),
     hasPoint: !!(steady && steady.point),
+    // The opening frame also carries the config block (version / pid / privilege
+    // / power menu). A page that reloads into a restart handover can miss its
+    // one-shot /api/snapshot request entirely, and without this it would render
+    // the rest of the panel happily while the power row sat there with no menu.
+    hasConfig: !!(hello && hello.config),
+    // Not just the opening frame: a page that reconnects onto a replacement
+    // process during a dashboard-initiated restart can attach before the new
+    // server has sampled once, so its "opening" frame may be a keepalive and the
+    // first real data arrives mid-stream. Config therefore rides on every frame;
+    // a steady-state frame without it means the power row can still go menu-less
+    // and look like it disappeared.
+    steadyHasConfig: !!(steady && steady.config),
+    hasPowerMenu: !!(hello && hello.config &&
+      (hello.config.power_presets || []).length),
   };
   const html = fs.readFileSync(path.join(FRONTEND, 'index.html'), 'utf8');
   const script = fs.readFileSync(path.join(FRONTEND, 'app.js'), 'utf8');
@@ -170,7 +185,20 @@ function readFrames(base, count, timeoutMs) {
     return Promise.resolve({ json: function () { return Promise.resolve(payload); } });
   };
 
-  win.eval(script + '\nwindow.renderEndpointsForTest = renderEndpoints;' +
+  // RC_BREAK_HANDOVER=1 strips the client half of the restart-handover fix from
+  // the script text before it runs, so the check below can be shown to actually
+  // bite rather than sit there green forever. A page-level fallback used to be
+  // un-provable otherwise; an assertion that cannot fail is worth nothing.
+  let appScript = script;
+  if (process.env.RC_BREAK_HANDOVER) {
+    const needle = 'if (message.config) { S.config = message.config; touched = true; }';
+    if (appScript.indexOf(needle) < 0) {
+      throw new Error('RC_BREAK_HANDOVER: 在 app.js 里找不到要拆掉的配置回灌语句，检查已经改名了');
+    }
+    appScript = appScript.replace(needle, '/* sabotaged for the negative control */');
+  }
+
+  win.eval(appScript + '\nwindow.renderEndpointsForTest = renderEndpoints;' +
     '\nwindow.appendPointForTest = appendPoint;');
   await new Promise(function (resolve) { setTimeout(resolve, 60); });
 
@@ -478,6 +506,9 @@ function readFrames(base, count, timeoutMs) {
 
   say('错误: ' + (errors.length ? errors.join(' | ') : '无'));
   say('SSE 已连接: ' + (streamUrl || '未连接'));
+  say('每帧带配置: 开场 ' + (contract.hasConfig ? '✓' : '✗') +
+    ' / 稳态 ' + (contract.steadyHasConfig ? '✓' : '✗（重启交接后功率条会丢掉档位菜单）') +
+    ' | 档位菜单: ' + (contract.hasPowerMenu ? '有' : '空'));
   say('流帧契约: ' + contract.frames + ' 帧' +
     (contract.frames >= 2
       ? '，第 2 帧 ' + (contract.hasSnapshot ? '含 snapshot ✓' : '缺 snapshot ✗ 卡片会冻结') +
@@ -735,6 +766,87 @@ function readFrames(base, count, timeoutMs) {
     }) });
   }
 
+  // Restart pressed *on the page* reloads it while the port is changing hands.
+  // The boot-time /api/snapshot request then fails, and this used to be fatal
+  // for one row only: samples keep arriving, so every card paints, but with no
+  // config the power control had nothing to build buttons from and simply went
+  // blank -- reported as "页面内重启后功率板丢失". Reproduce the failed boot in a
+  // fresh window, then feed frames the way the server does now.
+  const handover = { ran: false, ok: false, explains: false, healed: false };
+  try {
+    const hdom = new JSDOM(html, {
+      url: BASE + '/', runScripts: 'outside-only', pretendToBeVisual: true,
+    });
+    const hwin = hdom.window;
+    const hdoc = hwin.document;
+    hwin.HTMLCanvasElement.prototype.getContext = function () {
+      return {
+        measureText: function (t) { return { width: String(t).length * 6 }; },
+        fillText: function () {}, stroke: function () {}, fill: function () {},
+        setTransform: function () {}, clearRect: function () {}, beginPath: function () {},
+        closePath: function () {}, moveTo: function () {}, lineTo: function () {},
+        strokeRect: function () {}, fillRect: function () {}, arc: function () {},
+        quadraticCurveTo: function () {}, save: function () {}, restore: function () {},
+        setLineDash: function () {},
+        createLinearGradient: function () {
+          return { addColorStop: function () {} };
+        },
+      };
+    };
+    const hComputed = hwin.getComputedStyle.bind(hwin);
+    hwin.getComputedStyle = function (element) {
+      if (element === hdoc.documentElement) {
+        return { getPropertyValue: function (name) { return vars[name] || ''; } };
+      }
+      return hComputed(element);
+    };
+    if (!hwin.CSS) hwin.CSS = {};
+    if (!hwin.CSS.escape) {
+      hwin.CSS.escape = function (v) { return String(v).replace(/[^a-zA-Z0-9_-]/g, '\\' + v); };
+    }
+    let hstream = null;
+    hwin.EventSource = function () {
+      this.onmessage = null; this.onerror = null; this.onopen = null;
+      hstream = this;
+    };
+    // The handover gap: nothing answers the boot request.
+    hwin.fetch = function () { return Promise.reject(new Error('connection refused')); };
+    // Same sabotage switch applies to the handover window: with it on, a config
+    // frame arrives and is ignored, so 档位菜单 never returns.
+    hwin.eval(appScript);
+    await new Promise(function (r) { setTimeout(r, 60); });
+
+    if (hstream) {
+      // A sample-only frame is all the page has at first (polling failed too).
+      const ts = Number(payload.snapshot.ts || 0) + 20;
+      hstream.onmessage({ data: JSON.stringify({
+        snapshot: payload.snapshot, point: { ts: ts, values: {} },
+      }) });
+      await new Promise(function (r) { setTimeout(r, 40); });
+      const box = hdoc.getElementById('power-control');
+      handover.explains = !!(box && box.innerHTML &&
+        text(box.querySelector('.pw-status')).indexOf('档位菜单') >= 0);
+
+      // Then the reconnected stream brings its hello frame with config.
+      hstream.onmessage({ data: JSON.stringify({
+        snapshot: payload.snapshot,
+        point: { ts: ts + 2, values: {} },
+        config: payload.config,
+      }) });
+      await new Promise(function (r) { setTimeout(r, 40); });
+      handover.healed = !!(box && box.querySelectorAll('button[data-watts]').length);
+      handover.ran = true;
+      handover.ok = handover.explains && handover.healed;
+    }
+    hdom.window.close();
+    say('重启交接后的功率条: ' + (handover.ran ? '' : '未建立 EventSource ✗') +
+      (handover.explains ? '缺菜单时有说明 ✓' : '缺菜单时静默消失 ✗') + ' → ' +
+      (handover.healed ? '带配置的开场帧恢复按钮 ✓' : '仍未恢复 ✗'));
+  } catch (error) {
+    handover.error = error.message;
+    say('重启交接后的功率条: 检查本身失败 — ' + error.message);
+  }
+
   say('');
   say('—— 表与提示 ——');
   say('  ⓘ 提示数量: ' + doc.querySelectorAll('.tip').length);
@@ -769,7 +881,9 @@ function readFrames(base, count, timeoutMs) {
   const frozenCards = live.pushed && !live.changed;
   const frozenLedger = live.pushed && live.ledgerPatched && !live.ledgerChanged;
   const brokenContract = contract.frames >= 2 &&
-    (!contract.hasSnapshot || !contract.hasPoint);
+    (!contract.hasSnapshot || !contract.hasPoint ||
+     !contract.hasConfig || !contract.steadyHasConfig ||
+     !contract.hasPowerMenu);
   // A card that draws a line but fills nothing under it is the failure the user
   // reported, so the fill assertion counts as much as the render exception.
   const noFill = areaCards.length && areaFilled.length !== areaCards.length;
@@ -777,7 +891,7 @@ function readFrames(base, count, timeoutMs) {
   // this harness was asked to chase down, so it fails the run like anything else.
   const code = (errors.length || !routingOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
-    !soloOk || !soloClearsOk) ? 1 : 0;
+    !soloOk || !soloClearsOk || !handover.ok) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own

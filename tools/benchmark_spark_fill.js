@@ -14,7 +14,13 @@
    which is the reported failure, not "is rendering faster".
 
    Two versions of app.js are loaded side by side:
-     old = git show HEAD:frontend/app.js   (band-only fill, the reported bug)
+     old = the commit BEFORE the area fill landed (found by asking git which
+           commit introduced `gradientUnder`, then taking its parent; override
+           with OLD_REF=<sha> for a one-off comparison). NOT HEAD: once the fix
+           was committed, "HEAD" *became* the fixed code and the benchmark's
+           headline claim -- flat series going from ~0% to a real area --
+           silently compared the implementation against itself (50% vs 50%) and
+           failed its own guard for reasons that had nothing to do with the UI.
      new = the working tree
    Same fixture, same options, same canvas geometry for both.
 */
@@ -156,12 +162,27 @@ function measure(scriptText, label) {
   return out;
 }
 
+function resolveOldRef() {
+  if (process.env.OLD_REF) return process.env.OLD_REF;
+  const log = execFileSync(GIT,
+    ['log', '--format=%H', '-S', 'gradientUnder', '--', 'frontend/app.js'],
+    { cwd: ROOT, encoding: 'utf8' });
+  const touched = log.trim().split(/\r?\n/).filter(Boolean);
+  if (!touched.length) {
+    throw new Error('找不到引入 gradientUnder 的提交 —— 用 OLD_REF=<sha> 指定对照版本');
+  }
+  // Oldest commit that changed the symbol is the one that added it.
+  return touched[touched.length - 1] + '^';
+}
+
 function main() {
-  let oldScript;
+  let oldScript, oldRef;
   try {
-    oldScript = execFileSync(GIT, ['show', 'HEAD:frontend/app.js'], { cwd: ROOT, encoding: 'utf8' });
+    oldRef = resolveOldRef();
+    oldScript = execFileSync(GIT, ['show', oldRef + ':frontend/app.js'],
+                             { cwd: ROOT, encoding: 'utf8' });
   } catch (error) {
-    console.error('could not read HEAD:frontend/app.js -- ' + error.message);
+    console.error('could not read the pre-change app.js -- ' + error.message);
     process.exit(2);
   }
   const newScript = fs.readFileSync(path.join(ROOT, 'frontend', 'app.js'), 'utf8');
@@ -183,6 +204,7 @@ function main() {
     };
   });
 
+  console.log('对照版本（旧实现）: ' + oldRef);
   console.log('plot area basis: ' + PLOT_W + ' x ' + PLOT_H + ' px = ' + PLOT_AREA.toFixed(0) + ' px^2');
   console.log('');
   console.log('fixture              path    old fill%   new fill%   old polys  new polys');

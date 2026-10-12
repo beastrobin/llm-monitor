@@ -49,7 +49,7 @@ del _stream_name
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.4"
+VERSION = "1.5"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
@@ -444,6 +444,40 @@ def validate_config(config):
             or not 0 < config["server"]["port"] < 65536:
         raise ConfigError(
             "config.json: server.port must be an integer between 1 and 65535")
+
+
+def config_block(hub):
+    """The half of the page's input that is NOT a sample.
+
+    ``/api/snapshot`` used to be the only place this was served, and the page
+    asked for it exactly once at boot.  A restart pressed from the dashboard
+    reloads the page while the port is being handed over, so that one request
+    can fail -- and every frame after it arrives without a menu: the power card
+    loses its presets and the version badge goes blank until someone refreshes by
+    hand.  The block now also rides on each stream connection (see
+    ``_stream``), which makes the handover self-healing.
+    """
+    return {
+        "version": VERSION,
+        "pid": os.getpid(),
+        "interval_seconds": hub.config["server"]["interval_seconds"],
+        "endpoints": [
+            {"id": ep.id, "label": ep.label, "base_url": ep.base_url}
+            for ep in hub.endpoints
+        ],
+        # The UI needs to know whether it may offer the power control before
+        # the user clicks and gets a rejection.
+        "elevated": hub.elevated,
+        # Derived from the installed card, not from a constant: a menu
+        # hard-coded for a 600 W card offers a 175 W laptop three settings its
+        # driver has to refuse.
+        "power_presets": hub.power_presets,
+        # False once the driver has refused a software power limit (laptop
+        # GPUs); the panel then reports the live ceiling instead of pretending
+        # the buttons can work.
+        "power_settable": hub.power_settable,
+        "power_applied_w": hub.power_applied_w,
+    }
 
 
 def build_ledger(config):
@@ -1070,32 +1104,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({
                 "snapshot": self.hub.snapshot(),
                 "history": self.hub.history(),
-                "config": {
-                    "version": VERSION,
-                    "pid": os.getpid(),
-                    "interval_seconds": self.hub.config["server"]["interval_seconds"],
-                    "endpoints": [
-                        {"id": ep.id, "label": ep.label, "base_url": ep.base_url}
-                        for ep in self.hub.endpoints
-                    ],
-                    # The UI needs to know whether it may offer the power
-                    # control before the user clicks and gets a rejection.
-                    "elevated": self.hub.elevated,
-                    # Derived from the installed card, not from a constant:
-                    # a menu hard-coded for a 600 W card offers a 175 W laptop
-                    # three settings its driver has to refuse.
-                    "power_presets": self.hub.power_presets,
-                    # False once the driver has refused a software power limit
-                    # (laptop GPUs); the panel then reports the live ceiling
-                    # instead of pretending the buttons can work.
-                    "power_settable": self.hub.power_settable,
-                    "power_applied_w": self.hub.power_applied_w,
-                },
+                "config": config_block(self.hub),
             })
         elif path == "/api/stream":
             self._stream()
         else:
             self._static(unquote(path))
+
+    def _send_frame(self, payload):
+        """One SSE data frame, flushed now -- a buffered frame is an invisible one."""
+        body = "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+        self.wfile.write(body.encode("utf-8"))
+        self.wfile.flush()
 
     def _stream(self):
         self.send_response(200)
@@ -1107,12 +1127,20 @@ class Handler(BaseHTTPRequestHandler):
 
         channel = self.hub.subscribe()
         try:
+            # Config rides on EVERY frame, not just on a hello.  A restart
+            # pressed on the dashboard reloads the page into the handover gap,
+            # and the browser retries /api/stream eagerly -- it can connect a
+            # second before the replacement process has taken its first sample.
+            # Tying config to an opening frame that never got one left such a
+            # page painting live cards with no power menu indefinitely (the
+            # "页面内重启后功率板丢失" report, reproduced over CDP).  Repeating this
+            # small block for one loopback client is cheaper than any amount of
+            # handshake bookkeeping, and it also heals a page that stayed open
+            # across a privilege or preset change without anybody refreshing.
             snapshot = self.hub.snapshot()
             if snapshot:
-                frame = "data: " + json.dumps({"snapshot": snapshot},
-                                              ensure_ascii=False) + "\n\n"
-                self.wfile.write(frame.encode("utf-8"))
-                self.wfile.flush()
+                self._send_frame({"snapshot": snapshot,
+                                  "config": config_block(self.hub)})
             while True:
                 try:
                     message = channel.get(timeout=KEEPALIVE_SECONDS)
@@ -1120,9 +1148,9 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()
                     continue
-                frame = "data: " + json.dumps(message, ensure_ascii=False) + "\n\n"
-                self.wfile.write(frame.encode("utf-8"))
-                self.wfile.flush()
+                frame = dict(message)
+                frame["config"] = config_block(self.hub)
+                self._send_frame(frame)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:

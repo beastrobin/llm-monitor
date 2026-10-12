@@ -1843,7 +1843,8 @@ function renderPowerControl(snapshot) {
   // reports the live ceiling instead of offering a write that cannot land.
   const settable = config.power_settable !== false;
 
-  if (!gpus.length || !presets.length) {
+  if (!gpus.length) {
+    // Nothing readable to draw against -- a machine with no NVIDIA card here.
     box.innerHTML = '';
     box.dataset.sig = '';
     return;
@@ -1868,6 +1869,22 @@ function renderPowerControl(snapshot) {
   // The .top variant lives in the section head as a one-line switch; the
   // classic full-width row is kept for any future wider placement.
   const compact = box.classList.contains('top');
+
+  if (!presets.length) {
+    // The numbers came through but the menu did not: what a page looks like
+    // when its boot-time config request lost the race against a restart. A
+    // blank row reads as "the power board disappeared", so keep the live
+    // wattage visible and name the missing half instead. The next stream
+    // connection carries config and this goes away by itself.
+    if (box.dataset.sig !== 'pending-menu') {
+      box.dataset.sig = 'pending-menu';
+      box.innerHTML = '<span class="pw-range">' +
+        (live !== null ? num(live, 0) + ' W' : '—') +
+        (ceiling !== null ? ' / 上限 ' + num(ceiling, 0) + ' W' : '') +
+        '</span><span class="pw-status">档位菜单未到，连接恢复后自动补上</span>';
+    }
+    return;
+  }
 
   // The readout ticks with every sample, and rebuilding the whole row that
   // often would fight the pointer and flicker the hover state -- so the markup
@@ -2512,6 +2529,12 @@ async function boot() {
     // numbers and the charts advance together.  Consuming only one of them is
     // exactly how the cards end up frozen while the curves keep moving.
     let touched = false;
+    // Config rides on every frame rather than only on a hello: a page that
+    // booted into a restart handover can miss its one-shot config request, or
+    // reconnect before the replacement process has sampled once, and either way
+    // the row that needs a menu -- the power control -- would otherwise stay
+    // menu-less until someone refreshed by hand.
+    if (message.config) { S.config = message.config; touched = true; }
     if (message.snapshot) { S.snapshot = message.snapshot; touched = true; }
     if (message.point) { appendPoint(message.point); touched = true; }
     if (touched) render();
@@ -2523,6 +2546,7 @@ async function boot() {
     fetch('/api/snapshot')
       .then(function (response) { return response.json(); })
       .then(function (payload) {
+        if (payload.config) S.config = payload.config;
         if (payload.snapshot) S.snapshot = payload.snapshot;
         loadHistory(payload.history);
         render();
