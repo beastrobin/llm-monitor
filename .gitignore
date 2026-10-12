@@ -23,3 +23,8 @@ Thumbs.db
 
 # Monitor log
 monitor.log
+
+# Sweep output and editor/tool metadata
+/power_curve/
+/.workbuddy/
+*.bak
