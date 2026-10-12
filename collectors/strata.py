@@ -60,6 +60,27 @@ do everywhere else.
 from .llama import LlamaEndpoint, _get_json, _ratio
 
 
+def _reported_slot_count(live, rows):
+    """How many batch slots this engine runs.
+
+    ``/metrics`` carries one row per slot even when every slot is idle, so the
+    length of that list is normally the answer.  Keep ``live.parallel`` as the
+    fallback: a frame without rows still has to say how many slots were asked
+    for, because the panel shows *why* the breakdown is empty rather than
+    hiding it -- and "no rows" has two different causes here.
+
+    The second cause is the one users keep reporting as "the slots never leave
+    idle".  With ``--batch`` a **lone** request goes back to the single-request
+    path (serve/server.py's ``_may_go_solo`` / ``generate_batched``), where the
+    engine decodes on the control lines and books nothing against a numbered
+    slot; only from two concurrent requests up does each slot get its own
+    reading row.  So ``live.running >= 1`` together with every slot ``idle`` is
+    the engine's honest state, not a collector bug, and the UI says exactly that
+    instead of letting six cards of em-dashes look like a broken scrape.
+    """
+    return len(rows) or live.get("parallel") or None
+
+
 class StrataEndpoint(LlamaEndpoint):
     """One Strata server, scraped through its JSON ``/metrics``.
 
@@ -251,7 +272,7 @@ class StrataEndpoint(LlamaEndpoint):
         engine = payload.get("engine") or {}
         live = payload.get("live") or {}
         detail["n_ctx"] = engine.get("context") or engine.get("max_context")
-        detail["total_slots"] = len(live.get("slots") or []) or None
+        detail["total_slots"] = _reported_slot_count(live, live.get("slots") or [])
         # The JSON metrics name neither the file nor its quantisation, but
         # /props does name the file -- read it through the inherited TTL cache
         # so the card's weight row says which GGUF is actually loaded, instead
@@ -277,7 +298,10 @@ class StrataEndpoint(LlamaEndpoint):
         # equivalent row -- so the fields ride through under their own key
         # rather than being folded into the counters.
         state = {}
-        for key in ("state", "phase", "parallel", "queued", "waiting",
+        # `running` matters on its own: it is how many requests are in flight,
+        # while a slot row only says whether that numbered batch slot was
+        # claimed.  They differ -- see `_reported_slot_count`.
+        for key in ("state", "phase", "parallel", "queued", "waiting", "running",
                     "elapsed_s", "max_tokens", "prompt_tokens", "prompt_read",
                     "prompt_total", "generated", "tok_s"):
             value = live.get(key)

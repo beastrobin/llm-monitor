@@ -576,6 +576,23 @@ function cardSpec(key, label, options) {
   };
 }
 
+// Why every slot row can read "idle" while the engine is plainly working.
+// Under --batch Strata only books a request against a numbered slot once two or
+// more requests are concurrent (BGEN per slot); **a lone request goes back to
+// the single-request path** -- GEN on the control lines, which is the fastest
+// stream and carries no slot number (serve/server.py's `_may_go_solo`).
+// Measured on this box: one chat completion at a time leaves live.slots as
+// `[{"slot":0,"state":"idle","held_tokens":371}, ...]` for every frame of the
+// generation while live.state/phase say "reading"/"thinking"; fire two at once
+// and the rows turn reading/decoding with prompt_tokens/generated/tok_s.  So an
+// all-idle breakdown plus a moving headline curve is normal for a single
+// conversation, and saying so beats six cards of em-dashes that look broken.
+const SOLO_PATH_NOTE =
+  '并发到 2 个以上时，引擎才把请求装进编号槽并逐槽记账（BGEN）。' +
+  '只有你一个请求在跑时它走单请求通道（控制行上的 GEN），不落在任何槽上 —— ' +
+  '所以每一行的状态都是 idle、速率列空着，这不是采集坏了。' +
+  '此时上下文列显示的是该槽为下一轮留着的那段前缀。';
+
 // Every card renders the same slots and hides the unused ones with visibility,
 // so cards that carry no bar keep the exact width of the ones that do and a
 // row of cards lines up.  The bar is a vertical rail on the card's left edge;
@@ -1117,7 +1134,21 @@ function renderSlotDetail(host, model, base) {
   if (!host) return;
   const slots = model.slots || [];
   if (slots.length < 1) {
-    host.innerHTML = '';
+    // Blank here is what made this section look broken: a loaded model whose
+    // engine simply does not export per-slot rows (older build, single mode) or
+    // whose slot dump failed to fetch left nothing at all -- no heading, no
+    // reason, and no way to tell "not collected" from "collector crashed".
+    // Say which one it is whenever the panel knows.
+    const why = [];
+    if (model.slots_error) why.push('采集失败：' + model.slots_error);
+    if (typeof model.total_slots === 'number') {
+      why.push('配置里有 ' + model.total_slots + ' 个槽，但引擎这一轮没有上报逐槽数据');
+    } else {
+      why.push('引擎这一轮没有上报逐槽数据');
+    }
+    host.innerHTML = '<div class="slot-fold"><div class="empty">' +
+      esc('slot 明细 · ' + why.join('；')) + '</div></div>';
+    host.dataset.sig = '';
     return;
   }
 
@@ -1130,10 +1161,7 @@ function renderSlotDetail(host, model, base) {
     host.dataset.sig = signature;
     host.innerHTML =
       '<details class="collapsible slot-fold" open>' +
-      '<summary><h3>slot 明细 <span class="muted">' +
-        esc(slots.length + ' 个槽 · ' +
-          slots.filter(function (s) { return s.is_processing; }).length + ' 个在跑') +
-      '</span></h3></summary>' +
+      '<summary><h3>slot 明细 <span class="muted" data-role="count"></span></h3></summary>' +
       '<div class="slot-rows">' +
       slots.map(function (slot) {
         return '<div class="slot-row" data-slot="' + esc(String(slot.id)) + '">' +
@@ -1151,6 +1179,23 @@ function renderSlotDetail(host, model, base) {
   // and an info tooltip that explains the metric.  Hand-rolling a plainer card
   // here is what made this section read as a second-class table next to the
   // cards above it.
+  // The count line is repainted every tick instead of being written once at
+  // build time.  Baked in, it froze whatever was true the frame that created
+  // these rows: a fold could read "2 个在跑" while both slots had long gone idle
+  // -- a stale label that looked like the panel inventing activity.
+  const running = slots.filter(function (s) { return s.is_processing; }).length;
+  const liveState = model.live_state || {};
+  const soloPath = !running && Number(liveState.running) > 0;
+  const countEl = host.querySelector('[data-role="count"]');
+  if (countEl) {
+    countEl.textContent = slots.length + ' 个槽 · ' + running + ' 个在跑' +
+      (soloPath ? ' · 引擎在处理 ' + liveState.running + ' 个请求，但没有一个槽被记账' : '');
+    // Assigned every frame, not only when true: a tooltip left over from a busy
+    // frame keeps explaining a state that no longer applies once the engine is
+    // quiet -- which the real browser run caught after a solo request finished.
+    countEl.title = soloPath ? SOLO_PATH_NOTE : '';
+  }
+
   host.querySelectorAll('.slot-row').forEach(function (row) {
     const id = row.getAttribute('data-slot');
     const slot = slots.filter(function (s) { return String(s.id) === id; })[0];
@@ -1160,6 +1205,9 @@ function renderSlotDetail(host, model, base) {
       const label = slot.is_processing ? (slot.state || 'processing') : 'idle';
       stateEl.className = 'slot-state' + (slot.is_processing ? ' on' : '');
       stateEl.textContent = label;
+      // "idle" here is the engine's word, and under a lone request it is not
+      // the whole story -- say so where the user is already looking.
+      stateEl.title = soloPath ? SOLO_PATH_NOTE : '';
     }
     const refs = ensureCards(row.querySelector('[data-role="cards"]'), SLOT_SPECS);
     if (!refs) return;

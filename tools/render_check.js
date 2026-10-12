@@ -204,6 +204,26 @@ function readFrames(base, count, timeoutMs) {
   const routingOk = selectedSecond && switchedFirst && noFalseCurrent;
   win.renderEndpointsForTest(payload.snapshot);
 
+  // The live payload is what the user actually sees, so the per-slot section has
+  // to be checked against it and not only against the fixture below: a loaded
+  // model whose slot host renders neither rows nor an explanation is exactly the
+  // "the panel lost the whole section" report, and a fixture-only check walks
+  // straight past it.
+  const liveHosts = Array.prototype.map.call(
+    doc.querySelectorAll('[data-role="slots"]'), function (host) {
+      return {
+        rows: host.querySelectorAll('.slot-row').length,
+        html: host.innerHTML.length,
+        note: text(host.querySelector('.slot-none')),
+      };
+    });
+  const liveLoaded = (payload.snapshot.endpoints || []).reduce(function (sum, endpoint) {
+    return sum + (endpoint.models || []).filter(function (m) { return m.loaded; }).length;
+  }, 0);
+  const liveSlotsOk = liveHosts.length >= liveLoaded && liveHosts.every(function (h) {
+    return h.rows > 0 || h.html > 0;
+  });
+
   // --- slot detail: the one section the live snapshot may leave empty, so it
   // gets a fixture of its own.  Both slot shapes Strata reports have to render
   // without throwing: a busy slot (state/tok_s/elapsed_s present) and an idle
@@ -339,9 +359,31 @@ function readFrames(base, count, timeoutMs) {
     return k + '=' + (canvas && canvas._geom ? canvas._geom.count : 'none') +
       '/' + (canvas && canvas._spark ? (canvas._spark.values || []).length : '?');
   }).join(' ');
+  // The count sentence has to follow the frame, not the frame that happened to
+  // build these rows: take one of the two busy slots away and re-render without
+  // changing the row count or any id, and it must say "1 个在跑".  A baked-in
+  // string kept the old number forever -- which read as the panel inventing work.
+  const countText = function () {
+    const c = doc.querySelector('.slot-fold [data-role="count"]');
+    return text(c);
+  };
+  const soloTitleSet = function () {
+    const c = doc.querySelector('.slot-fold [data-role="count"]');
+    return !!(c && c.title);
+  };
+  const readingRowBackup = JSON.parse(
+    JSON.stringify(slotFixture.endpoints[0].models[0].slots[1]));
+  slotFixture.endpoints[0].models[0].slots[1].state = 'idle';
+  slotFixture.endpoints[0].models[0].slots[1].is_processing = false;
+  win.renderEndpointsForTest(slotFixture);
+  const countFollowsFrame = countText() === '3 个槽 · 1 个在跑' && !soloTitleSet();
+  // Put it back so the reports below still describe a busy panel.
+  slotFixture.endpoints[0].models[0].slots[1] = readingRowBackup;
+  win.renderEndpointsForTest(slotFixture);
+
   const slotOk = foldOpen && labelsOk && slotIdOk && anatomyOk && busyOk && readOk &&
     idleOk && idleRailEmpty && tinyRailVisible && ratioRailSane && sparkOk &&
-    errors.length === slotErrorsBefore;
+    countFollowsFrame && errors.length === slotErrorsBefore;
   say('slot 明细: ' + (slotOk ? '通过' : '失败') +
     ' | 行 ' + slotRows.length +
     ' | 默认展开 ' + (foldOpen ? '✓' : '✗') +
@@ -353,7 +395,8 @@ function readFrames(base, count, timeoutMs) {
     ' | 空闲槽 "—" ' + (idleOk ? '✓' : '✗') +
     ' | 空闲血条空 ' + (idleRailEmpty ? '✓' : '✗') +
     ' | 0.2% 血条可见 ' + (tinyRailVisible ? '✓' : '✗') +
-    ' | 曲线已绘制 ' + (sparkOk ? '✓' : '✗ ' + sparkCounts));
+    ' | 曲线已绘制 ' + (sparkOk ? '✓' : '✗ ' + sparkCounts) +
+    ' | 计数跟帧 ' + (countFollowsFrame ? '✓' : '✗ 停在「' + countAtBuild + '」'));
   if (busyRow) {
     say('   忙碌槽 0: ' + SLOT_KEYS
       .map(function (k) { return text(slotCard(busyRow, k).querySelector('.card-label')) +
@@ -367,7 +410,71 @@ function readFrames(base, count, timeoutMs) {
   }
   win.renderEndpointsForTest(payload.snapshot);
 
+  // A lone request is not booked against a numbered slot by Strata's batch path,
+  // so every row legitimately says "idle" while the headline cards show the
+  // engine generating.  That looked like a broken scrape, so the section now has
+  // to say what it means -- check the sentence appears only in that state.
+  const soloFixture = {
+    current_endpoint_id: 'strata',
+    endpoints: [{
+      id: 'strata', label: 'Strata (单请求通道)', up: true, base_url: 'http://127.0.0.1:8200',
+      models: [{
+        id: 'solo-fixture', loaded: true, n_ctx: 307200, total_slots: 2,
+        metrics: { counters: {}, requests_processing: 1 },
+        live_state: { state: 'generating', phase: 'thinking', running: 1 },
+        slots: [
+          { id: 0, n_ctx: 307200, is_processing: false, state: 'idle', ctx_used: 371,
+            ctx_ratio: 0.0012, tok_s: null, prefill_tok_s: null, kv_hit: null },
+          { id: 1, n_ctx: 307200, is_processing: false, state: 'idle', ctx_used: 108020,
+            ctx_ratio: 0.3516, tok_s: null, prefill_tok_s: null, kv_hit: null },
+        ],
+      }],
+    }],
+  };
+  win.renderEndpointsForTest(soloFixture);
+  const soloCount = doc.querySelector('.slot-fold [data-role="count"]');
+  const soloTitle = (soloCount && soloCount.title) || '';
+  const soloStateTitle = (doc.querySelector('.slot-row .slot-state') || {}).title || '';
+  const soloOk = !!soloCount && soloCount.textContent.indexOf('引擎在处理 1 个请求') >= 0 &&
+    soloTitle.length > 40 && soloStateTitle === soloTitle;
+  say('单请求通道时解释 idle: ' + (soloOk ? '通过' : '失败') +
+    ' | ' + (soloCount ? soloCount.textContent : '（没有计数行）'));
+  // ...and it must stop explaining once the engine is quiet: same rows, same
+  // ids, one field changed. A leftover tooltip describes a state that ended.
+  soloFixture.endpoints[0].models[0].live_state.running = 0;
+  win.renderEndpointsForTest(soloFixture);
+  const settled = doc.querySelector('.slot-fold [data-role="count"]');
+  const soloClearsOk = !!settled && !settled.title &&
+    settled.textContent === '2 个槽 · 0 个在跑';
+  say('引擎安静后撤掉解释: ' + (soloClearsOk ? '通过' : '失败') +
+    ' | ' + (settled ? text(settled) + (settled.title ? ' [标题残留]' : '') : '（没有计数行）'));
+
+  // The other half of the same trap: when the engine gives no rows at all -- no
+  // /slots, or Strata with live.slots missing -- the section used to clear its
+  // host and disappear without a trace.  Now it has to say why, and say it with
+  // the count the config asked for whenever the model carries one.
+  const quietFixture = JSON.parse(JSON.stringify(slotFixture));
+  quietFixture.endpoints[0].models[0].slots = [];
+  quietFixture.endpoints[0].models[0].total_slots = 3;
+  delete quietFixture.endpoints[0].models[0].n_ctx;
+  quietFixture.endpoints[0].label = 'Strata (无逐槽上报)';
+  const quietErrorsBefore = errors.length;
+  win.renderEndpointsForTest(quietFixture);
+  const quietHosts = Array.prototype.map.call(
+    doc.querySelectorAll('[data-role="slots"]'), function (host) {
+      return text(host.querySelector('.empty'));
+    });
+  const quietNote = quietHosts.filter(Boolean)[0] || '';
+  const quietOk = !!quietNote && quietNote.indexOf('3') >= 0 &&
+    !doc.querySelector('.slot-row') && errors.length === quietErrorsBefore;
+  say('无逐槽上报时: ' + (quietOk ? '通过' : '失败') + ' | ' + (quietNote || '（空白，什么都没写）'));
+  // Back to what is really running: every report below reads this DOM.
+  win.renderEndpointsForTest(payload.snapshot);
+
   say('当前模型来源切换: ' + (routingOk ? '通过' : '失败'));
+  say('实时 slot 区块: ' + liveHosts.map(function (h) {
+    return h.rows + ' 行' + (h.note ? ' / 说明「' + h.note + '」' : '');
+  }).join(' , ') + ' （已加载模型 ' + liveLoaded + ' 个，宿主 ' + liveHosts.length + ' 个）');
 
   say('错误: ' + (errors.length ? errors.join(' | ') : '无'));
   say('SSE 已连接: ' + (streamUrl || '未连接'));
@@ -666,8 +773,11 @@ function readFrames(base, count, timeoutMs) {
   // A card that draws a line but fills nothing under it is the failure the user
   // reported, so the fill assertion counts as much as the render exception.
   const noFill = areaCards.length && areaFilled.length !== areaCards.length;
+  // An unexplained blank where the per-slot breakdown should be is the report
+  // this harness was asked to chase down, so it fails the run like anything else.
   const code = (errors.length || !routingOk || frozenCards || frozenLedger ||
-    brokenContract || !degrade.ok || noFill) ? 1 : 0;
+    brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
+    !soloOk || !soloClearsOk) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own

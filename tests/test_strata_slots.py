@@ -17,10 +17,12 @@ engine reports neither per slot, and the collector derives them from what the
 slot held on the *previous* frame.
 """
 
+import time
 import unittest
+from unittest import mock
 
 import monitor
-from collectors.strata import StrataEndpoint
+from collectors.strata import StrataEndpoint, _reported_slot_count
 
 BUSY_SLOT = {
     'slot': 0, 'state': 'decoding', 'prompt_tokens': 36287, 'generated': 1582,
@@ -276,6 +278,38 @@ class SlotSeriesTests(unittest.TestCase):
         values = self.flatten(ep._slots(rows))
         self.assertEqual(values['strata/m.slot1.prefill'], 1191.8)
         self.assertAlmostEqual(values['strata/m.slot1.kv'], 60000 / 67489, places=6)
+
+
+class SlotPathShapeTests(unittest.TestCase):
+    """The shape of a frame where nothing is booked against a numbered slot.
+
+    A lone request under --batch runs on the engine's single-request path, which
+    reports no per-slot row at all (measured live: every frame of one chat
+    completion leaves `live.slots` all idle with frozen held_tokens, while two
+    concurrent completions turn the rows reading/decoding).  The panel explains
+    that state instead of showing six cards of em-dashes -- and it can only do so
+    if the scrape keeps both numbers the explanation needs: how many slots the
+    engine runs, and that a request really is in flight.
+    """
+
+    def test_rows_give_the_count_and_parallel_is_the_fallback(self):
+        self.assertEqual(_reported_slot_count({'parallel': 2},
+                                              [{'slot': 0}, {'slot': 1}]), 2)
+        # No rows this frame is not "no slots": without the fallback the UI has
+        # nothing to say about its own empty section.
+        self.assertEqual(_reported_slot_count({'parallel': 2}, []), 2)
+        self.assertIsNone(_reported_slot_count({}, []))
+
+    def test_running_survives_a_frame_without_slot_rows(self):
+        ep = endpoint()
+        doc = {'engine': {'context': CONTEXT},
+               'live': {'state': 'generating', 'phase': 'thinking',
+                        'running': 1, 'parallel': 2}}
+        with mock.patch('collectors.strata._get_json', return_value=doc):
+            detail = ep._model_detail('m', {}, time.time())
+        self.assertEqual(detail['total_slots'], 2)
+        self.assertEqual(detail['slots'], [])
+        self.assertEqual(detail['live_state']['running'], 1)
 
 
 if __name__ == '__main__':
