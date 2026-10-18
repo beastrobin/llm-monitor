@@ -415,6 +415,17 @@ main {
 .bar.good > i { --bar-c: var(--good); }
 .bar.warn > i { --bar-c: var(--warn); }
 .bar.bad > i { --bar-c: var(--bad); }
+/* Identity tones: a card's rail follows its own curve colour. The three
+   classes above are kept free for documented threshold states so an alert
+   still reads as an alert on top of the decoration. */
+.bar.t-a > i { --bar-c: var(--chart-a); }
+.bar.t-b > i { --bar-c: var(--chart-b); }
+.bar.t-c > i { --bar-c: var(--chart-c); }
+.bar.t-d > i { --bar-c: var(--chart-d); }
+.bar.t-e > i { --bar-c: var(--chart-e); }
+.bar.t-f > i { --bar-c: var(--chart-f); }
+.bar.t-g > i { --bar-c: var(--chart-g); }
+.bar.t-h > i { --bar-c: var(--chart-h); }
 
 .card-visual {
   display: flex;
@@ -643,6 +654,41 @@ main {
   padding: 0;
   border-bottom: none;
 }
+/* The four token counter cards (generate/prefill × today/cumulative) sit on
+   the title line between the title and the source chips, so the head reads
+   "what model, what it just did" without reaching for the section below.
+   .head-extra stays flex-none: the title and the chip row must never be
+   pushed onto a second line, and the cards hold their size on live updates. */
+.head-extra {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+/* Compact stat cards.  One line each (label + value + unit); the hover kept,
+   the exact figures ride in the value's title like on the full cards. */
+.head-stats {
+  flex: none;
+  display: flex;
+  gap: 6px;
+}
+.head-stats .stat {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 7px;
+}
+.head-stats .stat-label { font-size: 11px; }
+.head-stats .stat-value { margin-top: 0; font-size: 13px; }
+.head-stats .stat-unit { margin-left: 0; font-size: 10px; }
+.head-stats .stat-foot { display: none; }
+/* The ledger is disabled: the cards carry nothing, so they leave the head
+   instead of showing a dead 未启用 tile; the reason rides in the 历史信息 note. */
+.ledger-off .head-stats { display: none; }
 .src-chip {
   display: inline-flex;
   align-items: center;
@@ -1153,14 +1199,14 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
 }
 .collapsible:hover summary::before {
   background: var(--track);
-  color: var(--accent);
-  border-color: var(--accent);
+  color: var(--sec-c, var(--accent));
+  border-color: var(--sec-c, var(--accent));
 }
 .collapsible[open] summary::before {
   content: '▾';
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 30%, var(--border-soft));
+  background: color-mix(in srgb, var(--sec-c, var(--accent)) 15%, transparent);
+  color: var(--sec-c, var(--accent));
+  border-color: color-mix(in srgb, var(--sec-c, var(--accent)) 30%, var(--border-soft));
 }
 .collapsible summary h3 {
   margin: 0;
@@ -1177,7 +1223,7 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
   width: 4px;
   height: 4px;
   border-radius: 2px;
-  background: var(--chart-e);
+  background: var(--sec-c, var(--faint));
   flex: none;
 }
 /* Content area — tight spacing */
@@ -1192,7 +1238,19 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
    renderSlotDetail): "which slot holds what" is the question the user asks
    first, and each row is one line of six small cards. */
 .slot-fold { margin-top: 10px; }
-.slot-fold summary h3::before { background: var(--chart-t); }
+/* Per-section identity: a fold's data-tone hue marks its title dot, its
+   open arrow and a left-edge stripe, so five folds stacked in one column
+   stay five recognisable folds. Hues come from the same chart palette as
+   the cards inside each section. */
+.collapsible[data-tone] {
+  border-left: 3px solid color-mix(in srgb, var(--sec-c) 55%, var(--border));
+}
+.collapsible[data-tone="a"] { --sec-c: var(--chart-a); }
+.collapsible[data-tone="b"] { --sec-c: var(--chart-b); }
+.collapsible[data-tone="e"] { --sec-c: var(--chart-e); }
+.collapsible[data-tone="f"] { --sec-c: var(--chart-f); }
+.collapsible[data-tone="g"] { --sec-c: var(--chart-g); }
+.collapsible[data-tone="h"] { --sec-c: var(--chart-h); }
 .slot-rows { display: flex; flex-direction: column; gap: 10px; }
 .slot-row + .slot-row {
   border-top: 1px solid var(--border-soft);

@@ -992,6 +992,7 @@ function applyModel(root, endpoint, model) {
   paintCards(refs, {
     decode: {
       text: decodeNow, unit: 't/s', bar: decodeBar,
+      barClass: 't-a',
       foot: rateFoot(metrics.decode_tps_avg, decodePeak, 1),
       series: decodeSeries,
       sparkOptions: {
@@ -1001,6 +1002,7 @@ function applyModel(root, endpoint, model) {
     },
     prefill: {
       text: prefillNow, unit: 't/s', bar: prefillBar,
+    barClass: 't-b',
       foot: rateFoot(metrics.prefill_tps_avg, prefillPeak, 0),
       series: prefillSeries,
       sparkOptions: {
@@ -1021,7 +1023,7 @@ function applyModel(root, endpoint, model) {
       },
     },
     kv: {
-      text: pct(kvRatio), bar: kvRatio, barClass: 'good',
+      text: pct(kvRatio), bar: kvRatio, barClass: 't-c',
       foot: '累计命中 ' + countText(counters.prompt_cached) + ' tok',
       series: seriesOf(base + '.kv'),
       sparkOptions: {
@@ -1031,24 +1033,25 @@ function applyModel(root, endpoint, model) {
     },
     ctx: {
       text: pct(ctxRatio), bar: ctxRatio,
-      barClass: ctxTight ? 'bad' : '',
+      barClass: ctxTight ? 'bad' : 't-g',
       foot: '上限 ' + countText(model.n_ctx) + ' tok' +
         (ctxTight ? ' · 接近溢出' : '') + (slotLive ? '' : ' · 空闲残留'),
       series: ctxSeries,
       sparkOptions: {
-        min: 0, max: 1, color: ctxTight ? cssVar('--bad') : cssVar('--chart-c'), autoscale: true,
+        min: 0, max: 1, color: ctxTight ? cssVar('--bad') : cssVar('--chart-g'), autoscale: true,
         format: function (v) { return num(v * 100, 0) + '%'; },
       },
     },
     step: {
       text: num(stepValue, 2), unit: 'tok/步',
       bar: (stepValue === null || stepValue === undefined) ? null : Math.min(1, stepValue / 3),
+      barClass: 't-h',
       foot: draftSeen
         ? '草稿 ' + countText(drafts) + ' tok'
         : (mtpEnabled ? 'MTP 已启用 · 暂无草稿' : 'MTP 未启用'),
       series: seriesOf(base + '.step'),
       sparkOptions: {
-        min: 0, color: cssVar('--chart-d'), autoscale: true,
+        min: 0, color: cssVar('--chart-h'), autoscale: true,
         format: function (v) { return num(v, 2); },
       },
     },
@@ -1160,7 +1163,7 @@ function renderSlotDetail(host, model, base) {
   if (host.dataset.sig !== signature) {
     host.dataset.sig = signature;
     host.innerHTML =
-      '<details class="collapsible slot-fold" open>' +
+      '<details class="collapsible slot-fold" data-tone="h" open>' +
       '<summary><h3>slot 明细 <span class="muted" data-role="count"></span></h3></summary>' +
       '<div class="slot-rows">' +
       slots.map(function (slot) {
@@ -1294,7 +1297,7 @@ function slotCardValues(slot, base, slotId) {
     unit: used === null || used === undefined ? '' : 'tok',
     foot: ceiling ? '上限 ' + countText(ceiling) + ' tok' : '',
     bar: (used === null || used === undefined || !ceiling) ? null : used / ceiling,
-    barClass: (ceiling && used / ceiling > 0.85) ? 'bad' : '',
+    barClass: (ceiling && used / ceiling > 0.85) ? 'bad' : 't-c',
     series: ctxSeries,
     sparkOptions: {
       min: 0, color: cssVar('--chart-c'), autoscale: true,
@@ -1306,7 +1309,7 @@ function slotCardValues(slot, base, slotId) {
   out.ratio = {
     text: ratio === null || ratio === undefined ? '—' : pct(ratio),
     bar: ratio,
-    barClass: (ratio !== null && ratio !== undefined && ratio > 0.85) ? 'bad' : '',
+    barClass: (ratio !== null && ratio !== undefined && ratio > 0.85) ? 'bad' : 't-c',
     foot: busy ? '本槽占比' : '空闲残留',
     series: seriesOf(prefix + '.ratio'),
     sparkOptions: {
@@ -1341,6 +1344,7 @@ function slotCardValues(slot, base, slotId) {
     unit: typeof rate === 'number' ? 't/s' : '',
     bar: (typeof rate !== 'number' || !ratePeak) ? null
       : Math.max(0, Math.min(1, rate / ratePeak)),
+    barClass: 't-a',
     foot: typeof rate !== 'number'
       ? '引擎未上报'
       : ('峰值 ' + num(ratePeak, 1) + ' t/s'),
@@ -1363,6 +1367,7 @@ function slotCardValues(slot, base, slotId) {
     unit: typeof prefill === 'number' ? 't/s' : '',
     bar: (typeof prefill !== 'number' || !prefillPeak) ? null
       : Math.max(0, Math.min(1, prefill / prefillPeak)),
+    barClass: 't-b',
     foot: typeof prefill !== 'number'
       ? (busy ? '不在读提示词' : '空闲无请求')
       : ('峰值 ' + num(prefillPeak, 0) + ' t/s'),
@@ -1377,7 +1382,7 @@ function slotCardValues(slot, base, slotId) {
   out.kv = {
     text: typeof kv === 'number' ? pct(kv) : '—',
     bar: typeof kv === 'number' ? kv : null,
-    barClass: typeof kv === 'number' ? 'good' : '',
+    barClass: typeof kv === 'number' ? 't-d' : '',
     foot: typeof kv === 'number' ? '' : (busy ? '引擎未上报' : '空闲无请求'),
     series: seriesOf(prefix + '.kv'),
     sparkOptions: {
@@ -1669,6 +1674,7 @@ function renderSystem(snapshot) {
     util: {
       text: gpu ? num(gpu.util_pct, 0) : '—', unit: gpu ? '%' : '',
       bar: gpu ? (gpu.util_pct || 0) / 100 : null,
+      barClass: 't-d',
       foot: gpu
         ? 'SM ' + countText(gpu.clock_sm_mhz) + ' MHz · 显存 ' + countText(gpu.clock_mem_mhz) + ' MHz'
         : '显卡不可用',
@@ -1680,7 +1686,7 @@ function renderSystem(snapshot) {
     },
     mem: {
       text: gpu ? gb(gpu.mem_used_mb, 1) : '—', unit: gpu ? 'GB' : '', bar: memRatio,
-      barClass: memTight ? 'bad' : (gpu && (memRatio || 0) > 0.8 ? 'warn' : ''),
+      barClass: memTight ? 'bad' : (gpu && (memRatio || 0) > 0.8 ? 'warn' : 't-e'),
       foot: gpu ? '上限 ' + gb(gpu.mem_total_mb, 1) + ' GB' + (memTight ? ' · 接近上限' : '') : '显卡不可用',
       series: seriesOf('gpu' + index + '.mem'),
       sparkOptions: {
@@ -1690,7 +1696,7 @@ function renderSystem(snapshot) {
     },
     temp: {
       text: gpu ? num(temp, 0) : '—', unit: gpu ? '°C' : '', bar: tempRatio,
-      barClass: hot ? 'bad' : (warm ? 'warn' : ''),
+      barClass: hot ? 'bad' : (warm ? 'warn' : 't-f'),
       foot: gpu
         ? (hot ? '温度偏高，注意散热' : '风扇 ' + num(gpu.fan_pct, 0) + '%')
         : '显卡不可用',
@@ -1702,7 +1708,7 @@ function renderSystem(snapshot) {
     },
     power: {
       text: gpu ? num(gpu.power_w, 0) : '—', unit: gpu ? 'W' : '', bar: powerRatio,
-      barClass: (powerRatio || 0) > 0.95 ? 'warn' : '',
+      barClass: (powerRatio || 0) > 0.95 ? 'warn' : 't-g',
       foot: gpu
         ? (powerCeiling !== null
             ? '上限 ' + num(powerCeiling, 0) + ' W' + (powerDynamic ? ' · 动态' : '')
@@ -1718,7 +1724,7 @@ function renderSystem(snapshot) {
       text: host.available ? num(cpuLoad, 1) : '—', unit: host.available ? '%' : '',
       bar: host.available ? (cpuLoad || 0) / 100 : null,
       barClass: host.available
-        ? ((cpuLoad || 0) > 92 ? 'bad' : ((cpuLoad || 0) > 80 ? 'warn' : ''))
+        ? ((cpuLoad || 0) > 92 ? 'bad' : ((cpuLoad || 0) > 80 ? 'warn' : 't-h'))
         : '',
       foot: host.available
         ? '基准 ' + countText(cpu.max_mhz) + ' MHz' + ((cpuLoad || 0) > 92 ? ' · 负载饱和' : '')
@@ -1732,13 +1738,13 @@ function renderSystem(snapshot) {
     commit: {
       text: host.available ? gb(memory.commit_used_mb, 1) : '—', unit: host.available ? 'GB' : '',
       bar: commitRatio,
-      barClass: commitTight ? 'bad' : (host.available && (commitRatio || 0) > 0.8 ? 'warn' : ''),
+      barClass: commitTight ? 'bad' : (host.available && (commitRatio || 0) > 0.8 ? 'warn' : 't-b'),
       foot: host.available
         ? '上限 ' + gb(memory.commit_limit_mb, 1) + ' GB' + (commitTight ? ' · 压力偏高' : '')
         : '系统采集不可用',
       series: seriesOf('host.commit'),
       sparkOptions: {
-        min: 0, max: 1, color: cssVar('--chart-e'), autoscale: true,
+        min: 0, max: 1, color: cssVar('--chart-b'), autoscale: true,
         format: function (v) { return num(v * 100, 0) + '%'; },
       },
     },
@@ -2124,6 +2130,10 @@ function renderTokenStats(snapshot) {
   const grid = document.getElementById('token-stats');
   const note = document.getElementById('token-note');
   const days = document.getElementById('token-days');
+  // The counter cards now sit in the 模型信息 head; when the ledger is
+  // down .ledger-off hides the whole row instead of leaving a dead
+  // 未启用 tile on the title line.
+  const head = document.getElementById('model-info');
   const tiers = document.getElementById('token-tiers');
   const tierNote = document.getElementById('token-tier-note');
   const tierSummary = document.getElementById('token-tier-summary');
@@ -2131,18 +2141,16 @@ function renderTokenStats(snapshot) {
   const rankOutput = document.getElementById('token-rank-output');
   const rankSpeed = document.getElementById('token-rank-speed');
   if (!grid || !note || !days) return;
+  if (head) head.classList.remove('ledger-off');
 
   const data = snapshot.stats;
   if (!data || data.available === false) {
     const reason = (data && data.error === 'disabled')
       ? 'config.json 里 stats.enabled 设成了 false'
       : '本次采样没有上报账本';
-    grid.innerHTML = '<div class="stat">' +
-      '<span class="stat-label">历史信息</span>' +
-      '<span class="stat-value">未启用</span>' +
-      '<span class="stat-foot">' + esc(reason) + '</span></div>';
+    if (head) head.classList.add('ledger-off');
     note.className = 'stat-note';
-    note.textContent = '';
+    note.textContent = '账本未启用：' + reason + '。';
     days.innerHTML = '';
     if (tiers) tiers.innerHTML = '';
     if (combos) combos.innerHTML = '';
@@ -2337,7 +2345,7 @@ function renderTokenStats(snapshot) {
         Number(row.prompt_tokens || 0);
       return '<tr><td>' + esc(row.day) + '</td>' +
         '<td class="num" title="' + esc(tokenExact(row.predicted_tokens)) + '">' +
-          tokenText(row.predicted_tokens) + '</td>' +
+        tokenText(row.predicted_tokens) + '</td>' +
         '<td class="num" title="' + esc(tokenExact(row.prompt_tokens)) + '">' +
           tokenText(row.prompt_tokens) + '</td>' +
         '<td class="num" title="' + esc(tokenExact(sum)) + '">' +
