@@ -615,7 +615,12 @@ function buildCards(container, specs) {
       (spec.barDir === 'h' ? ' bar-h' : '') + '" data-card="' + esc(spec.key) + '">' +
       '<div class="bar" data-role="bar"><i data-role="fill"></i></div>' +
       '<div class="card-body">' +
-        (spec.tag ? '<div class="card-tag" data-role="tag"></div>' : '') +
+      // Every horizontal-bar card reserves the tag line, not just the tagged
+      // one: a populated row on card 1 and no placeholder on the other five
+      // made the first card a line taller than its neighbours.
+      ((spec.tag || spec.barDir === 'h')
+        ? '<div class="card-tag"' + (spec.tag ? ' data-role="tag"' : '') + '></div>'
+        : '') +
         '<div class="card-head">' +
           '<span class="card-label">' + esc(spec.label) + '</span>' +
           (spec.tip ? '<span class="tip" tabindex="0" data-tip="' + esc(spec.tip) + '">i</span>' : '') +

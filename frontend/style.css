@@ -456,8 +456,10 @@ main {
    replaced by a flat fill with a top highlight. */
 .card.bar-h { flex-direction: column; }
 .card.bar-h .bar {
+  order: 2;              /* the bar rides the card's bottom edge, under the rows */
   width: 100%;
   height: 6px;
+  margin-top: 8px;
   align-items: flex-start;
   justify-content: flex-start;
 }
@@ -1290,12 +1292,16 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
   padding-top: 10px;
 }
 /* The slot identity line, first row inside the leading 已生成 card (the
-   standalone .slot-title row was removed 2026-10-19 to reclaim its height). */
+   standalone .slot-title row was removed 2026-10-19 to reclaim its height).
+   Every bar-h card reserves this line (empty on the other five) so the six
+   cards in a row are exactly the same height with their heads on one line;
+   min-height gives the empty placeholders the populated row's height. */
 .card-tag {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 2px;
+  min-height: 17px;
+  margin-bottom: 3px;
 }
 .slot-id {
   font-family: var(--font-mono, ui-monospace, monospace);
