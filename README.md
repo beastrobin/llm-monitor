@@ -425,8 +425,8 @@ llm-monitor/
 并且把 `stats.available` 置为 false 时页面要显示"未启用"，而不是留白或沿用上一帧的旧数。
 
 ```bash
-npm install jsdom            # node_modules 不入库
-node tools/render_check.js http://127.0.0.1:8090
+npm install                  # 依赖清单在仓库里（package.json / package-lock.json）
+node tools/render_check.js http://127.0.0.1:8090   # 或 npm run render-check
 ```
 
 退出码非 0 = 有未捕获错误，或上面任意一条不成立。**改前端必跑。**

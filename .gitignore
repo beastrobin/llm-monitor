@@ -31,3 +31,8 @@ monitor.log
 
 # Node test deps (render_check.js needs jsdom; install with npm)
 /node_modules/
+# ...but the dependency manifest itself stays IN: the blanket *.json rule above
+# exists for runtime data files (config.json with its keys, stats.json, logs),
+# not for the thing that says which dev dependency the smoke test needs.
+!package.json
+!package-lock.json
