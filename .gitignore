@@ -28,3 +28,6 @@ monitor.log
 /power_curve/
 /.workbuddy/
 *.bak
+
+# Node test deps (render_check.js needs jsdom; install with npm)
+/node_modules/
