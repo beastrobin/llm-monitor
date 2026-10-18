@@ -572,6 +572,9 @@ function cardSpec(key, label, options) {
     label: label,
     tip: opts.tip || '',
     bar: !!opts.bar,
+    // Rail orientation: 'v' = the classic left-edge rail filling bottom-up,
+    // 'h' = a full-width track under the value filling left-to-right.
+    barDir: opts.barDir === 'h' ? 'h' : 'v',
     spark: opts.spark !== false,
   };
 }
@@ -601,7 +604,11 @@ const SOLO_PATH_NOTE =
 // the label's overflow:hidden (used for ellipsis) would clip the tooltip.
 function buildCards(container, specs) {
   container.innerHTML = specs.map(function (spec) {
-    return '<div class="card' + (spec.bar ? '' : ' no-bar') + '" data-card="' + esc(spec.key) + '">' +
+    // A card with spark: false carries no canvas at all (the slot cards asked
+    // for no curves on 2026-10-19); the old hidden-canvas placeholder only
+    // existed so mixed spark/no-spark rows lined up, and no row does that.
+    return '<div class="card' + (spec.bar ? '' : ' no-bar') +
+      (spec.barDir === 'h' ? ' bar-h' : '') + '" data-card="' + esc(spec.key) + '">' +
       '<div class="bar" data-role="bar"><i data-role="fill"></i></div>' +
       '<div class="card-body">' +
         '<div class="card-head">' +
@@ -609,9 +616,9 @@ function buildCards(container, specs) {
           (spec.tip ? '<span class="tip" tabindex="0" data-tip="' + esc(spec.tip) + '">i</span>' : '') +
           '<span class="card-value" data-role="value">—</span>' +
         '</div>' +
-        '<div class="card-visual' + (spec.spark ? '' : ' no-spark') + '">' +
+        (spec.spark ? '<div class="card-visual">' +
           '<canvas class="spark" data-role="spark"></canvas>' +
-        '</div>' +
+          '</div>' : '') +
         '<div class="card-foot" data-role="foot"></div>' +
       '</div>' +
       '</div>';
@@ -627,6 +634,7 @@ function buildCards(container, specs) {
       spark: root.querySelector('[data-role="spark"]'),
       bar: root.querySelector('[data-role="bar"]'),
       fill: root.querySelector('[data-role="fill"]'),
+      horizontal: spec.barDir === 'h',
       foot: root.querySelector('[data-role="foot"]'),
       // The info icon next to the label; its tooltip now also carries the live
       // foot text, so hovering one icon explains the metric AND shows the
@@ -664,10 +672,12 @@ function paintCards(refs, values) {
     }
     if (ref.fill) {
       const ratio = (value.bar === undefined || value.bar === null) ? null : value.bar;
-      // The rail fills from the bottom up, so it is a height, not a width.
-      // railHeight keeps a small but real reading visible: a 0.2% context
+      // The rail fills along its own axis: the vertical rail from the bottom
+      // up (a height), the horizontal one left to right (a width). railHeight
+      // keeps a small but real reading visible either way: a 0.2% context
       // share is a tenth of a pixel and reads as an empty card.
-      ref.fill.style.height = railHeight(ratio);
+      if (ref.horizontal) ref.fill.style.width = railHeight(ratio);
+      else ref.fill.style.height = railHeight(ratio);
       ref.bar.className = 'bar' + (value.barClass ? ' ' + value.barClass : '');
     }
     if (ref.spark && value.series) {
@@ -1132,7 +1142,8 @@ function applyModel(root, endpoint, model) {
 // and "max of three" cannot answer it.
 //
 // Folded OPEN by default: the user asked to see the per-slot breakdown
-// without a click, and each row is one line of six small cards.
+// without a click, and each row is one line of six small cards.  The cards
+// are value + horizontal health bar only -- no curve (2026-10-19 request).
 function renderSlotDetail(host, model, base) {
   if (!host) return;
   const slots = model.slots || [];
@@ -1219,7 +1230,9 @@ function renderSlotDetail(host, model, base) {
 }
 
 // One slot's six readings, in the shape paintCards expects: headline, rail
-// ratio, trend series and a tooltip that carries the live breakdown.
+// ratio, and a tooltip that carries the live breakdown.  No trend series: the
+// slot cards dropped their curves on 2026-10-19, so only the rate cards still
+// read history (for their peak-relative rail).
 //
 // The six readings, in the same order and under the same names as the six
 // headline cards wherever the engine can give a per-slot value: 生成速度 /
@@ -1236,38 +1249,39 @@ function renderSlotDetail(host, model, base) {
 // the floor, because a null sample is dropped rather than drawn as a zero.
 const SLOT_SPECS = [
   cardSpec('tok_s', '生成速度', {
-    bar: true,
+    bar: true, barDir: 'h', spark: false,
     tip: '该 slot 自己的生成速度 = 已生成 ÷ 首个 token 之后的秒数，' +
       '就是社区 tg 那个公式，但**按槽**而非跨槽求和 —— 并发时仍能与单请求基准比较。' +
       'Strata 只在槽忙时上报；llama.cpp 的 /slots 没有这一项，显示 — 而不是 0。' +
       '血条是该槽当前速度 ÷ 该槽本会话峰值。',
   }),
   cardSpec('prefill', 'Prefill 速度', {
-    bar: true,
+    bar: true, barDir: 'h', spark: false,
     tip: '该 slot 读入提示词的速率。引擎只报一个全局 prefill 速率，' +
       '但它一次只读一个提示词（控制行是信号量），所以正在 reading 的那个槽就是这条速率的主人。' +
       '没有槽在读、或同时有几个在读时不猜，显示 —。',
   }),
   cardSpec('ctx', '上下文', {
-    bar: true,
+    bar: true, barDir: 'h', spark: false,
     tip: '这个 slot 手上留着的 token 数：在跑时是「提示词 + 已生成」，' +
-      '空闲时是服务端为下一轮保留的那段前缀。曲线是它随对话增长的样子。' +
+      '空闲时是服务端为下一轮保留的那段前缀。' +
       '血条是它占模型上下文上限的比例（下一张卡是同一个数的百分比读法）。',
   }),
   cardSpec('ratio', '上下文占比', {
-    bar: true,
+    bar: true, barDir: 'h', spark: false,
     tip: '该 slot 留着的 token ÷ 模型上下文上限。超过 85% 转红。' +
       '注意这是**单个** slot 的占比，主卡的「上下文占比」取的是各 slot 的最大值。' +
-      '低于 2% 时血条按 2% 画，否则 6px 宽的柱在 0.2% 上根本看不见——数字本身没被改。',
+      '低于 2% 时血条按 2% 画，否则横条上的 0.2% 根本看不见——数字本身没被改。',
   }),
   cardSpec('kv', 'KV 缓存命中', {
-    bar: true,
+    bar: true, barDir: 'h', spark: false,
     tip: '这个 slot 本轮提示词里，前缀缓存直接给回、不需要重新 prefill 的比例。' +
       'llama.cpp 的 /slots 直接报这个拆分；Strata 按槽不报，这里取的是「该槽上一轮留下的前缀 ÷ 本轮提示词」——' +
       '正是引擎 pick_slot 复用的那一段。主卡的 KV 缓存命中是全局累计口径，两者算法不同，不必相等。',
   }),
   cardSpec('decoded', '已生成', {
-    tip: '这个 slot 已经生成的 token 数。锯齿状上升就是它在出字。',
+    barDir: 'h', spark: false,
+    tip: '这个 slot 已经生成的 token 数。',
   }),
 ];
 
@@ -1285,24 +1299,20 @@ function railHeight(ratio) {
 }
 
 function slotCardValues(slot, base, slotId) {
+  // Only the two rate cards read history, and only for their peak-relative
+  // rail (see the comments below); prefix keys those series.
   const prefix = base + '.slot' + slotId;
   const out = {};
   const used = slot.ctx_used;
   const busy = !!slot.is_processing;
   const ceiling = slot.n_ctx;
 
-  const ctxSeries = seriesOf(prefix + '.ctx');
   out.ctx = {
     text: used === null || used === undefined ? '—' : countText(used),
     unit: used === null || used === undefined ? '' : 'tok',
     foot: ceiling ? '上限 ' + countText(ceiling) + ' tok' : '',
     bar: (used === null || used === undefined || !ceiling) ? null : used / ceiling,
     barClass: (ceiling && used / ceiling > 0.85) ? 'bad' : 't-c',
-    series: ctxSeries,
-    sparkOptions: {
-      min: 0, color: cssVar('--chart-c'), autoscale: true,
-      format: function (v) { return countText(v); },
-    },
   };
 
   const ratio = slot.ctx_ratio;
@@ -1311,24 +1321,13 @@ function slotCardValues(slot, base, slotId) {
     bar: ratio,
     barClass: (ratio !== null && ratio !== undefined && ratio > 0.85) ? 'bad' : 't-c',
     foot: busy ? '本槽占比' : '空闲残留',
-    series: seriesOf(prefix + '.ratio'),
-    sparkOptions: {
-      min: 0, max: 1, color: cssVar('--chart-c'), autoscale: true,
-      format: function (v) { return num(v * 100, 0) + '%'; },
-    },
   };
 
-  const decodedSeries = seriesOf(prefix + '.decoded');
   out.decoded = {
     text: slot.n_decoded === null || slot.n_decoded === undefined
       ? '—' : countText(slot.n_decoded),
     unit: slot.n_decoded === null || slot.n_decoded === undefined ? '' : 'tok',
     foot: busy ? '本轮已出字' : '空闲无请求',
-    series: decodedSeries,
-    sparkOptions: {
-      min: 0, color: cssVar('--chart-a'), autoscale: true,
-      format: function (v) { return countText(v); },
-    },
   };
 
   // The slot's own rate, when the engine reports one.  The rail is "how close
@@ -1348,11 +1347,6 @@ function slotCardValues(slot, base, slotId) {
     foot: typeof rate !== 'number'
       ? '引擎未上报'
       : ('峰值 ' + num(ratePeak, 1) + ' t/s'),
-    series: rateSeries,
-    sparkOptions: {
-      min: 0, color: cssVar('--chart-a'), autoscale: true,
-      format: function (v) { return num(v, 1); },
-    },
   };
 
   // Prefill is attributed by the collector (see strata.py's _slots): the
@@ -1371,11 +1365,6 @@ function slotCardValues(slot, base, slotId) {
     foot: typeof prefill !== 'number'
       ? (busy ? '不在读提示词' : '空闲无请求')
       : ('峰值 ' + num(prefillPeak, 0) + ' t/s'),
-    series: prefillSeries,
-    sparkOptions: {
-      min: 0, color: cssVar('--chart-b'), autoscale: true,
-      format: function (v) { return num(v, 0); },
-    },
   };
 
   const kv = slot.kv_hit;
@@ -1384,11 +1373,6 @@ function slotCardValues(slot, base, slotId) {
     bar: typeof kv === 'number' ? kv : null,
     barClass: typeof kv === 'number' ? 't-d' : '',
     foot: typeof kv === 'number' ? '' : (busy ? '引擎未上报' : '空闲无请求'),
-    series: seriesOf(prefix + '.kv'),
-    sparkOptions: {
-      min: 0, max: 1, color: cssVar('--chart-d'), autoscale: true,
-      format: function (v) { return num(v * 100, 0) + '%'; },
-    },
   };
   return out;
 }
@@ -1515,13 +1499,16 @@ function renderEndpoints(snapshot) {
 
   // The source chips live in the section head (right-aligned), so they are
   // refreshed on their own tick -- up/down state changes without rebuilding
-  // the model card below.
+  // the model card below.  Online servers only (user request 2026-10-19):
+  // offline chips were pure noise -- the card area below already says when
+  // nothing is serving.
   const sourcesBox = document.getElementById('endpoint-sources');
   if (sourcesBox) {
-    const srcSig = deduped.map(function (e) { return e.id + '@' + e.up; }).join('|');
+    const online = deduped.filter(function (e) { return e.up; });
+    const srcSig = online.map(function (e) { return e.id + '@' + e.up; }).join('|');
     if (sourcesBox.dataset.sig !== srcSig) {
       sourcesBox.dataset.sig = srcSig;
-      sourcesBox.innerHTML = deduped.map(endpointChip).join('');
+      sourcesBox.innerHTML = online.map(endpointChip).join('');
     }
   }
 

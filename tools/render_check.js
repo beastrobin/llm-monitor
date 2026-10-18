@@ -318,11 +318,14 @@ function readFrames(base, count, timeoutMs) {
   };
   const railOf = function (row, key) {
     const fill = slotCard(row, key) && slotCard(row, key).querySelector('.bar > i');
-    return fill ? fill.style.height : null;
+    if (!fill) return null;
+    // Horizontal rails paint a width, vertical ones a height; slot cards are
+    // horizontal since 2026-10-19, the fallback keeps the helper honest.
+    return fill.style.width || fill.style.height;
   };
-  const sparkDrawn = function (row, key) {
-    const canvas = slotCard(row, key) && slotCard(row, key).querySelector('canvas.spark');
-    return !!(canvas && canvas._geom && canvas._geom.count > 0);
+  const hasCanvas = function (row, key) {
+    const card = slotCard(row, key);
+    return !!(card && card.querySelector('canvas.spark'));
   };
   // The fold leads open: the per-slot breakdown is what the user comes to the
   // panel for, and asking for a click before it appears is a click too many.
@@ -340,13 +343,15 @@ function readFrames(base, count, timeoutMs) {
   };
   const labelsOk = busyRow && labelsOf(busyRow).join('|') === EXPECTED_LABELS.join('|');
   const slotIdOk = busyRow && text(busyRow.querySelector('.slot-id')) === 'slot 0';
-  // Every slot card must carry the same anatomy as the six headline cards:
-  // a rail, a label, a value and a trend canvas.  A missing rail means paintCards
-  // never ran for this row.
+  // Every slot card must carry the post-2026-10-19 anatomy: a horizontal
+  // health bar, a label, a value -- and NO trend canvas (the user asked for
+  // the curves gone).  A missing rail means paintCards never ran for this row.
   const anatomyOk = busyRow && SLOT_KEYS.every(function (key) {
     const card = slotCard(busyRow, key);
     return card && card.querySelector('.bar') && card.querySelector('.card-label') &&
-      card.querySelector('.card-value') && card.querySelector('canvas.spark');
+      card.querySelector('.card-value') &&
+      card.className.indexOf('bar-h') >= 0 &&
+      !card.querySelector('canvas.spark');
   });
   const busyOk = busyRow &&
     slotValue(busyRow, 'ctx') === '37,869tok' &&
@@ -376,17 +381,13 @@ function readFrames(base, count, timeoutMs) {
   // A busy slot well under the limit must not paint a full bar.
   const ratioRail = busyRow && railOf(busyRow, 'ratio');
   const ratioRailSane = !!ratioRail && parseFloat(ratioRail) > 2 && parseFloat(ratioRail) < 100;
-  const sparkOk = SLOT_KEYS.filter(function (k) { return k !== 'prefill'; })
-    .every(function (key) { return sparkDrawn(busyRow, key); });
-  // The failure report carries the per-card point counts: a curve that draws
-  // nothing usually means the series key the frontend asks for does not match
-  // the one the hub flattened (the slot cards once keyed themselves
-  // ".slotundefined.*" and every curve sat empty while the numbers worked).
-  const sparkCounts = SLOT_KEYS.map(function (k) {
-    const canvas = slotCard(busyRow, k) && slotCard(busyRow, k).querySelector('canvas.spark');
-    return k + '=' + (canvas && canvas._geom ? canvas._geom.count : 'none') +
-      '/' + (canvas && canvas._spark ? (canvas._spark.values || []).length : '?');
-  }).join(' ');
+  // No slot card may carry a trend canvas: the curves were removed on
+  // 2026-10-19 at the user's request, and buildCards only omits the canvas
+  // when the spec says spark: false -- a leftover means that regressed.
+  const curvelessOk = SLOT_KEYS.every(function (key) { return !hasCanvas(busyRow, key); });
+  const canvasLeftovers = SLOT_KEYS.filter(function (k) {
+    return hasCanvas(busyRow, k);
+  }).join('/') || '无';
   // The count sentence has to follow the frame, not the frame that happened to
   // build these rows: take one of the two busy slots away and re-render without
   // changing the row count or any id, and it must say "1 个在跑".  A baked-in
@@ -410,7 +411,7 @@ function readFrames(base, count, timeoutMs) {
   win.renderEndpointsForTest(slotFixture);
 
   const slotOk = foldOpen && labelsOk && slotIdOk && anatomyOk && busyOk && readOk &&
-    idleOk && idleRailEmpty && tinyRailVisible && ratioRailSane && sparkOk &&
+    idleOk && idleRailEmpty && tinyRailVisible && ratioRailSane && curvelessOk &&
     countFollowsFrame && errors.length === slotErrorsBefore;
   say('slot 明细: ' + (slotOk ? '通过' : '失败') +
     ' | 行 ' + slotRows.length +
@@ -423,7 +424,7 @@ function readFrames(base, count, timeoutMs) {
     ' | 空闲槽 "—" ' + (idleOk ? '✓' : '✗') +
     ' | 空闲血条空 ' + (idleRailEmpty ? '✓' : '✗') +
     ' | 0.2% 血条可见 ' + (tinyRailVisible ? '✓' : '✗') +
-    ' | 曲线已绘制 ' + (sparkOk ? '✓' : '✗ ' + sparkCounts) +
+    ' | 曲线已移除 ' + (curvelessOk ? '✓' : '✗ 残留 ' + canvasLeftovers) +
     ' | 计数跟帧 ' + (countFollowsFrame ? '✓' : '✗ 停在「' + countAtBuild + '」'));
   if (busyRow) {
     say('   忙碌槽 0: ' + SLOT_KEYS
