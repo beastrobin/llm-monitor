@@ -1289,11 +1289,13 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
   border-top: 1px solid var(--border-soft);
   padding-top: 10px;
 }
-.slot-title {
+/* The slot identity line, first row inside the leading 已生成 card (the
+   standalone .slot-title row was removed 2026-10-19 to reclaim its height). */
+.card-tag {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 7px;
+  gap: 6px;
+  margin-bottom: 2px;
 }
 .slot-id {
   font-family: var(--font-mono, ui-monospace, monospace);

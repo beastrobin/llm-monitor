@@ -67,7 +67,7 @@ def _port_from_args(args):
 class LiveEndpoint(object):
     """A dashboard endpoint that always points at the model in use right now."""
 
-    def __init__(self, log_path, label="Hermes 当前模型", router_url=None, api_key=""):
+    def __init__(self, log_path, label="Hermes", router_url=None, api_key=""):
         self.log_path = Path(log_path)
         self.id = "hermes"
         self.label = label
@@ -129,7 +129,7 @@ class LiveEndpoint(object):
         # single-model shape the delegate already handles.
         self._delegate = LlamaEndpoint({
             "id": self.id,
-            "label": "Hermes 当前模型",
+            "label": "Hermes",
             "base_url": self.base_url,
             "api_key": "",
             "api_key_env": "",

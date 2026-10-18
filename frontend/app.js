@@ -576,6 +576,10 @@ function cardSpec(key, label, options) {
     // 'h' = a full-width track under the value filling left-to-right.
     barDir: opts.barDir === 'h' ? 'h' : 'v',
     spark: opts.spark !== false,
+    // A card that carries a per-slot identity line (slot id + engine state)
+    // as its first row — used by the 已生成 card so a slot row needs no
+    // separate title line (2026-10-19 request).
+    tag: !!opts.tag,
   };
 }
 
@@ -611,6 +615,7 @@ function buildCards(container, specs) {
       (spec.barDir === 'h' ? ' bar-h' : '') + '" data-card="' + esc(spec.key) + '">' +
       '<div class="bar" data-role="bar"><i data-role="fill"></i></div>' +
       '<div class="card-body">' +
+        (spec.tag ? '<div class="card-tag" data-role="tag"></div>' : '') +
         '<div class="card-head">' +
           '<span class="card-label">' + esc(spec.label) + '</span>' +
           (spec.tip ? '<span class="tip" tabindex="0" data-tip="' + esc(spec.tip) + '">i</span>' : '') +
@@ -635,6 +640,7 @@ function buildCards(container, specs) {
       bar: root.querySelector('[data-role="bar"]'),
       fill: root.querySelector('[data-role="fill"]'),
       horizontal: spec.barDir === 'h',
+      tag: root.querySelector('[data-role="tag"]'),
       foot: root.querySelector('[data-role="foot"]'),
       // The info icon next to the label; its tooltip now also carries the live
       // foot text, so hovering one icon explains the metric AND shows the
@@ -1178,9 +1184,9 @@ function renderSlotDetail(host, model, base) {
       '<summary><h3>slot 明细 <span class="muted" data-role="count"></span></h3></summary>' +
       '<div class="slot-rows">' +
       slots.map(function (slot) {
+        // No title line: the slot's identity (id + state) rides inside the
+        // leading 已生成 card instead, one line per row (2026-10-19).
         return '<div class="slot-row" data-slot="' + esc(String(slot.id)) + '">' +
-          '<div class="slot-title"><span class="slot-id">slot ' + esc(String(slot.id)) + '</span>' +
-          '<span class="slot-state" data-role="state"></span></div>' +
           '<div class="slot-cards grid compact" data-role="cards"></div>' +
           '</div>';
       }).join('') +
@@ -1188,11 +1194,10 @@ function renderSlotDetail(host, model, base) {
   }
 
   // Same job as applyModel, one row at a time: the slot cards are built by the
-  // shared buildCards/paintCards pair, so a slot row carries the identical
-  // anatomy as the six headline cards -- left rail, label, value, mini trend,
-  // and an info tooltip that explains the metric.  Hand-rolling a plainer card
-  // here is what made this section read as a second-class table next to the
-  // cards above it.
+  // shared buildCards/paintCards pair.  Each card is label + value + a
+  // horizontal health bar, and the leading 已生成 card carries the slot's id
+  // and engine state as its first line -- the row has no title of its own
+  // anymore (2026-10-19).
   // The count line is repainted every tick instead of being written once at
   // build time.  Baked in, it froze whatever was true the frame that created
   // these rows: a fold could read "2 个在跑" while both slots had long gone idle
@@ -1214,18 +1219,23 @@ function renderSlotDetail(host, model, base) {
     const id = row.getAttribute('data-slot');
     const slot = slots.filter(function (s) { return String(s.id) === id; })[0];
     if (!slot) return;
-    const stateEl = row.querySelector('[data-role="state"]');
-    if (stateEl) {
-      const label = slot.is_processing ? (slot.state || 'processing') : 'idle';
-      stateEl.className = 'slot-state' + (slot.is_processing ? ' on' : '');
-      stateEl.textContent = label;
-      // "idle" here is the engine's word, and under a lone request it is not
-      // the whole story -- say so where the user is already looking.
-      stateEl.title = soloPath ? SOLO_PATH_NOTE : '';
-    }
-    const refs = ensureCards(row.querySelector('[data-role="cards"]'), SLOT_SPECS);
+    const cardsHost = row.querySelector('[data-role="cards"]');
+    const refs = ensureCards(cardsHost, SLOT_SPECS);
     if (!refs) return;
     paintCards(refs, slotCardValues(slot, base, id));
+    // The row's identity line: slot id + engine state, first row INSIDE the
+    // leading 已生成 card (the old standalone title line ate a row per slot).
+    const tagRef = refs.get('decoded');
+    const tagEl = tagRef && tagRef.tag;
+    if (tagEl) {
+      const label = slot.is_processing ? (slot.state || 'processing') : 'idle';
+      tagEl.innerHTML = '<span class="slot-id">slot ' + esc(String(slot.id)) + '</span>' +
+        '<span class="slot-state' + (slot.is_processing ? ' on' : '') + '">' +
+        esc(label) + '</span>';
+      // "idle" here is the engine's word, and under a lone request it is not
+      // the whole story -- say so where the user is already looking.
+      tagEl.lastChild.title = soloPath ? SOLO_PATH_NOTE : '';
+    }
   });
 }
 
@@ -1234,13 +1244,13 @@ function renderSlotDetail(host, model, base) {
 // slot cards dropped their curves on 2026-10-19, so only the rate cards still
 // read history (for their peak-relative rail).
 //
-// The six readings, in the same order and under the same names as the six
-// headline cards wherever the engine can give a per-slot value: 生成速度 /
-// Prefill 速度 / 上下文 / 上下文占比 / KV 缓存命中, plus 已生成 in place of the
-// headline's MTP 每步接受 -- MTP counters are engine-global (Strata's C++ sums
-// drafts across slots and never says which slot a draft belonged to), so a
-// per-slot MTP card would be the same number three times over.  已生成 is the
-// one reading that is genuinely per slot and has no headline equivalent.
+// Order since 2026-10-19: 已生成 first (it carries the slot tag), then
+// 生成速度 / Prefill 速度 / 上下文 / 上下文占比 / KV 缓存命中.  已生成 stands
+// in for the headline's MTP 每步接受 -- MTP counters are engine-global
+// (Strata's C++ sums drafts across slots and never says which slot a draft
+// belonged to), so a per-slot MTP card would be the same number three times
+// over.  已生成 is the one reading that is genuinely per slot and has no
+// headline equivalent.
 //
 // Every field is optional.  An idle Strata slot reports held_tokens and nothing
 // else (server.py's slots_view idle branch has a single length to give), so the
@@ -1248,6 +1258,13 @@ function renderSlotDetail(host, model, base) {
 // real measurements -- and the trend skips those samples instead of diving to
 // the floor, because a null sample is dropped rather than drawn as a zero.
 const SLOT_SPECS = [
+  // 已生成 leads (2026-10-19): it is the card that carries the slot's
+  // identity tag (slot id + engine state), so the row's own title line was
+  // dropped and every slot row is one line shorter.
+  cardSpec('decoded', '已生成', {
+    barDir: 'h', spark: false, tag: true,
+    tip: '这个 slot 已经生成的 token 数。',
+  }),
   cardSpec('tok_s', '生成速度', {
     bar: true, barDir: 'h', spark: false,
     tip: '该 slot 自己的生成速度 = 已生成 ÷ 首个 token 之后的秒数，' +
@@ -1278,10 +1295,6 @@ const SLOT_SPECS = [
     tip: '这个 slot 本轮提示词里，前缀缓存直接给回、不需要重新 prefill 的比例。' +
       'llama.cpp 的 /slots 直接报这个拆分；Strata 按槽不报，这里取的是「该槽上一轮留下的前缀 ÷ 本轮提示词」——' +
       '正是引擎 pick_slot 复用的那一段。主卡的 KV 缓存命中是全局累计口径，两者算法不同，不必相等。',
-  }),
-  cardSpec('decoded', '已生成', {
-    barDir: 'h', spark: false,
-    tip: '这个 slot 已经生成的 token 数。',
   }),
 ];
 

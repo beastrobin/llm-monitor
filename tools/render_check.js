@@ -303,7 +303,7 @@ function readFrames(base, count, timeoutMs) {
   } });
   win.renderEndpointsForTest(slotFixture);
 
-  const SLOT_KEYS = ['tok_s', 'prefill', 'ctx', 'ratio', 'kv', 'decoded'];
+  const SLOT_KEYS = ['decoded', 'tok_s', 'prefill', 'ctx', 'ratio', 'kv'];
   const slotFold = doc.querySelector('.slot-fold');
   const slotRows = doc.querySelectorAll('.slot-row');
   const busyRow = slotRows[0];
@@ -333,8 +333,8 @@ function readFrames(base, count, timeoutMs) {
   // The six cards carry the headline cards' names wherever the engine can give
   // a per-slot value, and the row is addressed as "slot N".  These labels were
   // an explicit request, so they are asserted rather than assumed to stick.
-  const EXPECTED_LABELS = ['生成速度', 'Prefill 速度', '上下文',
-    '上下文占比', 'KV 缓存命中', '已生成'];
+  const EXPECTED_LABELS = ['已生成', '生成速度', 'Prefill 速度', '上下文',
+    '上下文占比', 'KV 缓存命中'];
   const labelsOf = function (row) {
     return SLOT_KEYS.map(function (k) {
       const card = slotCard(row, k);
@@ -343,6 +343,18 @@ function readFrames(base, count, timeoutMs) {
   };
   const labelsOk = busyRow && labelsOf(busyRow).join('|') === EXPECTED_LABELS.join('|');
   const slotIdOk = busyRow && text(busyRow.querySelector('.slot-id')) === 'slot 0';
+  // 2026-10-19 layout: no standalone title row — the slot's id + engine state
+  // ride INSIDE the leading 已生成 card (first row), and that card is the
+  // row's first card.  A leftover .slot-title or a tag-less leading card
+  // means the height-saving re-layout regressed.
+  const firstCard = busyRow && busyRow.querySelector('.slot-cards .card');
+  const tagInside = !!(firstCard &&
+    firstCard.getAttribute('data-card') === 'decoded' &&
+    firstCard.querySelector('.card-tag') &&
+    text(firstCard.querySelector('.card-tag')).indexOf('slot 0') === 0 &&
+    text(firstCard.querySelector('.card-tag')).indexOf('decoding') > 0);
+  const noTitleRow = !!doc.querySelector('.slot-row') &&
+    !doc.querySelector('.slot-title');
   // Every slot card must carry the post-2026-10-19 anatomy: a horizontal
   // health bar, a label, a value -- and NO trend canvas (the user asked for
   // the curves gone).  A missing rail means paintCards never ran for this row.
@@ -410,7 +422,8 @@ function readFrames(base, count, timeoutMs) {
   slotFixture.endpoints[0].models[0].slots[1] = readingRowBackup;
   win.renderEndpointsForTest(slotFixture);
 
-  const slotOk = foldOpen && labelsOk && slotIdOk && anatomyOk && busyOk && readOk &&
+  const slotOk = foldOpen && labelsOk && slotIdOk && tagInside && noTitleRow &&
+    anatomyOk && busyOk && readOk &&
     idleOk && idleRailEmpty && tinyRailVisible && ratioRailSane && curvelessOk &&
     countFollowsFrame && errors.length === slotErrorsBefore;
   say('slot 明细: ' + (slotOk ? '通过' : '失败') +
@@ -418,6 +431,8 @@ function readFrames(base, count, timeoutMs) {
     ' | 默认展开 ' + (foldOpen ? '✓' : '✗') +
     ' | 标签 ' + (labelsOk ? '✓' : '✗ ' + labelsOf(busyRow).join('/')) +
     ' | slot id ' + (slotIdOk ? '✓' : '✗') +
+    ' | 身份卡首 ' + (tagInside ? '✓' : '✗') +
+    ' | 无小标题行 ' + (noTitleRow ? '✓' : '✗') +
     ' | 结构 ' + (anatomyOk ? '✓' : '✗') +
     ' | 忙碌槽 ' + (busyOk ? '✓' : '✗') +
     ' | 读入槽 prefill ' + (readOk ? '✓' : '✗') +
