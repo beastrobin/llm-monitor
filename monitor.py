@@ -6,8 +6,10 @@ Serves a single-page dashboard plus three JSON endpoints:
   used once on page load so a refresh does not wipe the charts.
 * ``GET  /api/stream``       -- server-sent events, one sample every interval.
 * ``POST /api/power-limit``  -- apply a GPU power preset.
-* ``POST /api/restart``      -- relaunch this process and exit.  The two
-  writes are fenced off the same way; see ``Handler._write_refusal``.
+* ``POST /api/restart``      -- relaunch this process and exit.
+* ``POST /api/stats-reset``  -- clear the token ledger's buckets, keeping
+  the counter baselines.  The writes are fenced off the same way; see
+  ``Handler._write_refusal``.
 
 Everything is built on the standard library: the collectors shell out to
 nvidia-smi and call Win32 through ctypes, and the server is
@@ -49,7 +51,7 @@ del _stream_name
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.6"
+VERSION = "1.7"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
@@ -1037,6 +1039,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/restart":
             self._restart()
             return
+        if path == "/api/stats-reset":
+            self._stats_reset()
+            return
         if path != "/api/power-limit":
             self.close_connection = True
             self._send_json({"ok": False, "error": "not_found"}, 404)
@@ -1095,6 +1100,30 @@ class Handler(BaseHTTPRequestHandler):
         # flushes the ledger and closes the socket, which frees the port for
         # the replacement's retry loop.
         threading.Thread(target=self.server.shutdown, daemon=True).start()
+
+    def _stats_reset(self):
+        """Clear the token ledger, keeping its counter baselines.
+
+        The ledger outlives every server and dashboard restart, so without
+        this route the accumulated history could only be erased by hand --
+        stopping the process, editing stats.json, and praying the ``seen``
+        baselines survived the edit.  ``TokenLedger.reset`` keeps those
+        baselines itself, so the next sample continues from where the
+        engines are now instead of re-booking their whole lifetime counters.
+        """
+        refusal = self._write_refusal()
+        if refusal:
+            log("rejected stats-reset: %s" % refusal)
+            self.close_connection = True
+            self._send_json({"ok": False, "error": refusal}, 403)
+            return
+        if self.hub.ledger is None:
+            self._send_json({"ok": False, "error": "disabled"}, 409)
+            return
+        persisted = self.hub.ledger.reset()
+        log("token ledger cleared from the dashboard" +
+            ("" if persisted else " (in-memory only -- persistence failed)"))
+        self._send_json({"ok": True, "persisted": persisted}, 200)
 
     def do_GET(self):
         path = urlparse(self.path).path

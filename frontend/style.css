@@ -142,6 +142,23 @@ button:hover {
   color: var(--accent);
   background: var(--track);
 }
+/* The one destructive action on the page (clearing the ledger): deliberately
+   colourless until hovered, so it never reads as an invitation, and red only
+   when the hand is actually on it. */
+button.danger:hover {
+  border-color: var(--bad);
+  color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 8%, var(--track));
+}
+button.danger:disabled {
+  opacity: .55;
+  cursor: default;
+}
+button.danger:disabled:hover {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--panel-soft);
+}
 
 /* ------------------------------------------------------------- section head */
 

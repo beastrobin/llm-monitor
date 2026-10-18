@@ -746,7 +746,11 @@ function readFrames(base, count, timeoutMs) {
       point: { ts: offFrame.ts, values: {} },
     }) });
     degrade.ran = true;
-    degrade.text = ledgerText();
+    // The 未启用 reason lives in #token-note: the counter tiles themselves
+    // are hidden (.ledger-off) rather than showing a dead tile, so a check
+    // that reads only the four data containers would miss an honest empty
+    // state and report it as a missing placeholder.
+    degrade.text = ledgerText() + ' | ' + text(doc.getElementById('token-note'));
     degrade.placeholder = degrade.text.indexOf('未启用') >= 0;
     // Stale tier cards or detail rows left on screen after the ledger reports
     // itself unavailable would be a lie, not just a cosmetic leftover: the
@@ -765,6 +769,49 @@ function readFrames(base, count, timeoutMs) {
       point: { ts: Number(payload.snapshot.ts || 0) + 6, values: {} },
     }) });
   }
+
+  // The 清空数据 button in the 历史信息 head is the one destructive action on
+  // the page, and its whole safety story is the two confirmations.  Assert the
+  // button exists AND that the gate bites: cancelling at either stage must
+  // send nothing, and only a double yes may POST.  An un-gated or single-yes
+  // button -- wiping months of ledger history on one misclick -- fails here.
+  say('');
+  say('—— 清空数据按钮 ——');
+  const resetGate = { exists: false, label: '', title: false, cancels: 0, posted: false, armed: false };
+  const resetBtn = doc.getElementById('stats-reset-btn');
+  if (resetBtn) {
+    resetGate.exists = true;
+    resetGate.label = text(resetBtn);
+    resetGate.title = (resetBtn.title || '').length > 40;
+    const posts = [];
+    const bootFetch = win.fetch;
+    win.fetch = function (url, options) {
+      if (options && options.method === 'POST') {
+        posts.push(String(url));
+        return Promise.resolve({ json: function () { return Promise.resolve({ ok: true, persisted: true }); } });
+      }
+      return bootFetch(url, options);
+    };
+    let queue = [];
+    win.confirm = function () { return queue.length ? queue.shift() : false; };
+    resetBtn.click();                    // first confirm says no
+    if (posts.length) resetGate.cancels += 1;
+    queue = [true, false];
+    resetBtn.click();                    // second confirm says no
+    if (posts.length) resetGate.cancels += 1;
+    queue = [true, true];
+    resetBtn.click();                    // both yes: now it may go
+    resetGate.posted = posts.indexOf('/api/stats-reset') >= 0;
+    resetGate.armed = resetBtn.disabled && text(resetBtn) === '已清空';
+    resetBtn.disabled = false;
+    resetBtn.textContent = '清空数据';
+  }
+  const resetGateOk = resetGate.exists && resetGate.label === '清空数据' &&
+    resetGate.title && resetGate.cancels === 0 && resetGate.posted && resetGate.armed;
+  say('  ' + (resetGate.exists ? resetGate.label : '（标题栏没有按钮）✗') +
+    ' | 取消任一步都不发请求: ' + (resetGate.cancels === 0 ? '通过 ✓' : '失败 ✗ 取消后仍发了 ' + resetGate.cancels + ' 次') +
+    ' | 双重确认后才 POST: ' + (resetGate.posted ? '✓' : '✗') +
+    ' | 按下后按钮进入已清空态: ' + (resetGate.armed ? '✓' : '✗'));
 
   // Restart pressed *on the page* reloads it while the port is changing hands.
   // The boot-time /api/snapshot request then fails, and this used to be fatal
@@ -891,7 +938,7 @@ function readFrames(base, count, timeoutMs) {
   // this harness was asked to chase down, so it fails the run like anything else.
   const code = (errors.length || !routingOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
-    !soloOk || !soloClearsOk || !handover.ok) ? 1 : 0;
+    !soloOk || !soloClearsOk || !handover.ok || !resetGateOk) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own

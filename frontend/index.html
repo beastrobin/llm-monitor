@@ -55,6 +55,7 @@
   <section class="block" data-accent="t">
     <div class="block-head">
       <h2>历史信息 <span class="tip" tabindex="0" data-tip="llama-server 只把 token 数报成进程生命周期内的累计值，server 重启或 router 卸载模型都会归零。工作台每轮采样把增量折进 stats.json，并连上一次读到的原始计数值一起保存，所以面板自己重启也能接着往下算；面板第一次见到某个模型时，会把它当时已有的累计值整体计入，否则那部分就永远丢了。『今日』按本机日期切分；预填充只统计实际参与计算的 token，走 KV 缓存复用的单独计；数值悬停可看精确值。">i</span></h2>
+      <button id="stats-reset-btn" type="button" class="danger" title="把账本整体归零：今日与累计 token、模型排行、功率档归集、明细表、近 7 天汇总全部清空，并当场写回 stats.json。引擎计数基线会保留，所以清空后不会把 server 的历史累计重新入账；此操作不可撤销。">清空数据</button>
     </div>
     <div id="token-note" class="stat-note"></div>
 

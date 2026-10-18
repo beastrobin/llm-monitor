@@ -308,6 +308,44 @@ def main():
     finally:
         stats.COMBO_CAP = original_cap
 
+    print("clearing from the dashboard (reset)")
+    cleared = stats.TokenLedger("")
+    cleared.observe(stats.readings_for(sample_set(("m1", 1000, 5000, 70, 10))), watts=450)
+    cleared.observe(stats.readings_for(sample_set(("m1", 1200, 5600, 90, 14))), watts=300)
+    check("a ledger to be cleared actually holds numbers",
+          totals_of(cleared, "predicted_tokens"), 5600)
+    cleared.reset()
+    after = cleared.payload()
+    check("the clear zeroes the lifetime totals",
+          totals_of(cleared, "predicted_tokens"), 0)
+    check("...and every bucket with it",
+          (after["days"], len(after["models"]), len(after["tiers"]),
+           len(after["combos"])), (0, 0, 0, 0))
+    # The whole point of keeping ``seen``: without the raw-counter baseline
+    # the next sample would book the engine's process-lifetime counter as if
+    # it were new work -- a clear that refills itself within two seconds.
+    cleared.observe(stats.readings_for(sample_set(("m1", 1250, 5700, 95, 15))))
+    check("the next sample books only the delta past the kept baseline",
+          totals_of(cleared, "predicted_tokens"), 100)
+    check("...and not the whole lifetime counter again",
+          totals_of(cleared, "predicted_tokens") < 200, True)
+    check("the reset drops the 'since' date", after["since"], None)
+    check("...and the next sample re-stamps it",
+          cleared.payload()["since"], time.strftime("%Y-%m-%d"))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        clear_path = os.path.join(tmp, "cleared.json")
+        keeper = stats.TokenLedger(clear_path)
+        keeper.observe(stats.readings_for(sample_set(("m1", 1000, 5000, 70, 10))))
+        check("the clear flushes to disk on the spot", keeper.reset(), True)
+        reread = stats.TokenLedger(clear_path)
+        check("the reloaded file shows empty buckets",
+              (reread.payload()["days"], totals_of(reread, "predicted_tokens")),
+              (0, 0))
+        reread.observe(stats.readings_for(sample_set(("m1", 1100, 5300, 80, 12))))
+        check("and its kept baseline carries across the reload",
+              totals_of(reread, "predicted_tokens"), 300)
+
     print("persistence")
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "stats.json")

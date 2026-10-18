@@ -2462,11 +2462,52 @@ function resetRestartButton(message) {
   if (meta && message) meta.textContent = message;
 }
 
+// The token ledger outlives every server and dashboard restart, so the only
+// way to start the totals over is to ask the panel itself.  Erasing months of
+// history is unrecoverable, so the button asks twice: the first confirm says
+// exactly what goes, the second says there is no undo.  Cancelling either one
+// sends nothing.  The server clears only the buckets and keeps the raw-counter
+// baselines (TokenLedger.reset), so the next frame starts from where the
+// engines stand now instead of re-booking their whole lifetime counters.
+function initStatsReset() {
+  const button = document.getElementById('stats-reset-btn');
+  if (!button) return;
+  button.addEventListener('click', function () {
+    if (button.disabled) return;
+    if (!window.confirm('清空历史信息？今日与累计 token、模型排行、功率档归集、明细表和近 7 天汇总都会归零，并当场写回 stats.json。')) return;
+    if (!window.confirm('确认清空？历史数据会永久丢失，无法恢复。')) return;
+    button.disabled = true;
+    button.textContent = '已清空';
+    fetch('/api/stats-reset', { method: 'POST', headers: { 'X-LLM-Monitor': '1' } })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j.ok) {
+          const meta = document.getElementById('meta');
+          if (meta) meta.textContent = '历史信息已清空';
+          // Back in reach after a beat: clearing an empty ledger again is
+          // legal, just pointless for a moment.
+          setTimeout(function () { resetStatsButton(''); }, 4000);
+        } else {
+          resetStatsButton('清空被拒绝：' + (j.error === 'disabled' ? '账本未启用' : (j.error || '未知原因')));
+        }
+      })
+      .catch(function (error) { resetStatsButton('清空失败：' + error.message); });
+  });
+}
+
+function resetStatsButton(message) {
+  const button = document.getElementById('stats-reset-btn');
+  if (button) { button.disabled = false; button.textContent = '清空数据'; }
+  const meta = document.getElementById('meta');
+  if (meta && message) meta.textContent = message;
+}
+
 // ------------------------------------------------------------------------ boot
 
 async function boot() {
   initTheme();
   initRestart();
+  initStatsReset();
   document.addEventListener('pointermove', onPointerMove, { passive: true });
 
   // Delegated once: the control row rebuilds itself, so per-button listeners

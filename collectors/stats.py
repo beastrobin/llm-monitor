@@ -275,6 +275,33 @@ class TokenLedger(object):
 
     # -- folding ----------------------------------------------------------
 
+    def reset(self):
+        """Zero every bucket while keeping the raw-counter baselines.
+
+        The dashboard's clear button calls this.  Only the books are wiped:
+        ``_seen`` survives on purpose, because the ledger books deltas off
+        the last raw counter it read.  Without that baseline the very next
+        sample would see the engine's whole process-lifetime counter as new
+        work and book all of it back in -- a clear that instantly refills
+        with someone else's history.
+
+        Thread note: ``observe`` runs on the sampler thread while this runs
+        on an HTTP handler thread.  The reassignments are atomic under the
+        GIL; the worst interleaving costs one in-flight 2 s sample, which
+        is acceptable next to the alternative of locking every fold.
+        """
+        self._totals = _blank()
+        self._daily = {}
+        self._models = {}
+        self._tiers = {}
+        self._combos = {}
+        self._tier_since = ""
+        self._resets = 0
+        self._since = None       # the next observe re-stamps it
+        self._dirty = True
+        self._gen += 1
+        return self.flush(force=True)
+
     def observe(self, readings, now=None, watts=None):
         """Fold one sample's raw counters into the ledger.
 
