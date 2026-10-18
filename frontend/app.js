@@ -1002,7 +1002,7 @@ function applyModel(root, endpoint, model) {
     },
     prefill: {
       text: prefillNow, unit: 't/s', bar: prefillBar,
-    barClass: 't-b',
+      barClass: 't-b',
       foot: rateFoot(metrics.prefill_tps_avg, prefillPeak, 0),
       series: prefillSeries,
       sparkOptions: {

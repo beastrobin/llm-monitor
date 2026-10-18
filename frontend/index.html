@@ -41,7 +41,7 @@
     <div id="sys" class="grid compact"></div>
   </section>
 
-    <section class="block" data-accent="a" id="model-info">
+  <section class="block" data-accent="a" id="model-info">
     <div class="block-head">
       <h2>模型信息</h2>
       <div class="head-extra">
@@ -59,7 +59,7 @@
     </div>
     <div id="token-note" class="stat-note"></div>
 
-    <details class="collapsible"" data-tone="a">
+    <details class="collapsible" data-tone="a">
       <summary>
         <h3>模型排行 TOP 3 <span class="tip" tabindex="0" data-tip="按账本里每个模型的累计值排名。『输出最多』看累计生成的 token 总数；『输出速度』看引擎自计时口径下的平均生成速率（token ÷ 引擎解码耗时，空闲时间不计入分母），只统计有实测耗时的模型。两者都是自面板开始记账以来的累计值，server 重启不会清零。">i</span></h3>
       </summary>
@@ -69,7 +69,7 @@
       </div>
     </details>
 
-    <details id="token-tiers-section" class="collapsible"" data-tone="f">
+    <details id="token-tiers-section" class="collapsible" data-tone="f">
       <summary>
         <h3>按功率 <span class="tip" tabindex="0" data-tip="token 增量在记账的那一刻会被打上当时生效的显卡功耗上限，所以这里回答的是『这些 token 是在哪个功率档下跑出来的』。注意这是按时间归因，不是按用量分摊——功耗上限属于整张显卡，同一张卡上同时跑的几个模型都会记到同一个档位，这个数永远不代表某个模型『用掉了多少瓦』。档位归集从本功能启用那一刻开始记，更早的 token 没有记录当时的档位，所以各档之和小于累计总量；采样时读不到功耗上限（显卡采集关闭或驱动查询失败）会单独记成『档位未知』，不会被并进任何一档。">i</span></h3>
         <span class="muted" id="token-tier-summary"></span>
@@ -78,14 +78,14 @@
       <div id="token-tier-note" class="stat-note subtle"></div>
     </details>
 
-    <details class="collapsible"" data-tone="e">
+    <details class="collapsible" data-tone="e">
       <summary>
         <h3>明细 <span class="tip" tabindex="0" data-tip="逐行累计每个『某天 + 某档位 + 某模型』组合的增量。速度用的是引擎自己上报的耗时（llama.cpp 的 prompt_seconds / predicted_seconds 计数器），只在引擎真正计算时增长，所以空闲时间不会把速率摊薄——它反映的是『干活时有多快』。注意预填充速率的分子含 KV 缓存命中的 token，而缓存重读几乎不花时间，所以命中越多这个数越大；对照『KV 复用』一列看，它接近预填充量时说明大部分提示词只是重读缓存而不是真在算。某个组合的耗时计数为 0（例如模型刚加载、该 series 还没导出）时显示为 —。">i</span></h3>
       </summary>
       <div id="token-combos" class="subtable"></div>
     </details>
 
-    <details class="collapsible"" data-tone="b">
+    <details class="collapsible" data-tone="b">
       <summary>
         <h3>近 7 天汇总</h3>
       </summary>
