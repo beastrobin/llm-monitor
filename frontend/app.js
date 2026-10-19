@@ -2,6 +2,12 @@
 
 const HISTORY_LIMIT = 900;
 const THEME_KEY = 'llm-monitor-theme';
+
+// T() wraps strings that never enter the DOM (window.confirm) -- /i18n.js
+// supplies it before this file runs in index.html. The identity fallback
+// keeps confirm alive when i18n.js is absent, e.g. render_check's hand-built
+// window or a blocked script load; the language itself still shows Chinese.
+const T = (window.I18N && window.I18N.t) || function (s) { return s; };
 const PEAK_WINDOW_SEC = 1800; // 滚动峰值窗口：30分钟
 
 // The connection lamp reports the *transport*, not the watched endpoints --
@@ -308,7 +314,7 @@ function drawSpark(canvas, data, options) {
     g.textAlign = 'center';
     g.textBaseline = 'middle';
     g.fillStyle = axisColor;
-    g.fillText('暂无数据', (x0 + x1) / 2, (yTop + yBase) / 2);
+    g.fillText(T('暂无数据'), (x0 + x1) / 2, (yTop + yBase) / 2);
     return;
   }
 
@@ -2142,7 +2148,7 @@ function tokenText(value) {
 
 function tokenExact(value) {
   const n = Number(value);
-  return isFinite(n) ? Math.round(n).toLocaleString('zh-CN') + ' tok' : '暂无数据';
+  return isFinite(n) ? Math.round(n).toLocaleString('zh-CN') + ' tok' : T('暂无数据');
 }
 
 // A recorded power limit is just a number; the preset name is a frontend
@@ -2483,7 +2489,7 @@ function initRestart() {
   if (!button) return;
   button.addEventListener('click', function () {
     if (button.disabled) return;
-    if (!window.confirm('重启 monitor 进程？内存里的曲线历史会被清空，页面随后自动刷新。')) return;
+    if (!window.confirm(T('重启 monitor 进程？内存里的曲线历史会被清空，页面随后自动刷新。'))) return;
     button.disabled = true;
     button.textContent = '重启中…';
     fetch('/api/restart', { method: 'POST', headers: { 'X-LLM-Monitor': '1' } })
@@ -2528,8 +2534,8 @@ function initStatsReset() {
   if (!button) return;
   button.addEventListener('click', function () {
     if (button.disabled) return;
-    if (!window.confirm('清空历史信息？今日与累计 token、模型排行、功率档归集、明细表和近 7 天汇总都会归零，并当场写回 stats.json。')) return;
-    if (!window.confirm('确认清空？历史数据会永久丢失，无法恢复。')) return;
+    if (!window.confirm(T('清空历史信息？今日与累计 token、模型排行、功率档归集、明细表和近 7 天汇总都会归零，并当场写回 stats.json。'))) return;
+    if (!window.confirm(T('确认清空？历史数据会永久丢失，无法恢复。'))) return;
     button.disabled = true;
     button.textContent = '已清空';
     fetch('/api/stats-reset', { method: 'POST', headers: { 'X-LLM-Monitor': '1' } })

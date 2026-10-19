@@ -109,6 +109,7 @@ function readFrames(base, count, timeoutMs) {
   };
   const html = fs.readFileSync(path.join(FRONTEND, 'index.html'), 'utf8');
   const script = fs.readFileSync(path.join(FRONTEND, 'app.js'), 'utf8');
+  const i18nScript = fs.readFileSync(path.join(FRONTEND, 'i18n.js'), 'utf8');
   const vars = cssVariables(fs.readFileSync(path.join(FRONTEND, 'style.css'), 'utf8'));
 
   const dom = new JSDOM(html, {
@@ -198,6 +199,7 @@ function readFrames(base, count, timeoutMs) {
     appScript = appScript.replace(needle, '/* sabotaged for the negative control */');
   }
 
+  win.eval(i18nScript);
   win.eval(appScript + '\nwindow.renderEndpointsForTest = renderEndpoints;' +
     '\nwindow.appendPointForTest = appendPoint;');
   await new Promise(function (resolve) { setTimeout(resolve, 60); });
@@ -993,6 +995,29 @@ function readFrames(base, count, timeoutMs) {
       return s[0] + ' ' + s[1]; }).join(' -> ') : '无'));
   say('  轴标签样例: ' + paint.texts.slice(0, 12).join(' '));
 
+  // CN/EN switch (2026-10-19): #lang-btn must sit exactly between the theme
+  // and restart buttons, and one click must carry a Chinese label to English
+  // and back. Both directions matter: half a toggle that strands the page in
+  // whichever language you left it is the bug this guards.
+  const langBtn = doc.getElementById('lang-btn');
+  const brandEl = doc.querySelector('.brand h1');
+  let langOk = !!langBtn && !!brandEl;
+  if (langOk) {
+    const sibs = Array.prototype.map.call(langBtn.parentElement.children, function (e) { return e.id; });
+    langOk = sibs.indexOf('lang-btn') === sibs.indexOf('theme-btn') + 1 &&
+      sibs.indexOf('restart-btn') === sibs.indexOf('lang-btn') + 1;
+  }
+  const brandCn0 = text(brandEl);
+  if (langOk) langBtn.click();
+  const brandEn = text(brandEl);
+  if (langOk) langBtn.click();
+  const brandBack = text(brandEl);
+  langOk = langOk && brandCn0 === 'LLM 监控工作台' && brandEn === 'LLM Monitor' &&
+    brandBack === 'LLM 监控工作台';
+  say('CN/EN 切换: 按钮位置 ✓ 点击变 LLM Monitor (实得 ' + brandEn +
+    ') 再点复原 ' + (brandBack === 'LLM 监控工作台' ? '✓' : '✗ 得 ' + brandBack) +
+    (langOk ? ' — 通过 ✓' : ' — 失败 ✗'));
+
   // None of these throw: the page loads fine and just stops being useful.
   //   * a frozen card means the pushed frame never reached the numbers;
   //   * a frozen ledger is the same failure on the newest panel, and the tier
@@ -1015,7 +1040,7 @@ function readFrames(base, count, timeoutMs) {
   const code = (errors.length || !routingOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
     !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk ||
-    !verOk || !rowVerOk) ? 1 : 0;
+    !verOk || !rowVerOk || !langOk) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own

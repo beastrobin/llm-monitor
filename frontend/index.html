@@ -31,6 +31,8 @@
     <div id="power-control" class="power-control top"></div>
     <span class="muted" id="meta">正在连接…</span>
     <button id="theme-btn" type="button">深色</button>
+    <!-- 中英文切换（2026-10-19）：词典翻译层在 /i18n.js，选择存 localStorage -->
+    <button id="lang-btn" type="button">EN</button>
     <button id="restart-btn" type="button">重启</button>
   </div>
 </header>
@@ -101,6 +103,7 @@
     if (box) box.textContent = '脚本错误：' + (event.message || event.type);
   });
 </script>
+<script src="/i18n.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
