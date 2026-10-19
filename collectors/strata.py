@@ -60,12 +60,22 @@ The desktop app moves the engine (see "where the engine is" below), so
 ``config.json`` cannot name it: this module finds the address and the key that
 belong to the engine answering *now*, the same way the Hermes collector follows
 its router's ``config.yaml``.
+
+Finding the address is only half of it.  The engine answers ``/health`` to
+anyone, and that body says ``"api_key": true`` to mean the rest of the server is
+not open: ``/props``, ``/metrics`` and ``/v1/models`` need the key the app
+generated along with the port.  A card that learns the port but not the key is
+up, names the model, reports its context window and shows not one number -- the
+same blank card the dialect mistake used to produce, only with a 401 in place of
+a JSON error.  So the key is taken from the same record the address comes from,
+and a scrape that comes back unauthorised goes and asks that record for it.
 """
 
 import json
 import os
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from .llama import LlamaEndpoint, _get_json, _ratio
 
@@ -189,6 +199,27 @@ def _record_url(record):
     return "http://%s:%s" % (host, port)
 
 
+def _address(url):
+    """The ``(host, port)`` a URL dials, or None when there is no URL.
+
+    The key lookup has to compare an address the operator typed with one the app
+    wrote down, and the two spell the same server differently: ``localhost`` and
+    ``127.0.0.1``, one with ``/v1`` still on the end.  Only host and port take
+    part, because that is the whole address as far as connecting goes.
+    """
+    text = (url or "").strip()
+    if not text:
+        return None
+    parsed = urlparse(text if "//" in text else "//" + text)
+    host = (parsed.hostname or "").lower()
+    if host in ("localhost", "::1"):
+        host = "127.0.0.1"
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return host, port
+
+
 def read_instance(path):
     """What one engine record says about the engine, or None.
 
@@ -228,13 +259,49 @@ def _answers_engine(health):
     return "model" in health and "max_context" in health
 
 
-def is_engine(base_url, api_key="", timeout=PROBE_TIMEOUT):
-    """Whether this address is a Strata engine answering with this key."""
+def engine_health(base_url, api_key="", timeout=PROBE_TIMEOUT):
+    """The ``/health`` body of a Strata engine at this address, or None.
+
+    The key is sent along but is not what makes the check work: the engine
+    answers its health check to anyone, so the address can be identified before
+    its counters are unlocked.  None covers down, HTML and llama.cpp in one
+    stroke -- the caller's next move is the same for all three.
+    """
     try:
         health = _get_json(base_url + "/health", api_key, timeout)
-    except Exception:  # noqa: BLE001 - down, wrong key or HTML: none of them is an engine
-        return False
-    return _answers_engine(health)
+    except Exception:  # noqa: BLE001 - down, wrong dialect or a web page
+        return None
+    return health if _answers_engine(health) else None
+
+
+def is_engine(base_url, api_key="", timeout=PROBE_TIMEOUT):
+    """Whether this address is a Strata engine."""
+    return engine_health(base_url, api_key, timeout) is not None
+
+
+def _locks_telemetry(health):
+    """Whether this engine keeps ``/props`` and ``/metrics`` behind a key.
+
+    ``/health`` is open and reports ``"api_key": true`` to say the rest of the
+    server is not.  Without that distinction a card that found the right port
+    and none of its key would call itself healthy -- model name, context
+    window, and every rate blank.
+    """
+    return bool(health and health.get("api_key"))
+
+
+def _is_authorisation_failure(error):
+    """Whether a scrape came back refusing the key.
+
+    Matched loosely on purpose: :func:`..llama._friendly_error` turns a real 401
+    into "unauthorized -- check the API key", while a proxy or a test double can
+    word the same refusal differently.  The retry is harmless in the loose case
+    -- adopting a key from the record either opens the counters or reports the
+    same error again.
+    """
+    text = (error or "").lower()
+    return "401" in text or "unauthoriz" in text
+
 
 
 def instance_id_of_app(base_url, timeout=PROBE_TIMEOUT):
@@ -369,6 +436,44 @@ class StrataEndpoint(LlamaEndpoint):
             skip.add(key)
             yield instance, path.name
 
+    def _records_for(self, base_url):
+        """The engine records that describe this exact address, newest first.
+
+        No HTTP here, just the files the app wrote: a card that reached the
+        engine by sweep or by hand-typed address has the port and none of the
+        key the process on it was started with, and the record for that port is
+        the only place the key is written down.
+        """
+        wanted = _address(base_url)
+        if wanted is None:
+            return []
+        matches = []
+        for path in instance_files(self._instance_dir):
+            instance = read_instance(path)
+            if instance and _address(instance["base_url"]) == wanted:
+                matches.append(instance)
+        return matches
+
+    def _unlock_key(self):
+        """Adopt the key the app wrote down for the process on this address.
+
+        Returns whether the key changed.  Reached in two places only: the engine
+        identified itself and nothing was configured, or a scrape came back
+        refusing the key in hand.  A key that opens the counters is never
+        second-guessed -- nothing here asks the server whether a working key is
+        the intended one -- and an engine that locks nothing never gets here.
+        """
+        for instance in self._records_for(self.base_url):
+            key = instance.get("api_key")
+            if key and key != self.api_key:
+                self._adopt(
+                    instance, self.proxied_url,
+                    "the engine record %s carries the key for %s"
+                    % (Path(instance["path"]).name, self.base_url),
+                    True)
+                return True
+        return False
+
     def _adopt(self, instance, app_url, reason, answered):
         """Point this card at one engine record, key included.
 
@@ -392,7 +497,8 @@ class StrataEndpoint(LlamaEndpoint):
 
         Public because the dashboard logs the moment a card starts watching a
         different port, and that only works if the move happens where the
-        dashboard is looking.  Returns whether the address changed.
+        dashboard is looking.  Returns whether the card moved -- to a new address
+        or, when the address was right all along, to the key that opens it.
         """
         now = time.time()
         if not self.discover:
@@ -402,12 +508,20 @@ class StrataEndpoint(LlamaEndpoint):
         self._next_follow = now + (
             FOLLOW_SECONDS if self._engine_answered else FOLLOW_RETRY_SECONDS)
 
-        # Source 1: this address is the engine, and it answers with the key in
-        # hand.  Nothing to follow -- which is also the case for a hand-started
+        # Source 1: this address is the engine, and it answers.  Nothing to
+        # follow -- which is also the case for a hand-started
         # ``serve/server.py`` on a fixed port, the reason the app is not simply
         # assumed.
-        if is_engine(self.base_url, self.api_key):
+        health = engine_health(self.base_url, self.api_key)
+        if health is not None:
             self._engine_answered = True
+            # Right port, no key: the engine names itself to anyone and locks
+            # everything else behind the key the app minted with this port.  A
+            # hand-started server asks for nothing, so this is only reached when
+            # the engine says it locks its counters and config.json has nothing
+            # to offer.
+            if _locks_telemetry(health) and not self.api_key and self._unlock_key():
+                return True
             if not self.follow_reason:
                 self.follow_reason = "%s answers /health as a Strata engine" % (
                     self.base_url,)
@@ -444,6 +558,17 @@ class StrataEndpoint(LlamaEndpoint):
     def poll(self):
         self.follow_now()
         result = super().poll()
+        # A key that has outlived the process it belonged to is invisible to
+        # ``follow_now``: the port still answers ``/health``, so there is no move
+        # to make, and every counter the card wants says 401.  That is one file
+        # read and one retry, taken in the same sample the error would have been
+        # reported in -- the backoff would otherwise leave the card blank for up
+        # to fifteen cycles over a key sitting in a file the collector already
+        # knows how to open.
+        if (self.discover and not result["up"]
+                and _is_authorisation_failure(result.get("error"))
+                and self._unlock_key()):
+            result = super().poll()
         if self.follow_reason:
             result["follow_reason"] = self.follow_reason
         if self.proxied_url:

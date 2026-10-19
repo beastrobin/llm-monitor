@@ -379,6 +379,12 @@ app 把不认识的 URL 一律当前端路由，`/props`、`/metrics`、`/slots`
 - 卡片指向 app 时，它**代表**的是 app 那个地址（`proxied_url`）、**轮询**的却是引擎地址。看板去重
   认的是"代表"的那个，否则 Hermes 跟着 app 的 URL 时会多出一张卡，账本也会把同一批 token 记两遍
   （见「一张卡，一份账」）。
+- **key 也跟着记录走。** 引擎的 `/health` 是公开的，它回 `"api_key": true` 恰恰说明其余接口
+  （`/props`、`/metrics`、`/v1/models`）不是 —— 所以"端口找对了、key 没带上"是第三种坏法：卡片
+  `up=True`、模型名和上下文窗口都对，每一个数都是空，跟方言错那张空卡一模一样，只是报错换成 401。
+  两处补：第 1 档认出引擎时，若它说自己锁着计数器而配置里没有 key，就从同一地址的记录里读 key
+  （不额外发请求）；轮询返回 401 时再读一次记录并重试，恢复在同一帧完成，而不是让卡片空 15 个
+  周期。没有对应记录时不猜 key，卡片照实报"unauthorized"。
 
 ### 让 llamacpp-loader 也能被监控
 
@@ -596,10 +602,14 @@ column 1`，跟 key 配错长得一模一样。Hermes 把 `model.base_url` 指�
   带 `/v1` 的客户端 URL，留着就成了 `/v1/props`）。
 - **报错说人话**：拿到非 JSON 响应不再原样抛 `JSONDecodeError`，改说"answered something other than
   JSON -- a web UI or a proxy, not a model server"。
-- **测试**：`tests/test_strata_follow.py` 11 例（app→引擎、剥 `/v1`、同端口换 key、手起服务不被
-  拽走、app 认下的引擎没起来也跟随、无应答不搬家、最新且应答的记录优先、未验证的记录不许搬卡、
-  `discover:false` 一个请求都不发、节流、payload 带理由）；`test_hermes_session.py` 加一例盯住"代表
-  地址"的去重。`python -m unittest discover -s tests` 44 例全过。
+- **端口对了、key 不对，卡片不再空转**：引擎的 `/health` 公开回 `api_key: true`，其余接口才锁着 ——
+  于是"地址找对了、key 没带上"第三种坏法表现为 `up=True`、模型名与上下文窗口都对，每个数都是空。
+  第 1 档认出引擎时若配置里没有 key，直接从同一地址的记录里读（不多发请求）；轮询返回 401 时读记录
+  重试一次，同一帧恢复，而不是空 15 个周期。没有对应记录时不猜 key，照实报"unauthorized"。
+- **测试**：`tests/test_strata_follow.py` 13 例（app→引擎、剥 `/v1`、同端口换 key、引擎地址没 key
+  借 app 的 key、没有记录时不猜 key、手起服务不被拽走、app 认下的引擎没起来也跟随、无应答不搬家、
+  最新且应答的记录优先、未验证的记录不许搬卡、`discover:false` 一个请求都不发、节流、payload 带理由）；
+  `test_hermes_session.py` 加一例盯住"代表地址"的去重。`python -m unittest discover -s tests` 46 例全过。
 
 ### v1.8 — 2026-10-19
 

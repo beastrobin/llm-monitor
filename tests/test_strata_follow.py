@@ -23,6 +23,7 @@ import json
 import os
 import time
 import unittest
+import urllib.error
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -42,11 +43,12 @@ HTML = "<!doctype html><html><head><title>Strata</title></head></html>"
 class Servers(object):
     """Answers the way the app and an engine do, and records every ask.
 
-    Only the three shapes that matter here are real: a Strata engine's
-    ``/health`` (which the key has to unlock), the app's ``/v1/models`` (the one
-    JSON thing an app address answers), and HTML for anything else -- including
-    an app's ``/health``, which is why identifying the app by its health check
-    is not an option.
+    Only the shapes that matter here are real: a Strata engine's ``/health``
+    (which the engine answers to anyone, and which says ``api_key: true`` to mean
+    everything else is locked), the app's ``/v1/models`` (the one JSON thing an
+    app address answers), and HTML for anything else -- including an app's
+    ``/health``, which is why identifying the app by its health check is not an
+    option.
     """
 
     def __init__(self, engine=ENGINE, key=KEY, app=APP, instance=INSTANCE,
@@ -68,10 +70,17 @@ class Servers(object):
             if not url.startswith(base):
                 continue
             if url == base + "/health":
-                if not self.up or api_key != self.key:
-                    raise ValueError("HTTP Error 401: Unauthorized")
+                if not self.up:
+                    raise ConnectionRefusedError("refused")
                 return {"status": "ok", "service": "strata", "loaded": True,
-                        "model": "qwen3.8-flash-next", "max_context": 524288}
+                        "model": "qwen3.8-flash-next", "max_context": 524288,
+                        "api_key": True}
+            if api_key != self.key:
+                # The counters and the model list sit behind the key that came
+                # with the process; the health check above does not.  A real
+                # HTTPError, so the card's sentence is the one the dashboard
+                # shows rather than a Python type name.
+                raise urllib.error.HTTPError(url, 401, "Unauthorized", None, None)
             if url.endswith("/metrics"):
                 return {"engine": {"context": 524288}, "live": {"running": 0},
                         "totals": {}}
@@ -113,9 +122,13 @@ class FollowTests(unittest.TestCase):
         spec["instance_dir"] = str(self.dir)
         endpoint = StrataEndpoint(spec)
         if servers is not None:
-            patcher = mock.patch("collectors.strata._get_json", servers)
-            patcher.start()
-            self.addCleanup(patcher.stop)
+            # Both modules are patched: the follow logic asks through
+            # ``strata._get_json``, the scrape through ``llama._get_json``, and a
+            # test that polls needs the same server behind both.
+            for module in ("collectors.strata", "collectors.llama"):
+                patcher = mock.patch(module + "._get_json", servers)
+                patcher.start()
+                self.addCleanup(patcher.stop)
         return endpoint
 
     def write(self, name, body, age=0.0):
@@ -150,13 +163,45 @@ class FollowTests(unittest.TestCase):
 
     def test_a_key_that_no_longer_unlocks_the_port_is_replaced(self):
         # The address is the same and the process behind it is not: config.json
-        # still carries the key of the engine that owned this port last time,
-        # which fails exactly like an empty card.
+        # still carries the key of the engine that owned this port last time.
+        # Nothing about the address is wrong, so `follow_now` has no move to
+        # make -- the only sign the key is dead is the 401 on the counters.
         self.write(INSTANCE, record(18500))
-        endpoint = self.endpoint(ENGINE, api_key="0" * 64,
-                                 servers=Servers())
-        self.assertTrue(endpoint.follow_now(force=True))
+        servers = Servers()
+        endpoint = self.endpoint(ENGINE, api_key="0" * 64, servers=servers)
+        self.assertFalse(endpoint.follow_now(force=True))  # the port is right
+        result = endpoint.poll()
         self.assertEqual(endpoint.api_key, KEY)
+        self.assertTrue(result["up"], result.get("error"))
+        # And the reader is told which file the key came from.
+        self.assertIn(INSTANCE, result["follow_reason"])
+        # One health check, one failed probe, the record read off disk, and the
+        # retry -- not a sweep of every address on the machine.
+        self.assertEqual(len(servers.asked(APP + "/v1/models")), 0)
+        self.assertTrue(any(key == KEY for _, key in servers.calls))
+
+    def test_an_engine_address_with_no_key_borrows_the_app_s_one(self):
+        # The other half of the same symptom, caught before the first scrape:
+        # the health check identifies the engine and says its counters are locked,
+        # and the key lives in the record the app wrote for that process.
+        self.write(INSTANCE, record(18500))
+        servers = Servers()
+        endpoint = self.endpoint(ENGINE, servers=servers)
+        self.assertTrue(endpoint.follow_now(force=True))
+        self.assertEqual(endpoint.base_url, ENGINE)  # no move, only the key
+        self.assertEqual(endpoint.api_key, KEY)
+        self.assertEqual(len(servers.calls), 1)  # just the health check
+
+    def test_no_record_for_that_port_leaves_the_error_alone(self):
+        # A hand-started engine whose key the operator knows is not in the
+        # records.  Inventing one would cover a real mistake with a guessed one,
+        # so the card keeps saying what the server said.
+        servers = Servers()
+        endpoint = self.endpoint(ENGINE, api_key="0" * 64, servers=servers)
+        result = endpoint.poll()
+        self.assertFalse(result["up"])
+        self.assertIn("unauthorized", result["error"])
+        self.assertEqual(endpoint.api_key, "0" * 64)
 
     def test_an_engine_where_configured_is_left_alone(self):
         # A hand-started serve/server.py on a fixed port.  Following would be
@@ -233,9 +278,6 @@ class FollowTests(unittest.TestCase):
         # was reached through.
         self.write(INSTANCE, record(18500))
         servers = Servers()
-        llama = mock.patch("collectors.llama._get_json", servers)
-        llama.start()
-        self.addCleanup(llama.stop)
         endpoint = self.endpoint(servers=servers)
         result = endpoint.poll()
         self.assertEqual(result["base_url"], ENGINE)
