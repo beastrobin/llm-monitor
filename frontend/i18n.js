@@ -15,7 +15,7 @@
  * still sees the Chinese the assertions are written against.
  * ----------------------------------------------------------------------- */
 (function () {
-  var KEY = '***';
+  var KEY = 'llm-monitor-lang'; // matches app.js's llm-monitor-theme
 
   // Chinese -> English. Longest keys first at match time; keep each entry
   // exactly as it appears in source, including punctuation and spacing.
@@ -80,8 +80,12 @@
     '累计生成': 'Total · out',
     '累计预填充': 'Total · prefill',
     'decode 调用': 'decode calls',
-    '次': 'calls',
-    '自': 'since', '起': '',
+    ' 次': '',
+    // "自 <date> 起" arrives as one text node, so the date cannot be a key of
+    // its own: 自 and 起 are matched with their surrounding spaces.  Bare 自
+    // used to be translated and turned 自动 into "since动" -- do not shrink
+    // these two back to single characters.
+    '自 ': 'since ', ' 起': '',
     '尚无记录': 'no records yet',
     '覆盖': 'covers', '天': 'd',
     '账本未落盘（': 'ledger not persisted (',
@@ -98,10 +102,11 @@
     'KV 复用': 'KV reuse',
     '个档位': ' tiers',
     '档位未知': 'tier unknown',
-    '有': '', '组记录读不到功耗上限': ' tier(s) have no readable power ceiling',
+    '有 ': '', '组记录读不到功耗上限': ' tier(s) have no readable power ceiling',
+    '个': '',
     '（显卡采集被关闭或驱动查询失败），已单独计为『档位未知』。':
       ' (GPU collection off or driver query failed) -- tallied as "tier unknown".',
-    '日期': 'date', '功率档': 'tier', '模型': 'model',
+    '日期': 'date', '功率档': 'tier', '模型': 'model', '合计': 'total',
 
     /* hero & endpoints */
     '当前模型': 'Current model',
@@ -116,6 +121,22 @@
     'router 上没有任何预设处于加载状态': 'no loaded preset on the router',
     'router 没有应答': 'router not answering',
     '原因未知': 'reason unknown',
+    '未找到当前模型：': 'current model not found: ',
+    // app.js splits this explanation around <code>/<b> tags, so each run of
+    // text arrives as its own node and needs its own key.
+    'router 已把 ': 'the router lists ',
+    '）标记为已加载，但该端口还没应答 —— ': ') as loaded, but nothing answers on its port yet -- ',
+    '正在加载中，通常几秒后这里会出现实时指标。':
+      'it is still loading; live metrics show up here within seconds.',
+    '尚无明细记录。': 'no detail rows yet.',
+    '当前服务这个模型的引擎构建版本': 'build of the engine serving this model right now',
+    '当前没有已加载的模型 —— 服务在线时指标会自动出现在这里。':
+      'No model loaded yet -- metrics appear here as soon as the engine is online.',
+    // Also split around <code>: 位 on its own means "digit" and is dropped in
+    // the slot cards, so these two must carry 位置 whole or it eats a char.
+    '；已询问 ': '; asked ',
+    '；查找位置 ': '; looked for ',
+    '占已归集生成量的 ': 'of the booked generated tokens ',
     '当前模型来源切换:': 'source switched:',
 
     /* slot fold */
@@ -229,6 +250,8 @@
     '· 接近溢出': '· near overflow', '· 空闲残留': '· idle residue',
     'tok/步': 'tok/step', '草稿': 'draft', '位': '',
     'MTP 已启用 · 暂无草稿': 'MTP on · no drafts yet', 'MTP 未启用': 'MTP off',
+    '暂无草稿': 'no drafts yet',
+    'MTP 关闭': 'MTP off',
     '序列峰值': 'seq peak', '批内 slot': 'batch slots', '第': 'No.',
     '/ 上限': '/ limit', '上限': 'limit', '峰值': 'peak',
 
@@ -333,7 +356,19 @@
     '这也是「动态」两个字的来历。': ' hence the "dynamic" tag.',
     '驱动已经明确拒绝过软件设限，所以档位按钮不再提供。':
       ' The driver has refused software caps, so tier buttons are gone.',
+    '档位菜单未到，连接恢复后自动补上':
+      'tier menu not here yet; it appears once the connection recovers',
+    '此卡不接受软件功耗墙，上限由 Dynamic Boost 动态管理':
+      'This card takes no software power cap; Dynamic Boost owns the ceiling',
     '当前 X W · 上限 Y W': 'now X W · limit Y W',
+    // The tier row's "this one is active" tag is a text node of its own, so it
+    // needs a bare key; every longer string containing 当前 wins by length.
+    '当前': 'active',
+    '当前进程没有管理员权限，改不了功耗上限':
+      'This process has no admin rights, so the power cap cannot be changed',
+    ' 会被系统拒绝）。请关闭本窗口，改用 ':
+      ' (nvidia-smi -pl is rejected by the system). Close this window and relaunch via ',
+    ' 启动（双击，会弹一次 UAC 确认）。': ' (double-click; one UAC prompt).',
     '当前进程没有管理员权限，改不了功耗上限（nvidia-smi -pl 会被系统拒绝）。请关闭本窗口，改用 start_monitor_admin.vbs 启动（双击，会弹一次 UAC 确认）。':
       ' This process has no admin rights, so the power cap cannot be changed (nvidia-smi -pl is rejected). Close this window and relaunch via start_monitor_admin.vbs (double-click; one UAC prompt).',
     '当前已经是该档位': 'already on that tier',
@@ -362,6 +397,11 @@
       var k = CN_KEYS[i];
       if (cn.indexOf(k) !== -1) cn = cn.split(k).join(DICT[k]);
     }
+    // A replacement that starts with a space (" 个档位" -> " tiers") lands next
+    // to the space already in the source and leaves "3  tiers".  Two spaces
+    // never mean anything in this UI, so collapse them; no trim, because
+    // several values deliberately begin with one.
+    if (cn.indexOf('  ') !== -1) cn = cn.replace(/ {2,}/g, ' ');
     return cn;
   }
 
@@ -452,6 +492,16 @@
     busy = true;
     try {
       document.documentElement.classList.toggle('lang-en', lang === 'en');
+      walk(document.body);
+      paintButton();
+      // Canvas labels are painted, not walked, so the observer cannot reach
+      // them: a card with an empty series keeps "暂无数据" in Chinese until
+      // something rebuilds that canvas. app.js listens for this and repaints
+      // from the snapshot it already holds. That repaint writes the Chinese
+      // source back into the DOM, so the walk runs a second time -- and both
+      // the dispatch and the second walk happen with busy still set, which is
+      // what keeps the repainted text from flickering in Chinese for a beat.
+      try { window.dispatchEvent(new Event('i18n-change')); } catch (e) {}
       walk(document.body);
       paintButton();
     } finally {

@@ -1096,7 +1096,10 @@ function applyModel(root, endpoint, model) {
       },
     },
     step: {
-      text: num(stepValue, 2), unit: 'tok/步',
+      text: num(stepValue, 2),
+      // A dash is not a reading, so it carries no unit (the slot cards already
+      // follow this rule); "--tok/步" reads like a typo, not like "no drafts".
+      unit: (stepValue === null || stepValue === undefined) ? '' : 'tok/步',
       bar: (stepValue === null || stepValue === undefined) ? null : Math.min(1, stepValue / 3),
       barClass: 't-h',
       foot: draftSeen
@@ -2564,8 +2567,18 @@ function resetStatsButton(message) {
 
 // ------------------------------------------------------------------------ boot
 
+// Canvas labels are painted, so the CN/EN layer cannot translate them the way
+// it translates text nodes. i18n.js announces every language change; repaint
+// from the snapshot already in hand. Without this an empty card keeps saying
+// "暂无数据" in Chinese until its next rebuild happens to touch that canvas --
+// and the same listener is what puts the Chinese back when you switch home.
+function initLanguage() {
+  window.addEventListener('i18n-change', function () { render(); });
+}
+
 async function boot() {
   initTheme();
+  initLanguage();
   initRestart();
   initStatsReset();
   document.addEventListener('pointermove', onPointerMove, { passive: true });

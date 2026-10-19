@@ -12,8 +12,10 @@ __pycache__/
 *.pyo
 *.pyd
 .hermes/.venv/
+.pytest_cache/
 
 # Temp files
+tmp/
 *.tmp
 *_llm_monitor_*.vbs
 

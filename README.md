@@ -6,6 +6,15 @@
 本地大模型推理 + 硬件的实时监控面板。**零第三方依赖**——只用 Python 标准库，
 GPU 走 `nvidia-smi`，系统指标走 ctypes 调 Win32 API。
 
+![面板总览：深色主题](docs/screenshot.png)
+
+<details>
+<summary>浅色主题 · 英文界面（顶栏 CN/EN 切换）</summary>
+
+![面板总览：浅色主题与英文界面](docs/screenshot-en.png)
+
+</details>
+
 ## 快速开始
 
 双击桌面上的 `monitor` 快捷方式（等价于）：
@@ -386,23 +395,32 @@ llm-monitor/
 ├── monitor.py                 # HTTP 服务 + SSE 推送 + 历史环形缓冲 + 写接口
 ├── collectors/
 │   ├── llama.py               # llama.cpp 指标（router / 单模型自适应）
+│   ├── hermes_live.py         # 「当前模型」跟随：读 router 的 /v1/models 与 spawn 日志
+│   ├── hermes_session.py      # 当前会话所属 provider 的判定（决定跟随哪台）
+│   ├── strata.py              # Strata 的 JSON /metrics 方言 → 同一套 counter 名字
 │   ├── gpu.py                 # nvidia-smi 解析 + 显存归属
 │   ├── power.py               # 功耗上限读写 + 按卡推导档位菜单（服务上唯一的写操作）
 │   ├── stats.py               # token 账本：counter 折叠 + 原子落盘
 │   └── system.py              # Win32 ctypes 采集
 ├── frontend/
 │   ├── index.html
-│   ├── app.js                 # 渲染 + Canvas 迷你曲线 + 功耗档位控制
+│   ├── app.js                 # 渲染 + Canvas 迷你曲线 + 功耗档位控制（只渲染中文）
+│   ├── i18n.js                # CN/EN 切换：词典 + MutationObserver 翻译层
 │   └── style.css              # 深浅双主题
 ├── tools/
 │   ├── render_check.js         # 无浏览器的渲染烟测（见下）
 │   ├── benchmark_spark_fill.js # 曲线下方填充的可复现度量（新旧实现同口径对照，见下）
 │   ├── verify_slot_note.py     # CDP 驱动本机 Chrome + 真发流量，核验逐槽状态与它的解释
 │   ├── ledger_check.py         # token 账本的折叠规则自检（见下）
-│   └── sync_hermes_key.py      # 把 router 当前的 port / api-key 抄进 config.json
-├── config.json
+│   ├── sync_hermes_key.py      # 把 router 当前的 port / api-key 抄进 config.json
+│   └── make_icon.py            # 生成 assets/ 里的 ico（make_launcher_icons.py 是批量版）
+├── tests/                     # unittest，标准库即可跑（见下）
+├── assets/                    # 面板 / 启动器的图标
+├── docs/                      # README 用的截图
+├── config.json                # 端点与 API key（首次启动自动生成，不进仓库）
 ├── stats.json                 # token 账本数据（自动生成）
 ├── run.log                    # 启动与运行日志（自动生成；pythonw 下唯一可读的输出）
+├── package.json               # 只有 render_check 的 devDependency（jsdom）
 ├── start_monitor.vbs          # 普通启动（功耗控制只读）
 └── start_monitor_admin.vbs    # 提权启动（解锁功耗控制）
 ```
@@ -441,6 +459,18 @@ node tools/render_check.js http://127.0.0.1:8090   # 或 npm run render-check
 ```bash
 python tools/ledger_check.py
 ```
+
+### 单元测试
+
+`tests/` 用的是标准库 `unittest` —— 不需要 pytest，也不需要装任何依赖：
+
+```bash
+python -m unittest discover -s tests
+```
+
+覆盖两处"规则错了也照样出数、只是数字不对"的地方：`hermes_session.py` 的 provider 判定
+（同名的远端模型不能被接到本机 router 上）、`strata.py` 的逐槽读数与曲线键（键跟 slot id 走，
+不跟它在列表里的位置走，否则并发时曲线会串槽）。
 
 HTTP 接口：
 
@@ -492,7 +522,8 @@ HTTP 接口：
 
 ## 版本记录
 
-版本号写在 `monitor.py` 的 `VERSION`，**全仓只有这一处**，由三条路带出来：启动日志、
+版本号写在 `monitor.py` 的 `VERSION` —— 服务读的只有这一个（`package.json` 里的 `version`
+只是给它陪跑，任何地方都不展示），由三条路带出来：启动日志、
 `python monitor.py --version`、以及 `/api/snapshot` 的 `config.version`。面板页头的徽章取的
 是第三条，所以它显示的一定是**服务端**在跑的版本 —— 浏览器拿了一份旧的 `app.js` 也不会
 报出一个前端自己编的号。**改动要写进版本记录；版本号按发布批次递增 —— 未发布的改动合并进
@@ -507,6 +538,7 @@ HTTP 接口：
 - **slot 明细标题行变成活区**：累计均值 / prefill 均值 / 处理中 三个 chip 加等宽状态注记（`thinking · N tok @ X t/s`、`read prompt N tok`）挪到「slot 明细」同一行右侧，每帧重画；「N 个槽 · M 个在跑」计数句和"处理请求不记账"整句删除，solo-path 解释只留在 idle 状态位的 tooltip 里。读 prompt 的注记改用英文 `read` —— 引擎动词与 thinking/decoding chip 保持同一种语言。
 - **顶栏**：显卡功耗档位切换按钮搬进顶栏（功耗卡本体留在系统卡区）；`#meta` 预留 210px 等宽数字 —— 采样耗时的位数每帧在变，没预留时整个档位按钮组跟着左右走位（用户原话"一直左右跳"）。深浅色与重启之间新增 **CN/EN 语言开关**（版本号不动）：`i18n.js` 用 260 余条词典 + MutationObserver 直接翻译 DOM —— app.js 只渲染中文这一份真相，英文是显示态；每个节点的中文原文存进 WeakMap 快照，切回中文靠复原快照而不是反向查表，模型名、`Strata 0.1.45`、`read prompt` 这类从不进快照的英文纹丝不动。canvas 里的空态标签不归观察者管，改走 `T()` 调用点。**血泪坑**：词典最初编译成一条 266 分支的巨型正则，V8 直接 128MB 分配崩溃把渲染进程打死（jsdom 和 Chrome 同死），已改成按长度降序的 split/join 逐键替换；`walk()` 里也不许检查 busy —— apply() 自己就是那个合法写入者。选择存 localStorage，`render_check` 双向断言（位置、点击成英文、再点复原）并计入退出码；README 保持中文（用户指定）。
 - **测试**：`render_check` 新增 血条在上名数同行、标题行活区跟帧、版本标注三组断言并计入退出码；顺手修掉一个只在断言失败分支里被引用的未定义变量（`countAtBuild`）—— 它让失败变成 ReferenceError 崩溃而不是 ✗。
+- **公开前的收尾**（2026-10-19，版本号仍不动）：i18n 补掉漏译的 8 条 —— 档位行的「当前」、明细表尾的「合计」、`MTP 关闭`，以及 router 报错那句在 `<code>` 两侧被断成三段、每段都得单独给词条。更要紧的是**单字键会吃掉相邻字**：`自`→`since` 把 `自动` 变成 `since动`、`位`→`` 把 `位置` 砍成 `置`、`次`→`calls` 让 `decode 调用 … 次` 读出两个 calls —— 现在改成带空格的整词（`自 ` / ` 起` / ` 次`），替换后多出来的双空格由 `tr()` 统一压掉。**canvas 里的空态文案不归观察者管**（`暂无数据` 是画上去的，不是 DOM 文本）：语言切换时 `i18n.js` 派发 `i18n-change`，`app.js` 的 `initLanguage()` 用手上那份快照重画 —— 不这么做空卡片会一直挂着中文。localStorage 的键名此前被误伤成字面量 `***`，改回 `llm-monitor-lang`。空读数的 `— tok/步` 不再带单位。`render_check` 新增「英文模式残留中文」断言（遍历文本节点与 tooltip，唯一豁免是切换按钮自己的「中文」），并实测过它确实会变红。README 补截图（`docs/`）、目录树、单元测试跑法。
 
 ### v1.7 — 2026-10-18
 

@@ -1018,6 +1018,35 @@ function readFrames(base, count, timeoutMs) {
     ') 再点复原 ' + (brandBack === 'LLM 监控工作台' ? '✓' : '✗ 得 ' + brandBack) +
     (langOk ? ' — 通过 ✓' : ' — 失败 ✗'));
 
+  // A half-translated page is the failure mode of a dictionary layer: it reads
+  // English until one label stays Chinese. Scan English mode for CJK left in
+  // text or in a tooltip; the switch button's own «中文» is the one exception,
+  // that is what you click to come back. Single-character keys are the usual
+  // culprits (自->since turned 自动 into "since动"), and they only show up here.
+  let langLeaksOk = true;
+  if (langOk) {
+    const CJK = /[\u4e00-\u9fff]/;
+    langBtn.click();
+    const leaks = [];
+    const nodes = doc.createTreeWalker(doc.body, 4 /* NodeFilter.SHOW_TEXT */);
+    for (let n; (n = nodes.nextNode());) {
+      const parent = n.parentElement && n.parentElement.tagName;
+      if (parent === 'SCRIPT' || parent === 'STYLE') continue;
+      const value = (n.nodeValue || '').trim();
+      if (value && CJK.test(value) && value !== '中文') leaks.push(value.slice(0, 40));
+    }
+    doc.querySelectorAll('[title],[data-tip],[placeholder]').forEach(function (el) {
+      ['title', 'data-tip', 'placeholder'].forEach(function (attr) {
+        const value = el.getAttribute(attr);
+        if (value && CJK.test(value)) leaks.push('[' + attr + '] ' + value.slice(0, 40));
+      });
+    });
+    langLeaksOk = leaks.length === 0;
+    say('英文模式残留中文: ' + (langLeaksOk ? '无 ✓' : '✗ ' + leaks.slice(0, 6).join(' | ') +
+      (leaks.length > 6 ? ' …共 ' + leaks.length + ' 处' : '')));
+    langBtn.click(); // back to Chinese for the rest of the run
+  }
+
   // None of these throw: the page loads fine and just stops being useful.
   //   * a frozen card means the pushed frame never reached the numbers;
   //   * a frozen ledger is the same failure on the newest panel, and the tier
@@ -1040,7 +1069,7 @@ function readFrames(base, count, timeoutMs) {
   const code = (errors.length || !routingOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
     !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk ||
-    !verOk || !rowVerOk || !langOk) ? 1 : 0;
+    !verOk || !rowVerOk || !langOk || !langLeaksOk) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own
