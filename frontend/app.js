@@ -1587,6 +1587,9 @@ function renderEndpoints(snapshot) {
           '<span class="hero-port">' + esc(portOf(e.base_url) || '?') + '</span>' +
           modelTags(heroModel) +
           '<span data-role="hero-lamps"></span>' +
+          (e.engine_version
+            ? '<span class="engine-ver" title="当前服务这个模型的引擎构建版本">' + esc(e.engine_version) + '</span>'
+            : '') +
           '</div>'
         : '';
       // The live tracker's failure note belongs on its own source's card:
@@ -1595,9 +1598,6 @@ function renderEndpoints(snapshot) {
       return '<div class="endpoint' + (e === current ? ' is-live' : '') + '"' +
         ' data-endpoint="' + esc(e.id) + '">' +
         hero + own +
-        (e.engine_version
-          ? '<div class="engine-ver" title="当前服务这个模型的引擎构建版本">' + esc(e.engine_version) + '</div>'
-          : '') +
         '<div data-role="models" data-hero-model="' + esc(heroModel ? heroModel.id : '') + '"></div>' +
         '</div>';
     }).join('');

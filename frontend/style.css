@@ -676,13 +676,18 @@ main {
 }
 .hero-lamps { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
-/* Engine build under the hero name (Strata 0.1.45 …): own quiet line — an
-   identity, not another spec tag. Same voice in the ledger tables (.row-ver). */
+/* Engine build on the hero line (Strata 0.1.45 …): pinned to the row's right
+   edge as quiet mono text, NOT a line of its own — a stranded grey paragraph
+   under the name read as a formatting mistake (user 2026-10-19). The live
+   note stretches before it; the version never moves. Ledger rows keep their
+   own quieter echo (.row-ver). */
 .engine-ver {
-  margin-top: 4px;
+  margin-left: auto;
+  padding-left: 12px;
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 11px;
-  color: var(--muted);
+  color: var(--faint);
+  white-space: nowrap;
 }
 .row-ver {
   display: block;
