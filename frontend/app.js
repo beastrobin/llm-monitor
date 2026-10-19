@@ -1630,13 +1630,6 @@ const SYS_SPECS = [
     tip: 'GPU 核心温度。进度条按 30–90°C 换算占用比例，' +
       '75°C 转黄、83°C 转红并在脚注直接写明温度偏高。',
   }),
-  cardSpec('power', '功耗', {
-    bar: true,
-    tip: '当前功耗 ÷ 功耗上限。上限优先取软件功耗墙（nvidia-smi -pl 写进去的那个）；' +
-      '笔记本 GPU 根本不上报软件墙，那里显示的是驱动实际生效的上限，' +
-      '由 Dynamic Boost 在最大 TGP 之内动态调整，所以会在一个区间里浮动。' +
-      '接近上限说明这张卡已经在全力跑。下方就是功耗档位切换。',
-  }),
   cardSpec('cpu', 'CPU 负载', {
     bar: true,
     tip: 'GetSystemTimes 两次采样差分算出的整机 CPU 占用。' +
@@ -1653,8 +1646,17 @@ const SYS_SPECS = [
 // One merged block at the top of the page: the card's main vitals (GPU util /
 // VRAM / temp / power) plus the host's (CPU load / commit memory), with the
 // power-limit switch right underneath.  The per-section GPU and system grids
-// used to sit two blocks down and took a full screen; these six are what a
-// glance actually needs, so they lead and everything else is one scroll away.
+// used to sit two blocks down and took a full screen; these are what a
+// glance actually needs (five since the power readout moved to the top bar),
+// so they lead and everything else is one scroll away.
+// The GPU power readout lives in the top bar left of the update time since
+// 2026-10-19 (the 功耗 card left the system grid).  Its tooltip carries the
+// same reading-rule explanation the card's i used to hold, refreshed every
+// frame with the live ceiling.
+const HDR_POWER_TIP = '显卡实时功耗 ÷ 功耗上限决定读数是否转黄。上限优先取软件功耗墙' +
+  '（nvidia-smi -pl 写进去的那个）；笔记本 GPU 不上报软件墙时取驱动实际生效的上限，' +
+  '由 Dynamic Boost 在最大 TGP 内动态调整，所以会在区间里浮动。';
+
 function renderSystem(snapshot) {
   const container = document.getElementById('sys');
   if (!container) return;
@@ -1687,6 +1689,23 @@ function renderSystem(snapshot) {
   const cpuLoad = host.available ? cpu.load_pct : null;
   const commitRatio = host.available ? memory.commit_ratio : null;
   const commitTight = (commitRatio || 0) > 0.9;
+
+  // 显卡功耗读数（topbar，更新时间左边）：卡片没了，读数没丢 —— 每帧写一次，
+  // tooltip 同步当前口径与上限。没有可读显卡就整只隐藏，不留一个永远空着的胶囊。
+  const hdrPower = document.getElementById('hdr-power');
+  if (hdrPower) {
+    hdrPower.hidden = !gpu;
+    if (gpu) {
+      const watt = num(gpu.power_w, 0);
+      const wattEl = hdrPower.querySelector('.hdr-power-value');
+      wattEl.textContent = watt + ' W';
+      wattEl.classList.toggle('warn', (powerRatio || 0) > 0.95);
+      hdrPower.querySelector('.tip').setAttribute('data-tip',
+        HDR_POWER_TIP + ' 当前 ' + watt + ' W · 上限 ' +
+        (powerCeiling === null ? '—'
+          : num(powerCeiling, 0) + ' W' + (powerDynamic ? ' · 动态' : '')) + '。');
+    }
+  }
 
   paintCards(refs, {
     util: {
@@ -1722,20 +1741,6 @@ function renderSystem(snapshot) {
       sparkOptions: {
         min: 30, max: 95, color: hot ? cssVar('--bad') : cssVar('--chart-f'), autoscale: true,
         format: function (v) { return num(v, 0) + '°'; },
-      },
-    },
-    power: {
-      text: gpu ? num(gpu.power_w, 0) : '—', unit: gpu ? 'W' : '', bar: powerRatio,
-      barClass: (powerRatio || 0) > 0.95 ? 'warn' : 't-g',
-      foot: gpu
-        ? (powerCeiling !== null
-            ? '上限 ' + num(powerCeiling, 0) + ' W' + (powerDynamic ? ' · 动态' : '')
-            : '上限 — W')
-        : '显卡不可用',
-      series: seriesOf('gpu' + index + '.power'),
-      sparkOptions: {
-        min: 0, color: cssVar('--chart-g'), autoscale: true,
-        format: function (v) { return num(v, 0); },
       },
     },
     cpu: {

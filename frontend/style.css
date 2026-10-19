@@ -124,6 +124,30 @@ body {
 
 .topbar-right { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .topbar-right .muted { cursor: help; }
+/* The GPU power readout that used to be a card in the system grid (2026-10-19):
+   a pill left of the update time — label, live watts, and the readout-rule
+   i.  It rides
+   the baseline of the header text so a wattage change never nudges the row. */
+.hdr-power {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.hdr-power[hidden] { display: none; }
+.hdr-power-value {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.hdr-power-value.warn { color: var(--warn); }
 
 button {
   font: inherit;
@@ -368,6 +392,9 @@ main {
    info tooltip), so the compact cards reclaim that height too.  They stay a
    touch shorter than the mid-page cards, which use the base 58px. */
 .grid.compact .spark { height: 48px; }
+/* The 功耗 card moved to the top bar (2026-10-19), so the system block is
+   five cards wide instead of six. */
+#sys.grid.compact { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 
 .card {
   display: flex;
@@ -1194,6 +1221,9 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
   main { padding: 14px 14px 4px; gap: 16px; }
   .topbar { padding: 10px 14px; }
   .topbar-right .muted { display: none; }
+  /* Keep the watts when the header runs out of room; the label is the first
+     thing that can go. */
+  .hdr-power .hdr-power-label { display: none; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(152px, 1fr)); }
 }
 

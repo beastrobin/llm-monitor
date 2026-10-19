@@ -693,6 +693,18 @@ function readFrames(base, count, timeoutMs) {
   if (errBox) say('  端点提示: [' + (errBox.className) + '] ' + text(errBox));
 
   say('');
+  say('—— 显卡功耗读数（topbar）——');
+  // The 功耗 card left the system grid for the header pill (2026-10-19), so
+  // the wattage now has to show up there: visible with a live number when a
+  // GPU is readable, and hidden rather than frozen at — when none is.
+  const hdrPower = doc.getElementById('hdr-power');
+  const hdrWatt = hdrPower ? text(hdrPower.querySelector('.hdr-power-value')) : '';
+  const hdrOk = !!(hdrPower && !hdrPower.hidden && /\d+ W$/.test(hdrWatt) &&
+    hdrPower.compareDocumentPosition(doc.getElementById('meta')) & 4);
+  say('  ' + (hdrOk ? '通过' : '失败') + ' | 胶囊' +
+    (hdrPower ? (hdrPower.hidden ? '隐藏' : '可见 · ' + hdrWatt + '，在更新时间左侧') : '缺失'));
+
+  say('');
   say('—— 功耗控制 ——');
   const powerBox = doc.getElementById('power-control');
   if (powerBox && powerBox.innerHTML) {
@@ -954,7 +966,7 @@ function readFrames(base, count, timeoutMs) {
   // this harness was asked to chase down, so it fails the run like anything else.
   const code = (errors.length || !routingOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
-    !soloOk || !soloClearsOk || !handover.ok || !resetGateOk) ? 1 : 0;
+    !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own

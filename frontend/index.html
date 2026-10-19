@@ -26,6 +26,9 @@
     <span class="tip" tabindex="0" data-tip="推理指标来自 llama-server 的 /metrics、/slots、/props（router 模式会逐个 loaded 模型拉取）；显卡指标来自 nvidia-smi；系统指标来自 Win32 API。曲线可以悬停取值，每张卡片右侧的 i 是该项口径说明，鼠标停在采样时间上可以看各阶段耗时。">i</span>
   </div>
   <div class="topbar-right">
+    <!-- 显卡功耗读数（2026-10-19 从系统信息卡的功耗卡上移）：标签 + 实时瓦数，
+         口径说明在 i 里，随每帧采样刷新。没有可读显卡时整只隐藏。 -->
+    <span class="hdr-power" id="hdr-power" hidden><span class="hdr-power-label">显卡功耗</span><span class="tip" tabindex="0" data-tip="显卡实时功耗">i</span><b class="hdr-power-value">—</b></span>
     <span class="muted" id="meta">正在连接…</span>
     <button id="theme-btn" type="button">深色</button>
     <button id="restart-btn" type="button">重启</button>
@@ -35,7 +38,8 @@
 <main>
   <section class="block" data-accent="d">
     <div class="block-head">
-      <h2>系统信息</h2>
+      <!-- 系统信息标题取消（2026-10-19）：这块只剩六变五的体检卡和右侧档位开关，
+           标题不再需要自我说明，档位行自带「显卡功耗」标签。 -->
       <div id="power-control" class="power-control top"></div>
     </div>
     <div id="sys" class="grid compact"></div>
