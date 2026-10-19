@@ -693,16 +693,22 @@ function readFrames(base, count, timeoutMs) {
   if (errBox) say('  端点提示: [' + (errBox.className) + '] ' + text(errBox));
 
   say('');
-  say('—— 显卡功耗读数（topbar）——');
-  // The 功耗 card left the system grid for the header pill (2026-10-19), so
-  // the wattage now has to show up there: visible with a live number when a
-  // GPU is readable, and hidden rather than frozen at — when none is.
-  const hdrPower = doc.getElementById('hdr-power');
-  const hdrWatt = hdrPower ? text(hdrPower.querySelector('.hdr-power-value')) : '';
-  const hdrOk = !!(hdrPower && !hdrPower.hidden && /\d+ W$/.test(hdrWatt) &&
-    hdrPower.compareDocumentPosition(doc.getElementById('meta')) & 4);
-  say('  ' + (hdrOk ? '通过' : '失败') + ' | 胶囊' +
-    (hdrPower ? (hdrPower.hidden ? '隐藏' : '可见 · ' + hdrWatt + '，在更新时间左侧') : '缺失'));
+  say('—— 档位开关位置（topbar）——');
+  // 2026-10-19 swap: the tier SWITCH lives in the top bar left of the update
+  // time, while the 功耗 CARD (the watts) stayed in the system grid.  Both
+  // halves are asserted -- a silent half-move is exactly the regression here.
+  const tierBox = doc.getElementById('power-control');
+  const metaEl = doc.getElementById('meta');
+  const tierInBar = !!(tierBox && metaEl &&
+    tierBox.parentElement === metaEl.parentElement &&
+    tierBox.compareDocumentPosition(metaEl) & 4);
+  const tierBtns = tierBox ? tierBox.querySelectorAll('button[data-watts]').length : 0;
+  const wattsCard = doc.querySelector('#sys .card[data-card="power"] .card-value');
+  const wattsText = wattsCard ? text(wattsCard) : '';
+  const hdrOk = tierInBar && tierBtns > 0 && /\d+W$/.test(wattsText);
+  say('  ' + (hdrOk ? '通过' : '失败') + ' | 开关' +
+    (tierInBar ? '在顶栏更新时间左侧 · ' + tierBtns + ' 个档位' : '不在顶栏') +
+    ' | 功耗卡' + (/\d+W$/.test(wattsText) ? '在系统区 · ' + wattsText : '缺失或无数值[' + wattsText + ']'));
 
   say('');
   say('—— 功耗控制 ——');
