@@ -1586,10 +1586,10 @@ function renderEndpoints(snapshot) {
           '<span class="hero-name">' + esc(shortModelName(heroModel.id)) + '</span>' +
           '<span class="hero-port">' + esc(portOf(e.base_url) || '?') + '</span>' +
           modelTags(heroModel) +
-          '<span data-role="hero-lamps"></span>' +
           (e.engine_version
             ? '<span class="engine-ver" title="当前服务这个模型的引擎构建版本">' + esc(e.engine_version) + '</span>'
             : '') +
+          '<span data-role="hero-lamps"></span>' +
           '</div>'
         : '';
       // The live tracker's failure note belongs on its own source's card:

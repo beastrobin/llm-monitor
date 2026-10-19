@@ -676,14 +676,13 @@ main {
 }
 .hero-lamps { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
-/* Engine build on the hero line (Strata 0.1.45 …): pinned to the row's right
-   edge as quiet mono text, NOT a line of its own — a stranded grey paragraph
-   under the name read as a formatting mistake (user 2026-10-19). The live
-   note stretches before it; the version never moves. Ledger rows keep their
-   own quieter echo (.row-ver). */
+/* Engine build on the hero line (Strata 0.1.45 …): a quiet mono note right
+   behind the identity chips (:8200 · quant · MTP), so it reads as part of the
+   name group. It used to strand alone under the name, then ride the far edge
+   — both read wrong (user 2026-10-19). The lamps keep owning the row's right
+   end. Ledger rows echo it more faintly (.row-ver). */
 .engine-ver {
-  margin-left: auto;
-  padding-left: 12px;
+  flex: none;
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 11px;
   color: var(--faint);
