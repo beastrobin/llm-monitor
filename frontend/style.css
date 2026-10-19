@@ -450,16 +450,23 @@ main {
   gap: 8px;
   margin-top: 10px;
 }
-/* Horizontal health bar (slot cards, 2026-10-19): the track runs the full
-   card width under the value and the fill goes left to right.  Same tone
-   classes (--bar-c) as the vertical rail; the cross-rail column gradient is
-   replaced by a flat fill with a top highlight. */
-.card.bar-h { flex-direction: column; }
+/* Horizontal health bar (slot cards, 2026-10-19): the two-line slot card
+   puts the label on row 1 and the value on row 2, with the track sharing
+   that second row — it starts right after the number and runs to the card's
+   right edge.  Same tone classes (--bar-c) as the vertical rail; the
+   cross-rail column gradient is replaced by a flat fill with a top
+   highlight. */
+.card-value-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
 .card.bar-h .bar {
-  order: 2;              /* the bar rides the card's bottom edge, under the rows */
-  width: 100%;
+  flex: 1;               /* the rail takes every pixel the number leaves */
+  min-width: 20px;
+  width: auto;
   height: 6px;
-  margin-top: 8px;
   align-items: flex-start;
   justify-content: flex-start;
 }
@@ -1291,17 +1298,15 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
   border-top: 1px solid var(--border-soft);
   padding-top: 10px;
 }
-/* The slot identity line, first row inside the leading 已生成 card (the
-   standalone .slot-title row was removed 2026-10-19 to reclaim its height).
-   Every bar-h card reserves this line (empty on the other five) so the six
-   cards in a row are exactly the same height with their heads on one line;
-   min-height gives the empty placeholders the populated row's height. */
+/* The slot identity tag (slot id + engine state) rides INLINE in the label
+   row of the leading 已生成 card, before its label.  The standalone
+   .slot-title row and the reserved placeholder line both went (2026-10-19):
+   every slot card is exactly two lines — label / value + rail. */
 .card-tag {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-height: 17px;
-  margin-bottom: 3px;
+  gap: 5px;
+  flex: none;            /* the label truncates, the identity never does */
 }
 .slot-id {
   font-family: var(--font-mono, ui-monospace, monospace);
@@ -1328,9 +1333,13 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
    sit under a card that already carries the same six ideas in aggregate --
    the fold is a drill-down, not a second dashboard. */
 .slot-cards { gap: 10px; }
-.slot-cards .card { padding: 8px 11px 7px; gap: 8px; }
+.slot-cards .card { padding: 8px 11px 8px; }
 .slot-cards .card-value { font-size: 15px; }
-.slot-cards .card-head { gap: 4px; }
+/* Fixed-height label row: the tag pill on the leading card must not make
+   its head a hair taller than the other five, or the six values stop
+   sharing a baseline.  Value row sits tight under it. */
+.slot-cards .card-head { gap: 5px; align-items: center; min-height: 18px; }
+.slot-cards .card-value-row { margin-top: 3px; }
 .slot-cards .card-label { font-size: 11px; }
 
 /* ---------------------------------------------------------------- fade animation */

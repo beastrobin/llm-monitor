@@ -576,9 +576,9 @@ function cardSpec(key, label, options) {
     // 'h' = a full-width track under the value filling left-to-right.
     barDir: opts.barDir === 'h' ? 'h' : 'v',
     spark: opts.spark !== false,
-    // A card that carries a per-slot identity line (slot id + engine state)
-    // as its first row — used by the 已生成 card so a slot row needs no
-    // separate title line (2026-10-19 request).
+    // A card that carries a per-slot identity tag (slot id + engine state)
+    // INLINE in its label row — used by the 已生成 card so a slot row needs
+    // no separate title line and no reserved placeholder (2026-10-19).
     tag: !!opts.tag,
   };
 }
@@ -611,16 +611,29 @@ function buildCards(container, specs) {
     // A card with spark: false carries no canvas at all (the slot cards asked
     // for no curves on 2026-10-19); the old hidden-canvas placeholder only
     // existed so mixed spark/no-spark rows lined up, and no row does that.
-    return '<div class="card' + (spec.bar ? '' : ' no-bar') +
-      (spec.barDir === 'h' ? ' bar-h' : '') + '" data-card="' + esc(spec.key) + '">' +
+    // The horizontal-bar (slot) cards are a TWO-LINE card (2026-10-19):
+    // row 1 = slot tag + label, row 2 = value with the health bar running
+    // out to the card edge on the same line.  The rail therefore lives
+    // INSIDE the body next to the value instead of under everything, and no
+    // card reserves an empty tag placeholder any more.
+    if (spec.barDir === 'h') {
+      return '<div class="card' + (spec.bar ? '' : ' no-bar') + ' bar-h" data-card="' + esc(spec.key) + '">' +
+        '<div class="card-body">' +
+        '<div class="card-head">' +
+          (spec.tag ? '<span class="card-tag" data-role="tag"></span>' : '') +
+          '<span class="card-label">' + esc(spec.label) + '</span>' +
+          (spec.tip ? '<span class="tip" tabindex="0" data-tip="' + esc(spec.tip) + '">i</span>' : '') +
+        '</div>' +
+        '<div class="card-value-row">' +
+          '<span class="card-value" data-role="value">—</span>' +
+          '<div class="bar" data-role="bar"><i data-role="fill"></i></div>' +
+        '</div>' +
+        '<div class="card-foot" data-role="foot"></div>' +
+        '</div></div>';
+    }
+    return '<div class="card' + (spec.bar ? '' : ' no-bar') + '" data-card="' + esc(spec.key) + '">' +
       '<div class="bar" data-role="bar"><i data-role="fill"></i></div>' +
       '<div class="card-body">' +
-      // Every horizontal-bar card reserves the tag line, not just the tagged
-      // one: a populated row on card 1 and no placeholder on the other five
-      // made the first card a line taller than its neighbours.
-      ((spec.tag || spec.barDir === 'h')
-        ? '<div class="card-tag"' + (spec.tag ? ' data-role="tag"' : '') + '></div>'
-        : '') +
         '<div class="card-head">' +
           '<span class="card-label">' + esc(spec.label) + '</span>' +
           (spec.tip ? '<span class="tip" tabindex="0" data-tip="' + esc(spec.tip) + '">i</span>' : '') +
@@ -1228,8 +1241,8 @@ function renderSlotDetail(host, model, base) {
     const refs = ensureCards(cardsHost, SLOT_SPECS);
     if (!refs) return;
     paintCards(refs, slotCardValues(slot, base, id));
-    // The row's identity line: slot id + engine state, first row INSIDE the
-    // leading 已生成 card (the old standalone title line ate a row per slot).
+    // The row's identity: slot id + engine state, inline in the label row of
+    // the leading 已生成 card (title line and placeholder both retired).
     const tagRef = refs.get('decoded');
     const tagEl = tagRef && tagRef.tag;
     if (tagEl) {
