@@ -468,6 +468,11 @@ class LlamaEndpoint(object):
 
         result["up"] = True
         result["mode"] = probe["mode"]
+        # The engine's build banner (/props build_info, e.g. "Strata 0.1.45"),
+        # lifted from the probe's props body -- no extra HTTP round-trip.  The
+        # panel prints it under the hero name and under every ledger model
+        # name so a number can be traced to the engine build that produced it.
+        result["engine_version"] = (probe.get("props") or {}).get("build_info")
 
         try:
             known = self.list_models()

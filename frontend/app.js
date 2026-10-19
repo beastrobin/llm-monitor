@@ -619,14 +619,14 @@ function buildCards(container, specs) {
     if (spec.barDir === 'h') {
       return '<div class="card' + (spec.bar ? '' : ' no-bar') + ' bar-h" data-card="' + esc(spec.key) + '">' +
         '<div class="card-body">' +
-        '<div class="card-head">' +
+        '<div class="card-rail-row">' +
           (spec.tag ? '<span class="card-tag" data-role="tag"></span>' : '') +
+          '<div class="bar" data-role="bar"><i data-role="fill"></i></div>' +
+        '</div>' +
+        '<div class="card-meta-row">' +
           '<span class="card-label">' + esc(spec.label) + '</span>' +
           (spec.tip ? '<span class="tip" tabindex="0" data-tip="' + esc(spec.tip) + '">i</span>' : '') +
-        '</div>' +
-        '<div class="card-value-row">' +
           '<span class="card-value" data-role="value">—</span>' +
-          '<div class="bar" data-role="bar"><i data-role="fill"></i></div>' +
         '</div>' +
         '<div class="card-foot" data-role="foot"></div>' +
         '</div></div>';
@@ -793,9 +793,11 @@ function stateNoteText(model) {
   const live = model && model.live_state;
   if (!live || !live.state) return '';
   if (live.state === 'reading') {
+    // Engine vocabulary stays English on purpose (thinking/decoding/read):
+    // these notes sit right beside the engine's own chips (2026-10-19).
     return live.prompt_total
-      ? '读 ' + countText(live.prompt_read) + '/' + countText(live.prompt_total) + ' tok'
-      : '读 prompt ' + countText(live.prompt_tokens) + ' tok';
+      ? 'read ' + countText(live.prompt_read) + '/' + countText(live.prompt_total) + ' tok'
+      : 'read prompt ' + countText(live.prompt_tokens) + ' tok';
   }
   if (live.state === 'generating') {
     return (live.phase || '生成中') + ' · ' + countText(live.generated) + ' tok' +
@@ -838,6 +840,17 @@ function shortModelName(id) {
 // per-endpoint colour (strata blue, hermes green, loader amber) so a glance
 // at a column of names says which server produced the tokens without reading
 // each prefix.  Unknown sources stay neutral.
+// Ledger tables carry the engine build that produced each row's numbers: a
+// speed or hit-rate only means something next to the version that achieved it
+// (2026-10-19 request).  renderEndpoints refreshes this map from every online
+// endpoint's /props banner; names stay clean when a source reports nothing.
+var S_VERSIONS = {};
+function rowVerHtml(row) {
+  const key = String(row.endpoint || '').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+  const v = S_VERSIONS[key];
+  return v ? '<span class="row-ver">' + esc(v) + '</span>' : '';
+}
+
 function sourceName(row) {
   if (!row.endpoint) return esc(shortModelName(row.model));
   const key = String(row.endpoint).toLowerCase().replace(/[^a-z0-9_-]/g, '-');
@@ -1490,6 +1503,13 @@ function renderEndpoints(snapshot) {
     list.forEach(function (e) {
       if (e.error && !out.error) out.error = e.error;
     });
+    // The engine build banner rides the merged record too: any member may be
+    // the one whose /props answered (the router probes itself), so the first
+    // non-empty one wins — dropping it here silenced every version annotation
+    // while the raw payload still carried it (caught by render_check).
+    list.forEach(function (e) {
+      if (e.engine_version && !out.engine_version) out.engine_version = e.engine_version;
+    });
     list.forEach(function (e) {
       (e.models || []).forEach(function (m) {
         // Avoid duplicate models by id across endpoints
@@ -1534,6 +1554,14 @@ function renderEndpoints(snapshot) {
   // the model card below.  Online servers only (user request 2026-10-19):
   // offline chips were pure noise -- the card area below already says when
   // nothing is serving.
+  // Engine-build map for the ledger tables (see rowVerHtml). Endpoints that
+  // share an id are already deduped here; last online writer wins, which is
+  // the same rule the merged card uses.
+  S_VERSIONS = {};
+  deduped.forEach(function (e) {
+    if (e.up && e.engine_version) S_VERSIONS[String(e.id).toLowerCase()] = e.engine_version;
+  });
+
   const sourcesBox = document.getElementById('endpoint-sources');
   if (sourcesBox) {
     const online = deduped.filter(function (e) { return e.up; });
@@ -1567,6 +1595,9 @@ function renderEndpoints(snapshot) {
       return '<div class="endpoint' + (e === current ? ' is-live' : '') + '"' +
         ' data-endpoint="' + esc(e.id) + '">' +
         hero + own +
+        (e.engine_version
+          ? '<div class="engine-ver" title="当前服务这个模型的引擎构建版本">' + esc(e.engine_version) + '</div>'
+          : '') +
         '<div data-role="models" data-hero-model="' + esc(heroModel ? heroModel.id : '') + '"></div>' +
         '</div>';
     }).join('');
@@ -2245,7 +2276,7 @@ function renderTokenStats(snapshot) {
       title + '</th></tr></thead><tbody>' +
       rows.map(function (row, i) {
         return '<tr><td class="num rank-no">' + (i + 1) + '</td>' +
-          '<td>' + sourceName(row) + '</td>' +
+          '<td>' + sourceName(row) + rowVerHtml(row) + '</td>' +
           '<td class="num" title="' + esc(metricLabel) + '">' + display(row) + '</td></tr>';
       }).join('') + '</tbody></table>';
   };
@@ -2345,7 +2376,7 @@ function renderTokenStats(snapshot) {
           '<td><span class="tier-chip' + tierChipClass(row.watts) +
             (isNow ? ' now' : '') + '">' + esc(wattsLabel(row.watts)) +
             '</span></td>' +
-          '<td>' + sourceName(row) + '</td>' +
+          '<td>' + sourceName(row) + rowVerHtml(row) + '</td>' +
           '<td class="num" title="' + esc(tokenExact(row.predicted_tokens)) + '">' +
             tokenText(row.predicted_tokens) + '</td>' +
           '<td class="num" title="' + esc(tokenExact(row.prompt_tokens)) + '">' +

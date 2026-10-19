@@ -124,6 +124,19 @@ body {
 
 .topbar-right { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .topbar-right .muted { cursor: help; }
+/* Fixed reservation for the timestamp strip (user report 2026-10-19): the
+   sampling time changes digit count on nearly every frame ("采样 5 ms" ↔
+   "采样 143 ms"), and an unreserved #meta grew and shrank at the right edge,
+   visibly walking the power-tier buttons left and right on each refresh.
+   The width is held constant; text keeps its own right-aligned rhythm with
+   tabular digits so equal strings always render equal widths. */
+#meta {
+  flex: none;
+  min-width: 210px;
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 /* The power-limit switch lives here since 2026-10-19, left of the update
    time.  The header is one line tall, so the switch row drops its panel
    skin (the header already reads as a bar) and hugs its buttons. */
@@ -459,23 +472,29 @@ main {
   gap: 8px;
   margin-top: 10px;
 }
-/* Horizontal health bar (slot cards, 2026-10-19): the two-line slot card
-   puts the label on row 1 and the value on row 2, with the track sharing
-   that second row — it starts right after the number and runs to the card's
-   right edge.  Same tone classes (--bar-c) as the vertical rail; the
-   cross-rail column gradient is replaced by a flat fill with a top
-   highlight. */
-.card-value-row {
+/* Horizontal health bar (slot cards): since 2026-10-19 evening the two-line
+   slot card is rail-FIRST — row 1 = the track running the full card width
+   (with the slot identity tag ahead of it on the leading card), row 2 = the
+   metric name left and its number pinned right on the SAME line.  Same tone
+   classes (--bar-c) as the vertical rail; the cross-rail column gradient is
+   replaced by a flat fill with a top highlight. */
+.card-rail-row {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
 }
+.card-meta-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.card.bar-h .card-value { margin-left: auto; text-align: right; white-space: nowrap; }
 .card.bar-h .bar {
-  flex: 1;               /* the rail takes every pixel the number leaves */
+  flex: 1;               /* the rail spans every pixel its chips leave */
   min-width: 20px;
-  width: auto;
-  height: 6px;
+  height: 5px;
   align-items: flex-start;
   justify-content: flex-start;
 }
@@ -656,6 +675,23 @@ main {
   flex-wrap: wrap;
 }
 .hero-lamps { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* Engine build under the hero name (Strata 0.1.45 …): own quiet line — an
+   identity, not another spec tag. Same voice in the ledger tables (.row-ver). */
+.engine-ver {
+  margin-top: 4px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--muted);
+}
+.row-ver {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  color: var(--faint);
+  white-space: nowrap;
+}
 .state-lamp {
   display: inline-flex;
   align-items: center;
@@ -1361,11 +1397,11 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
 .slot-cards { gap: 10px; }
 .slot-cards .card { padding: 8px 11px 8px; }
 .slot-cards .card-value { font-size: 15px; }
-/* Fixed-height label row: the tag pill on the leading card must not make
-   its head a hair taller than the other five, or the six values stop
-   sharing a baseline.  Value row sits tight under it. */
-.slot-cards .card-head { gap: 5px; align-items: center; min-height: 18px; }
-.slot-cards .card-value-row { margin-top: 3px; }
+/* Fixed-height rail row: the tag pill on the leading card must not make its
+   first line a hair taller than the other five, or the six labels/values
+   stop sharing their baseline on row 2.  Value line sits tight under it. */
+.slot-cards .card-rail-row { gap: 5px; min-height: 18px; }
+.slot-cards .card-meta-row { margin-top: 3px; }
 .slot-cards .card-label { font-size: 11px; }
 
 /* ---------------------------------------------------------------- fade animation */

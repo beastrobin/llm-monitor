@@ -365,6 +365,22 @@ function readFrames(base, count, timeoutMs) {
       card.className.indexOf('bar-h') >= 0 &&
       !card.querySelector('canvas.spark');
   });
+  // Rail-FIRST anatomy (user rework 2026-10-19 evening): row 1 is the health
+  // bar (identity chip ahead of it on the leading card); row 2 packs name and
+  // number together -- label left, value pinned right.  If .card-value ever
+  // moves back onto the rail row this fails even though a glance still fits.
+  const twoLineOk = busyRow && SLOT_KEYS.every(function (key) {
+    const card = slotCard(busyRow, key);
+    if (!card) return false;
+    const rail = card.querySelector('.card-rail-row');
+    const meta = card.querySelector('.card-meta-row');
+    return !!rail && !!meta &&
+      !!rail.querySelector('.bar > i') &&
+      !rail.querySelector('.card-value') &&
+      !!meta.querySelector('.card-label') && !!meta.querySelector('.card-value') &&
+      // DOCUMENT_POSITION_FOLLOWING: the rail must come first in the DOM too.
+      !!(rail.compareDocumentPosition(meta) & 4);
+  });
   const busyOk = busyRow &&
     slotValue(busyRow, 'ctx') === '37,869tok' &&
     slotValue(busyRow, 'decoded') === '1,900tok' &&
@@ -421,7 +437,7 @@ function readFrames(base, count, timeoutMs) {
     liveStrip().indexOf('处理中1请求') >= 0;
 
   const slotOk = foldOpen && labelsOk && slotIdOk && tagInside && noTitleRow &&
-    anatomyOk && busyOk && readOk &&
+    anatomyOk && twoLineOk && busyOk && readOk &&
     idleOk && idleRailEmpty && tinyRailVisible && ratioRailSane && curvelessOk &&
     liveFollowsFrame && errors.length === slotErrorsBefore;
   say('slot 明细: ' + (slotOk ? '通过' : '失败') +
@@ -432,6 +448,7 @@ function readFrames(base, count, timeoutMs) {
     ' | 身份卡首 ' + (tagInside ? '✓' : '✗') +
     ' | 无小标题行 ' + (noTitleRow ? '✓' : '✗') +
     ' | 结构 ' + (anatomyOk ? '✓' : '✗') +
+    ' | 血条在上名数同行 ' + (twoLineOk ? '✓' : '✗') +
     ' | 忙碌槽 ' + (busyOk ? '✓' : '✗') +
     ' | 读入槽 prefill ' + (readOk ? '✓' : '✗') +
     ' | 空闲槽 "—" ' + (idleOk ? '✓' : '✗') +
@@ -678,6 +695,31 @@ function readFrames(base, count, timeoutMs) {
       ' :' + text(hero.querySelector('.hero-port')) +
       ' | 标签: ' + Array.prototype.map.call(hero.querySelectorAll('.tag'), text).join(' / '));
   }
+  // Engine build annotations (2026-10-19 request): the live hero carries a
+  // quiet line under the name ("Strata 0.1.45"), and every ledger row whose
+  // source reports a build repeats it under the model name.  What is asserted
+  // is agreement between payload and page in BOTH directions: no banner may
+  // be invented for a source that does not report one, and a source that does
+  // report one must not render silent.
+  const verLine = doc.querySelector('.endpoint .engine-ver');
+  const epsVer = (payload.snapshot.endpoints || []).filter(function (e) {
+    return e.up && e.engine_version;
+  });
+  const verOk = (!!epsVer.length === !!verLine) &&
+    (!epsVer.length || text(verLine).length > 3);
+  say('引擎版本标注: ' + (verOk ? '通过' : '失败') +
+    ' | hero「' + (text(verLine) || '（无）') + '」' +
+    ' | 带版本的源 ' + (epsVer.map(function (e) {
+      return e.id + '@' + e.engine_version;
+    }).join(', ') || '（无）'));
+  const comboStrataRows = Array.prototype.filter.call(
+    doc.querySelectorAll('#token-combos tbody tr'),
+    function (tr) { return !!tr.querySelector('.src-strata'); });
+  const rowVerOk = !(epsVer.length && comboStrataRows.length) ||
+    comboStrataRows.every(function (tr) { return !!tr.querySelector('.row-ver'); });
+  say('账本行版本小字: ' + (rowVerOk ? '通过' : '失败') +
+    ' | 明细 strata 行 ' + comboStrataRows.length +
+    ' | 带小字 ' + doc.querySelectorAll('#token-combos tbody .row-ver').length);
   doc.querySelectorAll('.model').forEach(function (model) {
     const id = model.querySelector('.id');
     if (!id) return; // the hero model renders without a repeated title row
@@ -972,7 +1014,8 @@ function readFrames(base, count, timeoutMs) {
   // this harness was asked to chase down, so it fails the run like anything else.
   const code = (errors.length || !routingOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
-    !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk) ? 1 : 0;
+    !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk ||
+    !verOk || !rowVerOk) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own
