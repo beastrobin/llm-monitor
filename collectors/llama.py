@@ -103,6 +103,13 @@ def _friendly_error(exc):
         if exc.code == 400:
             return "bad request -- the endpoint likely needs a model parameter"
         return "HTTP %s %s" % (exc.code, exc.reason)
+    if isinstance(exc, json.JSONDecodeError):
+        # The address answered and handed back something that is not a body:
+        # a server with a web UI of its own answers an unknown path with that
+        # page, and a proxy in front of an engine does the same.  Naming the
+        # port as an API failure would send the reader looking for a wrong key.
+        return ("answered something other than JSON -- a web UI or a proxy, "
+                "not a model server")
     text = str(exc).lower()
     if "10061" in text or "refused" in text:
         return "connection refused -- is the server running?"
@@ -252,20 +259,29 @@ class LlamaEndpoint(object):
         self._models_cache = (0.0, [])
         self._props_cache = {}
 
-    def set_base_url(self, base_url):
-        """Move this endpoint to a new address, e.g. a router that changed port.
+    def set_base_url(self, base_url, api_key=None):
+        """Move this endpoint to a new address, and to a new key if it has one.
 
         Everything cached here describes the instance that answered the old
         address, so all of it is dropped: the preset list and the props bodies
         belong to a process that is gone, and the failure counter would carry a
         backoff into the new address -- keeping it unpolled for up to fifteen
         cycles over a move that was never its fault.  Returns whether the
-        address actually changed.
+        address or the key actually changed.
+
+        The key takes part in the comparison because a Strata server generates a
+        fresh one every time a model is loaded: the same port answering a
+        different key is a different process, whose model list, ``/props`` body
+        and counters all start over.  Comparing the address alone would keep
+        polling it with the dead process's key, which reads on screen exactly
+        like a server that has no model -- ``up=True`` and an unauthorised card.
         """
         base_url = (base_url or "").rstrip("/")
-        if base_url == self.base_url:
+        api_key = self.api_key if api_key is None else (api_key or "").strip()
+        if base_url == self.base_url and api_key == self.api_key:
             return False
         self.base_url = base_url
+        self.api_key = api_key
         self._samplers = {}
         self._models_cache = (0.0, [])
         self._props_cache = {}

@@ -1,6 +1,6 @@
 {
   "name": "llm-monitor",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "private": true,
   "description": "Local GPU/LLM dashboard. Node is only needed for tools/render_check.js (jsdom); the app itself is stdlib Python.",
   "scripts": {

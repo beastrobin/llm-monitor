@@ -149,6 +149,44 @@ class HermesSessionTests(unittest.TestCase):
             self.assertEqual(hub.snapshot()['current_endpoint_id'], 'hermes')
             self.assertEqual(hub.hermes_endpoint.base_url, 'http://localhost:18434')
 
+    def test_a_card_covering_an_app_address_covers_it_without_polling_it(self):
+        """Hermes names the Strata app; the Strata card polls its engine.
+
+        The address on the card and the address being asked are then different
+        things, and dedup has to go by the address the card *represents*.
+        Comparing polled addresses alone would show one machine twice and book
+        its tokens twice in the ledger.
+        """
+        self.session({'base_url': 'http://localhost:47831/v1'})
+        config = copy.deepcopy(monitor.DEFAULT_CONFIG)
+        config['live']['enabled'] = False
+        config['stats']['enabled'] = False
+        config['gpu']['enabled'] = False
+        config['system']['enabled'] = False
+        config['endpoints'] += [
+            {'id': 'strata', 'kind': 'strata', 'base_url': 'http://127.0.0.1:47831'},
+        ]
+        with patch.object(monitor, 'hermes_config_candidates', return_value=[self.config]):
+            hub = monitor.Hub(config)
+            self.addCleanup(hub._pool.shutdown)
+            strata = next(ep for ep in hub.endpoints if ep.id == 'strata')
+            self.assertEqual([ep.id for ep in hub._active_endpoints()], ['strata'])
+            # Now the card follows the engine behind that address: the address
+            # it asks and the address Hermes names no longer match, and without
+            # the address it represents the hermes card would come back -- one
+            # machine on screen twice, and its tokens booked twice.
+            strata.base_url = 'http://127.0.0.1:18500'
+            strata.proxied_url = 'http://127.0.0.1:47831'
+            self.assertEqual([ep.id for ep in hub._active_endpoints()], ['strata'])
+            self.assertEqual(hub.router_covered_by, 'strata')
+            # A different model behind a different app, and the hermes card has
+            # nothing left to yield to: two servers, two cards.
+            self.session({'base_url': 'http://localhost:18434/v1'}, activity=30)
+            hub._refresh_router(force=True)
+            self.assertEqual([ep.id for ep in hub._active_endpoints()],
+                             ['hermes', 'strata'])
+            self.assertEqual(hub.router_covered_by, '')
+
 
 if __name__ == '__main__':
     unittest.main()

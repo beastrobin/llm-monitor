@@ -1,6 +1,6 @@
 # LLM 监控工作台
 
-**当前版本 v1.8** —— 查版本：`python monitor.py --version`，或看面板标题旁的小徽章
+**当前版本 v1.9** —— 查版本：`python monitor.py --version`，或看面板标题旁的小徽章
 （它读的是服务端下发的值，不是页面里写死的）。改动历史见[版本记录](#版本记录)。
 
 本地大模型推理 + 硬件的实时监控面板。**零第三方依赖**——只用 Python 标准库，
@@ -315,8 +315,11 @@ python tools/sync_hermes_key.py --check  # 只报告差异，不动文件
   llama.cpp 但不是"的服务照样会猜错。写错的 `kind` 会在启动日志里点出来并退回 `llama`。
 
 ```json
-{ "id": "strata", "label": "Strata", "kind": "strata", "base_url": "http://127.0.0.1:8200" }
+{ "id": "strata", "label": "Strata", "kind": "strata", "base_url": "http://127.0.0.1:47831/v1" }
 ```
+
+（写 app 给自己的那个客户端 URL 就行，见下一节；采集器要的是服务根地址，尾巴上的
+`/v1` 会被吃掉。）
 
 - 服务未启动的端点不会拖慢采样，只是显示为离线。
 - `stats.enabled` 设成 `false` 就关掉 token 账本（既不读也不写）；`stats.path` 的相对路径按项目
@@ -342,6 +345,40 @@ grep -- "--api-key" "D:/AI/hermes/logs/llama-server.log" | tail -1
 这行同时给出 `--port` 和 `--api-key`。同步这件事已由 `tools/sync_hermes_key.py` 自动完成，
 上面这行只在排查时用得上。注意**端口跟着 `config.yaml`、密钥跟着日志**：拿它手工对配置时别把
 两者混在一起用。
+
+### 让面板跟上 Strata 桌面版的端口和密钥
+
+Strata 桌面版**不是引擎**：它是一个"网页 UI + OpenAI 兼容代理"，真正跑模型的是它自己拉起来的
+`serve/server.py` 子进程，而且**每加载一次模型就换一个新端口、配一把新 api-key**。地址写死成
+上一次那个，面板就只有两种坏法：端口空着（`connection refused`），或者端口被那个 app 占着 ——
+app 把不认识的 URL 一律当前端路由，`/props`、`/metrics`、`/slots` 全回一段 HTML，于是报错长成
+`Expecting value: line 1 column 1`，看着完全像 key 配错了。
+
+所以 `kind: strata` 的端点自己去找引擎，按三档来：
+
+1. **配的地址本身就是引擎**（`/health` 回 `service: strata`）。手起的 `serve/server.py` 走这档：
+   配置说了算，绝不被机器上另一份记录拽走。
+2. **配的地址是 app**：问它 `/v1/models`（app 唯一会正经回 JSON 的那个接口），用响应里的
+   `meta.instanceId` 去开 `%USERPROFILE%\.strata\data\native-instances\<id>.json` —— 那份文件正是
+   app 自己交给 `serve.server --config` 的启动记录，`host` / `port` / `api_key` 与启动参数都在里面。
+   app 说哪个引擎在服务就跟着哪个，**哪怕它还在加载模型**（卡片老实写"还没应答"），不去抢旁边那台
+   活着但无关的进程。
+3. **连 app 的地址都过期了**（app 重启过、`config.json` 没跟上）：取**最新且 `/health` 应答**的记录，
+   最多试 3 份（每份一次健康检查，Windows 上打空一个死端口要两秒）。一档都没应答就原地不动，
+   保留原地址报它真实的错误 —— 比报一个"背后什么都没有"的端口更诚实。
+
+于是 `config.json` 里这条端点写 app 给用户的那个 URL 最省事，端口漂移由采集器负责：
+
+- 跟到了哪台引擎、凭什么跟，随采样帧带在 `follow_reason` 字段里（页面暂未渲染）；换端口会在
+  `run.log` 落一行 `strata moved: <旧> -> <新> (<理由>)`，与 `hermes router moved:` 对称。
+- 频率：引擎在线时每 15 秒复查一次，查不到时每 5 秒一次。每次最多三个请求，不会拖垮采样周期。
+- `"discover": false` 关掉整套（引擎在别的机器上、或这个进程读不到那个目录）；`"instance_dir"`
+  指定别处的记录目录，环境变量 `STRATA_INSTANCE_DIR` 同义且优先。
+- 读的是**运行面板的这个用户自己的** `~\.strata` —— 那本来就是 app 存自己密钥的地方，不是从别人
+  机器上抄 key。配置里的 `api_key` / `api_key_env` 只在第 1 档还有意义。
+- 卡片指向 app 时，它**代表**的是 app 那个地址（`proxied_url`）、**轮询**的却是引擎地址。看板去重
+  认的是"代表"的那个，否则 Hermes 跟着 app 的 URL 时会多出一张卡，账本也会把同一批 token 记两遍
+  （见「一张卡，一份账」）。
 
 ### 让 llamacpp-loader 也能被监控
 
@@ -492,6 +529,10 @@ HTTP 接口：
   `N/A`。这里只保留有数据的行和推理进程，避免被一堆桌面进程刷屏。
 - CPU 为总负载，不是每核负载（每核利用率需要 PDH 性能计数器，尚未接入）；每核频率是可用的。
 - 网络吞吐尚未采集。
+- **Strata 卡片能跟着引擎跑，但只认它自己那台 app。** 第 3 档兜底（app 的 URL 也过期）靠的是记录目录
+  里"最新且应答"的那份，它答不出 app 现在的新地址；此时 Hermes 若正跟着那个新地址，会多出一张
+  跟随卡报"answered something other than JSON"。把手上这张卡的 `base_url` 改成 app 的新地址（或干脆
+  改成引擎地址）即可，`run.log` 里 `strata moved:` 那行就写着该填哪个。
 - **曲线是手写 canvas，不是图表库**：900 个采样点会先按约 2px 一列分桶并保留每列的极值，
   画成"曲线 + 曲线下方渐变填充 + 包络线"。直接逐点连线在 200px 宽的卡片里会糊成毛线，
   而且尖峰会被磨平。
@@ -528,6 +569,37 @@ HTTP 接口：
 是第三条，所以它显示的一定是**服务端**在跑的版本 —— 浏览器拿了一份旧的 `app.js` 也不会
 报出一个前端自己编的号。**改动要写进版本记录；版本号按发布批次递增 —— 未发布的改动合并进
 同一个版本条目，不逐笔跳号**（页头徽章靠它区分"改过了没有"）。
+
+### v1.9 — 2026-10-20
+
+**Strata 桌面版换了端口和密钥，面板自己跟上去。** 桌面版 app 不是引擎：模型跑在它临时拉起的
+`serve/server.py` 里，端口和 api-key **每次加载模型都重新生成**。地址写死的后果有两种，而且都读成
+"识别不到模型"：端口空着 → `connection refused`；端口被 app 占着 → `/props`、`/metrics`、`/slots`
+一律回前端那段 HTML（app 把未知路径当路由），报错变成 `JSONDecodeError: Expecting value: line 1
+column 1`，跟 key 配错长得一模一样。Hermes 把 `model.base_url` 指向 app 之后，跟随卡与 `strata` 卡
+同时空掉。
+
+- **`collectors/strata.py` 会自己找引擎**，三档：① 当前地址 `/health` 就报 `service: strata`（手起
+  的固定端口服务走这档，配置优先，绝不被机器上别的记录拽走）；② 当前地址是 app —— 它的
+  `/v1/models` 会回 JSON，`meta.instanceId` 正是 app 写下的引擎记录文件名，从
+  `~\.strata\data\native-instances\<id>.json` 读 `host` / `port` / `api_key`（那份文件就是
+  `serve.server --config` 吃进去的那份）；③ app 的地址也过期时，试最新且 `/health` 应答的记录，
+  上限 3 份。app 认下的引擎**即使还在加载也跟着**（卡片写"还没应答"），避免隔壁那台活着的进程把
+  数字顶上来；一档都不应答则原地不动，报原地址的真实错误。详见「让面板跟上 Strata 桌面版的端口和
+  密钥」。
+- **跟丢与被顶掉都不再静默**：`follow_reason` 随帧下发，换端口在 `run.log` 落
+  `strata moved: <旧> -> <新> (<理由>)`，与 `hermes router moved:` 对称；复查节流 15 s（查不到时
+  5 s），每轮最多加三个请求。`"discover": false` / `"instance_dir"` / `STRATA_INSTANCE_DIR` 留出口。
+- **一张卡可以"代表"它不轮询的地址**：卡片 `base_url` 是引擎、`proxied_url` 是 app，去重按代表的那个
+  算（`watched_addresses()` / `covers_address()`）。此前按轮询地址比较，Hermes 跟着 app 时会多出
+  一张跟随卡，账本把同一批 token 记第二遍。顺手：`/v1` 尾巴在构造时就被剥掉（app 让用户粘的就是
+  带 `/v1` 的客户端 URL，留着就成了 `/v1/props`）。
+- **报错说人话**：拿到非 JSON 响应不再原样抛 `JSONDecodeError`，改说"answered something other than
+  JSON -- a web UI or a proxy, not a model server"。
+- **测试**：`tests/test_strata_follow.py` 11 例（app→引擎、剥 `/v1`、同端口换 key、手起服务不被
+  拽走、app 认下的引擎没起来也跟随、无应答不搬家、最新且应答的记录优先、未验证的记录不许搬卡、
+  `discover:false` 一个请求都不发、节流、payload 带理由）；`test_hermes_session.py` 加一例盯住"代表
+  地址"的去重。`python -m unittest discover -s tests` 44 例全过。
 
 ### v1.8 — 2026-10-19
 
@@ -845,6 +917,9 @@ Strata 的地址，于是看板会把它当成两个来源（跟随卡 + 显式�
   立刻回来）。
 - 地址比较用 host+port，`localhost` 与 `127.0.0.1` 视为同一台；只比字符串会让同一台服务在换一种
   写法后重新裂成两张卡。
+- **"覆盖"算的是这张卡代表的地址，不只是它轮询的那个。** Strata 卡配在 app 上时轮询的是引擎端口，
+  但它代表 app 那个地址（`proxied_url`）—— Hermes 跟着的正是后者，按轮询地址比就会漏，多出来的
+  那张卡还会把同一批 token 再记一遍。
 
 **Strata 端点接上，卡不再"在线但空白"。** provider 换成 strata 之后，面板上那台服务模型名都对、
 数字一个没有：`/metrics` 是 JSON，而采集器把正文当 Prometheus 文本解析，所有 counter 恒为 `null`。

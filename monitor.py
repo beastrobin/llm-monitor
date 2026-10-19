@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -51,7 +52,7 @@ del _stream_name
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.8"
+VERSION = "1.9"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
@@ -248,6 +249,27 @@ def same_address(left, right):
     """Whether two endpoint URLs name the same host and port."""
     key = address_key(left)
     return key is not None and key == address_key(right)
+
+
+def watched_addresses(endpoint):
+    """Every address one endpoint stands for.
+
+    Usually just the one it polls.  A Strata card pointed at the desktop app is
+    the exception: the app is a proxy whose telemetry endpoints answer with its
+    web page, so the card polls the **engine** behind it and keeps the app's
+    address as the one it represents (``collectors.strata`` explains why it has
+    to).  Two cards on one machine would show the same model twice and, worse,
+    book its tokens twice in the ledger, so dedup has to know that the address
+    a card *names* is not always the address it *asks*.
+    """
+    addresses = [getattr(endpoint, "base_url", None)]
+    addresses.append(getattr(endpoint, "proxied_url", None))
+    return [url for url in addresses if url]
+
+
+def covers_address(endpoint, url):
+    """Whether ``endpoint`` is the card for the server at ``url``."""
+    return any(same_address(known, url) for known in watched_addresses(endpoint))
 
 
 def build_endpoint(spec):
@@ -558,6 +580,10 @@ class Hub(object):
         # Filled in by _active_endpoints() on every sample; named so the
         # startup log can say why the hermes card is not on screen.
         self.router_covered_by = ""
+        # The address each card was polled at last cycle, so that a card which
+        # follows its server to a new port says so in run.log once instead of
+        # quietly changing what it is measuring.
+        self._card_addresses = {}
         self.system = system.SystemCollector()
         self.collect_gpu = bool(config["gpu"].get("enabled", True))
         self.collect_host = bool(config["system"].get("enabled", True))
@@ -646,6 +672,10 @@ class Hub(object):
         goes with it: that card exists to find the child process behind a
         router, and a server that is asked directly has no child to find.
 
+        "Covers" includes an address an endpoint represents without polling it,
+        which is what a Strata card watching the engine behind the desktop app
+        does -- see :func:`watched_addresses`.
+
         Decided per sample rather than at startup, because Hermes can be
         repointed (or can fall back to a router on its own port) at any moment,
         and both cards have to return the moment the addresses differ again.
@@ -654,9 +684,10 @@ class Hub(object):
         for endpoint in self.endpoints:
             if endpoint is self.hermes_endpoint or endpoint is self.live_endpoint:
                 continue
-            key = address_key(endpoint.base_url)
-            if key is not None:
-                addresses.add(key)
+            for known in watched_addresses(endpoint):
+                key = address_key(known)
+                if key is not None:
+                    addresses.add(key)
         followed = address_key(self.router_url)
         covered = followed is not None and followed in addresses
 
@@ -668,7 +699,7 @@ class Hub(object):
             self.router_covered_by = next(
                 endpoint.id for endpoint in self.endpoints
                 if endpoint not in (self.hermes_endpoint, self.live_endpoint)
-                and same_address(endpoint.base_url, self.router_url))
+                and covers_address(endpoint, self.router_url))
 
         active = []
         for endpoint in self.endpoints:
@@ -676,6 +707,29 @@ class Hub(object):
                 continue
             active.append(endpoint)
         return active
+
+    def _log_moved(self, endpoints):
+        """One run.log line per card that started watching a different server.
+
+        A Hermes router move gets its own line, because the address is the first
+        thing anyone reads when a card's numbers look wrong.  A Strata card
+        moves on its own now -- the desktop app re-starts its engine on a fresh
+        port and with a fresh key every time a model is loaded -- and a card
+        that follows it in silence leaves no trace of which process produced the
+        tokens the ledger just booked.  The first sighting is quiet: the startup
+        lines already named the address each card began on.
+        """
+        for card in endpoints:
+            identity, url = card.get("id"), card.get("base_url")
+            if not identity or not url:
+                continue
+            previous = self._card_addresses.get(identity)
+            if previous is not None and not same_address(previous, url):
+                log("%s moved: %s -> %s%s" % (
+                    identity, previous, url,
+                    " (%s)" % card["follow_reason"]
+                    if card.get("follow_reason") else ""))
+            self._card_addresses[identity] = url
 
     def _push(self, key, value):
         series = self._series.get(key)
@@ -801,12 +855,15 @@ class Hub(object):
         # object so it holds either way round: when Hermes is followed directly
         # the answer comes from its own card, and when another endpoint already
         # covers that address -- and so is the one being polled -- it comes from
-        # that one.
+        # that one.  A covering card may quote a *different* address (the engine
+        # behind a proxy), so the address it represents is checked too.
         followed = address_key(self.router_url)
         answered = [ep.get("up") for ep in endpoints
                     if followed is not None
-                    and same_address(ep.get("base_url"), self.router_url)]
+                    and (same_address(ep.get("base_url"), self.router_url)
+                         or same_address(ep.get("proxied_url"), self.router_url))]
         self._router_unreachable = followed is not None and not any(answered)
+        self._log_moved(endpoints)
 
         # The tier this sample gets booked under, computed once: the ledger
         # stamps it and the UI marks the tier row it is standing on with it, so

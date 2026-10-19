@@ -55,9 +55,202 @@ rates are taken from the engine's own reported rates instead -- see
 :meth:`StrataEndpoint._model_detail`.  The cumulative averages, which are what
 the ledger and the card's headline fall back to, come from the totals as they
 do everywhere else.
+
+The desktop app moves the engine (see "where the engine is" below), so
+``config.json`` cannot name it: this module finds the address and the key that
+belong to the engine answering *now*, the same way the Hermes collector follows
+its router's ``config.yaml``.
 """
 
+import json
+import os
+import time
+from pathlib import Path
+
 from .llama import LlamaEndpoint, _get_json, _ratio
+
+# ---------------------------------------------------------------------------
+# Where the engine is
+# ---------------------------------------------------------------------------
+#
+# The desktop app is not the engine.  It is a web UI with an OpenAI-compatible
+# proxy in front of a ``serve/server.py`` process it starts itself, and it
+# starts that process on a **port it picks at that moment**, guarded by a
+# **key it generates at that same moment**.  Both change when a model is
+# reloaded, let alone when the app restarts.  A collector pinned to the address
+# from the last conversation is then in one of two useless states: the port is
+# free and the card says "connection refused", or the port belongs to something
+# else entirely and the card reports a model nobody is running.
+#
+# Asking the app itself does not work either.  Its server owns ``/`` and answers
+# an unknown path -- ``/props``, ``/metrics``, ``/slots`` -- with the SPA's
+# HTML, so a scrape fails with a JSON error rather than a 404, and the same
+# HTML answers the health check that would otherwise identify it.
+#
+# What the app *does* answer is its own ``/v1/models``, and every model there
+# carries ``meta.instanceId``.  That id is the file name of the engine record
+# the app wrote when it started the process, and the record is exactly what
+# ``serve.server --config`` was handed: ``host``, ``port``, ``api_key``, the
+# launch arguments and the GGUF behind them.  Read from the user's own state
+# directory, it is not a sniffed credential -- it is the app's private
+# directory, which is also where its own key would have been found.
+#
+# Three sources, in this order, because each covers a case the others miss:
+#
+# 1. the address already in hand answers ``/health`` as a Strata engine.  That
+#    is a hand-started server, or the engine this card followed last time, and
+#    an explicitly configured working address outranks any guessing.
+# 2. the app address (the configured one, or the one last followed) names an
+#    instance id.  Precise even with two engines alive, since the id says which
+#    one *this* URL serves -- and followed even when that engine does not
+#    answer yet, because a model that is still loading is the model the reader
+#    is waiting for, not a reason to go showing someone else's.
+# 3. the newest engine record that answers, and only when no app answered at
+#    all: the app's own port went stale -- it restarted and ``config.json`` has
+#    not caught up -- so the records are the only address left.  This source is
+#    a guess about *which* process is the app's, so it is verified before the
+#    card moves.
+#
+# An address is never abandoned for a move that found nothing: the card keeps
+# its last one and reports its real error, which reads truer than the name of a
+# port with nothing behind it.
+
+#: ``/health`` names the service; a llama.cpp server answers something else, and
+#: an app answers with HTML.
+SERVICE = "strata"
+
+#: Where the app keeps its engine records, below the user's home directory.
+INSTANCE_SUBPATH = (".strata", "data", "native-instances")
+
+#: How often to look for the engine while one is answering.  The address moves
+#: when a model is loaded, which is measured in seconds -- but a card that
+#: re-resolved every cycle would spend two extra round trips per sample to
+#: notice nothing had moved.
+FOLLOW_SECONDS = 15.0
+#: ... and while none is: recovery is what the reader is waiting for.
+FOLLOW_RETRY_SECONDS = 5.0
+
+#: How many engine records to try when nothing else named one, newest first.
+#: Each costs one ``/health``, and a dead port costs about two seconds of
+#: refused connection on Windows -- four of them would dominate a sample.
+INSTANCE_SWEEP = 3
+
+PROBE_TIMEOUT = 2.0
+
+
+def without_api_suffix(url):
+    """A server address from a client address.
+
+    An operator pastes the URL they call -- ``host:port/v1`` -- while every
+    collector here appends its own paths (``/props``, ``/metrics``, and
+    ``/v1/models`` on top of the root).  Keeping the suffix would ask for
+    ``/v1/v1/models`` and read as a server with no models.
+    """
+    trimmed = (url or "").rstrip("/")
+    if trimmed.lower().endswith("/v1"):
+        trimmed = trimmed[:-3].rstrip("/")
+    return trimmed
+
+
+def instance_directory(spec=None):
+    """The directory holding the app's engine records.
+
+    ``STRATA_INSTANCE_DIR`` and the endpoint's own ``instance_dir`` exist for
+    the two cases the default cannot know: a second Windows user profile
+    serving the models, and a machine where the app's state was moved off the
+    account the dashboard runs under.
+    """
+    for value in (os.environ.get("STRATA_INSTANCE_DIR"),
+                  (spec or {}).get("instance_dir")):
+        value = (value or "").strip()
+        if value:
+            return Path(value)
+    return Path.home().joinpath(*INSTANCE_SUBPATH)
+
+
+def instance_files(directory):
+    """Engine records on disk, the one written last first."""
+    try:
+        stamped = [(path.stat().st_mtime, path) for path in directory.glob("*.json")]
+    except OSError:
+        return []
+    stamped.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in stamped]
+
+
+def _record_url(record):
+    host = str(record.get("host") or "127.0.0.1").strip()
+    if host in ("", "0.0.0.0", "::", "*"):
+        # Bound to every interface: the loopback one is the address to dial.
+        host = "127.0.0.1"
+    port = record.get("port")
+    if not port:
+        return None
+    return "http://%s:%s" % (host, port)
+
+
+def read_instance(path):
+    """What one engine record says about the engine, or None.
+
+    None covers "not there", "not readable" and "not a record" together: the
+    caller's next move is the same for all three -- try the next source -- and a
+    record the app is still writing is exactly the file that fails to parse.
+    """
+    try:
+        record = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    base_url = _record_url(record)
+    if not base_url:
+        return None
+    return {
+        "base_url": base_url,
+        "api_key": str(record.get("api_key") or "").strip(),
+        "model": str(record.get("model_name") or ""),
+        "path": str(path),
+    }
+
+
+def _answers_engine(health):
+    """Whether a ``/health`` body is a Strata engine's.
+
+    The ``service`` tag is the clean answer.  The second shape is for an engine
+    build predating it: ``model`` beside ``max_context`` is what only a loaded
+    Strata model reports, and a llama.cpp ``/health`` says nothing that
+    specific -- while the app's answer is not JSON at all.
+    """
+    if not isinstance(health, dict):
+        return False
+    if health.get("service") == SERVICE:
+        return True
+    return "model" in health and "max_context" in health
+
+
+def is_engine(base_url, api_key="", timeout=PROBE_TIMEOUT):
+    """Whether this address is a Strata engine answering with this key."""
+    try:
+        health = _get_json(base_url + "/health", api_key, timeout)
+    except Exception:  # noqa: BLE001 - down, wrong key or HTML: none of them is an engine
+        return False
+    return _answers_engine(health)
+
+
+def instance_id_of_app(base_url, timeout=PROBE_TIMEOUT):
+    """The instance id an app address publishes for the model it serves."""
+    try:
+        models = _get_json(base_url + "/v1/models", "", timeout)
+    except Exception:  # noqa: BLE001 - not an app, or not up
+        return None
+    if not isinstance(models, dict):
+        return None
+    for item in models.get("data") or []:
+        if isinstance(item, dict):
+            instance = (item.get("meta") or {}).get("instanceId")
+            if instance:
+                return str(instance)
+    return None
 
 
 def _reported_slot_count(live, rows):
@@ -84,11 +277,178 @@ def _reported_slot_count(live, rows):
 class StrataEndpoint(LlamaEndpoint):
     """One Strata server, scraped through its JSON ``/metrics``.
 
-    Only ``_model_detail`` differs from the llama.cpp collector: the probe, the
-    model list, the TTL caches, the failure backoff and ``set_base_url`` all
-    describe what an endpoint *is* rather than what it speaks, and they are
-    inherited so the two dialects cannot drift apart.
+    Two things differ from the llama.cpp collector: ``_model_detail`` reads the
+    JSON dialect, and ``poll`` first follows the server to wherever the desktop
+    app has put it now (see "where the engine is" at the top of this module).
+    The probe, the model list, the TTL caches, the failure backoff and
+    ``set_base_url`` describe what an endpoint *is* rather than what it speaks,
+    and they are inherited so the two dialects cannot drift apart.
     """
+
+    #: What the card is standing for, when the address in ``config.json`` is
+    #: the desktop **app** rather than the engine: the engine is what gets
+    #: polled, and the app URL is the address the rest of the dashboard has to
+    #: recognise as the same machine.  ``None`` when the configured address
+    #: really was the engine.
+    proxied_url = None
+    #: How the current address was arrived at, for run.log and for an empty card.
+    follow_reason = ""
+
+    def __init__(self, spec, *args, **kwargs):
+        spec = dict(spec)
+        # Tolerate the URL as an operator writes it (".../v1", the one the app
+        # tells you to paste) and hand the collector the server instead.
+        spec["base_url"] = without_api_suffix(spec.get("base_url"))
+        super().__init__(spec, *args, **kwargs)
+        self._instance_dir = instance_directory(spec)
+        # ``"discover": false`` opts out: a server reached through a jump box,
+        # or one whose state directory this process cannot read, is then polled
+        # exactly where config.json says it is.
+        self.discover = bool(spec.get("discover", True))
+        self._next_follow = 0.0
+        self._engine_answered = False
+        # Two memories across scrapes, both needed because ``slots_view()`` is a
+        # snapshot of one instant and says nothing about what came before it:
+        #
+        # ``_slot_held``  what each slot held the last time it was idle.  When
+        #            that same slot turns busy, the engine's ``pick_slot`` has
+        #            just reused exactly that prefix (serve/server.py matches
+        #            the prompt against ``slot_held`` and takes it), so
+        #            held ÷ prompt is that slot's own prefix hit rate -- the
+        #            per-slot reading of the same idea the headline KV card
+        #            measures globally off ``totals.reused``.
+        # ``_slot_req``  the in-flight request per slot (its prompt length and
+        #            the hit computed for it), so the number survives the
+        #            2 s frames rather than flickering as the slot's counters
+        #            move underneath it.
+        self._slot_held = {}
+        self._slot_req = {}
+
+    def _app_urls(self):
+        """Addresses that could be the desktop app: this one, and the last one it was."""
+        urls = []
+        for url in (self.base_url, self.proxied_url):
+            url = without_api_suffix(url)
+            if url and url not in urls:
+                urls.append(url)
+        return urls
+
+    def _named_by_app(self):
+        """The engine an app address says it is serving, and that address.
+
+        Returns ``(instance, app_url)`` or None.  None means the app did not
+        answer at all, or named an instance whose record this process cannot
+        read (another account's state directory, say) -- cases where the
+        newest-record sweep is the only hint left.
+        """
+        for app_url in self._app_urls():
+            instance_id = instance_id_of_app(app_url)
+            if not instance_id:
+                continue
+            instance = read_instance(
+                self._instance_dir / ("%s.json" % instance_id))
+            if instance is not None:
+                return instance, app_url
+        return None
+
+    def _records(self, skip):
+        """Engine records worth trying, newest first, capped.
+
+        The cap is not politeness: the app leaves one record per instance id it
+        has ever started, so the directory fills with processes that are long
+        gone, and each ask against a dead port costs about two seconds of
+        refused connection on Windows.
+        """
+        for path in instance_files(self._instance_dir)[:INSTANCE_SWEEP]:
+            instance = read_instance(path)
+            if instance is None:
+                continue
+            key = (instance["base_url"], instance["api_key"])
+            if key in skip:
+                continue
+            skip.add(key)
+            yield instance, path.name
+
+    def _adopt(self, instance, app_url, reason, answered):
+        """Point this card at one engine record, key included.
+
+        The key travels with the address because a record *is* a process: the
+        next process to own the port owns a different key, and polling the new
+        one with the old key answers 401 -- which reads on screen exactly like a
+        server with no model.
+        """
+        moved = self.set_base_url(instance["base_url"], instance["api_key"])
+        self._engine_answered = answered
+        self.follow_reason = reason if answered else reason + " -- not answering yet"
+        if app_url:
+            # Remembered even when the address did not move: it is what tells
+            # the dashboard this card already covers the app's address, so the
+            # same server is not shown -- and its tokens not counted -- twice.
+            self.proxied_url = app_url
+        return moved
+
+    def follow_now(self, force=False):
+        """Re-resolve the engine address, honouring the throttle.
+
+        Public because the dashboard logs the moment a card starts watching a
+        different port, and that only works if the move happens where the
+        dashboard is looking.  Returns whether the address changed.
+        """
+        now = time.time()
+        if not self.discover:
+            return False
+        if not force and now < self._next_follow:
+            return False
+        self._next_follow = now + (
+            FOLLOW_SECONDS if self._engine_answered else FOLLOW_RETRY_SECONDS)
+
+        # Source 1: this address is the engine, and it answers with the key in
+        # hand.  Nothing to follow -- which is also the case for a hand-started
+        # ``serve/server.py`` on a fixed port, the reason the app is not simply
+        # assumed.
+        if is_engine(self.base_url, self.api_key):
+            self._engine_answered = True
+            if not self.follow_reason:
+                self.follow_reason = "%s answers /health as a Strata engine" % (
+                    self.base_url,)
+            return False
+
+        # Source 2: the app names the engine it serves.  Followed even when
+        # that engine does not answer yet -- an engine that is still loading is
+        # the model the reader is waiting for, and a *different* engine that
+        # happens to be up would fill this card with another model's numbers.
+        named = self._named_by_app()
+        if named is not None:
+            instance, app_url = named
+            return self._adopt(
+                instance, app_url,
+                "the app at %s is serving %s" % (app_url, instance["base_url"]),
+                is_engine(instance["base_url"], instance["api_key"]))
+
+        # Source 3: nothing named anything, so trust the newest record that
+        # actually answers.  Verification is the whole point here -- an
+        # unverified guess would put a stale record's port on the card and
+        # leave the reader to work out which of the two is lying.
+        for instance, name in self._records(set()):
+            if is_engine(instance["base_url"], instance["api_key"]):
+                return self._adopt(
+                    instance, self.proxied_url,
+                    "the newest engine record, %s" % name, True)
+
+        # Nothing answered anywhere.  Stay where we are: the card then reports
+        # the address it had with its real error, which is a truer sentence than
+        # the name of a port with nothing behind it.
+        self._engine_answered = False
+        return False
+
+    def poll(self):
+        self.follow_now()
+        result = super().poll()
+        if self.follow_reason:
+            result["follow_reason"] = self.follow_reason
+        if self.proxied_url:
+            result["proxied_url"] = self.proxied_url
+        return result
 
     def _series(self, payload):
         """The llama.cpp-named series to hand ``ModelSampler``.
@@ -122,25 +482,6 @@ class StrataEndpoint(LlamaEndpoint):
             "llamacpp:requests_processing": live.get("running"),
             "llamacpp:requests_deferred": live.get("waiting"),
         }
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Two memories across scrapes, both needed because ``slots_view()`` is a
-        # snapshot of one instant and says nothing about what came before it:
-        #
-        # ``_slot_held``  what each slot held the last time it was idle.  When
-        #            that same slot turns busy, the engine's ``pick_slot`` has
-        #            just reused exactly that prefix (serve/server.py matches
-        #            the prompt against ``slot_held`` and takes it), so
-        #            held ÷ prompt is that slot's own prefix hit rate -- the
-        #            per-slot reading of the same idea the headline KV card
-        #            measures globally off ``totals.reused``.
-        # ``_slot_req``  the in-flight request per slot (its prompt length and
-        #            the hit computed for it), so the number survives the
-        #            2 s frames rather than flickering as the slot's counters
-        #            move underneath it.
-        self._slot_held = {}
-        self._slot_req = {}
 
     def _slots(self, payload):
         """One entry per batch slot, in the shape the context card reads.
