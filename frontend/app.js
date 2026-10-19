@@ -1097,29 +1097,15 @@ function applyModel(root, endpoint, model) {
     // opening the per-position list does not snap shut two seconds later.
     const openDetail = detail.querySelector('details');
     const wasOpen = !!(openDetail && openDetail.open);
-    // The spec tags (context / slots / MTP) used to sit on the hero line; they
-    // moved here so that row reads like the numbers it belongs with -- what the
-    // engine is (specs), then how it is doing (rates).  They lead the row for
-    // that reason.  Everything below still only appears when the engine
-    // actually reported a value, so nothing draws a bare "—".
-    // The spec tags live on the hero line now (see modelTags).  This row is
-    // the engine's live numbers, and it leads with the state note: that text
-    // changes width every tick, so it gets the whole free space on the left
-    // and the value chips right-align after it -- which is the whole reason
-    // the note left the hero line in the first place.  Everything below still
-    // only appears when the engine actually reported a value, so nothing
-    // draws a bare "—".
-    const note = stateNoteText(model);
-    const items = [
-      note ? { raw: true, html: '<span class="kv-note">' + esc(note) + '</span>' } : null,
-      { label: '累计均值', value: num(metrics.decode_tps_avg, 1), unit: 't/s' },
-      { label: 'prefill 均值', value: num(metrics.prefill_tps_avg, 0), unit: 't/s' },
-    ].filter(Boolean);
+    // The spec tags live on the hero line (see modelTags).  This row used to
+    // carry the engine's whole live block; the state note and the
+    // 累计均值 / prefill 均值 / 处理中 chips moved to the slot 明细 title
+    // line on 2026-10-19, and what is left (sequence peak, batch slots, MTP
+    // per-position, collection errors) only appears when the engine actually
+    // reported it -- nothing here draws a bare "—".
+    const items = [];
     if (typeof metrics.n_tokens_max === 'number') {
       items.push({ label: '序列峰值', value: countText(metrics.n_tokens_max), unit: 'tok' });
-    }
-    if (typeof metrics.requests_processing === 'number') {
-      items.push({ label: '处理中', value: num(metrics.requests_processing, 0), unit: '请求' });
     }
     if (typeof metrics.busy_slots_per_decode === 'number') {
       items.push({ label: '批内 slot', value: num(metrics.busy_slots_per_decode, 2), unit: '个' });
@@ -1168,6 +1154,25 @@ function applyModel(root, endpoint, model) {
 // Folded OPEN by default: the user asked to see the per-slot breakdown
 // without a click, and each row is one line of six small cards.  The cards
 // are value + horizontal health bar only -- no curve (2026-10-19 request).
+// The right-hand end of the slot 明细 title line (2026-10-19 request): three
+// live chips (累计均值 / prefill 均值 / 处理中) and then the small state note
+// ("writing a tool call: thinking · 8198 tok @ 40 t/s") that used to sit on
+// the model card's own row.  Repainted every tick -- these numbers change
+// that fast, and the old count sentence freezing on the building frame is
+// exactly the bug this shape avoids.
+function slotLiveHtml(model) {
+  const metrics = model.metrics || {};
+  const chips = [
+    { label: '累计均值', value: num(metrics.decode_tps_avg, 1), unit: 't/s' },
+    { label: 'prefill 均值', value: num(metrics.prefill_tps_avg, 0), unit: 't/s' },
+  ];
+  if (typeof metrics.requests_processing === 'number') {
+    chips.push({ label: '处理中', value: num(metrics.requests_processing, 0), unit: '请求' });
+  }
+  const note = stateNoteText(model);
+  return kvChips(chips) + (note ? '<span class="kv-note">' + esc(note) + '</span>' : '');
+}
+
 function renderSlotDetail(host, model, base) {
   if (!host) return;
   const slots = model.slots || [];
@@ -1184,8 +1189,10 @@ function renderSlotDetail(host, model, base) {
     } else {
       why.push('引擎这一轮没有上报逐槽数据');
     }
-    host.innerHTML = '<div class="slot-fold"><div class="empty">' +
-      esc('slot 明细 · ' + why.join('；')) + '</div></div>';
+    host.innerHTML = '<div class="slot-fold is-empty">' +
+      '<div class="empty">' + esc('slot 明细 · ' + why.join('；')) + '</div>' +
+      '<span class="slot-live">' + slotLiveHtml(model) + '</span>' +
+      '</div>';
     host.dataset.sig = '';
     return;
   }
@@ -1199,7 +1206,7 @@ function renderSlotDetail(host, model, base) {
     host.dataset.sig = signature;
     host.innerHTML =
       '<details class="collapsible slot-fold" data-tone="h" open>' +
-      '<summary><h3>slot 明细 <span class="muted" data-role="count"></span></h3></summary>' +
+      '<summary><h3>slot 明细</h3><span class="slot-live" data-role="live"></span></summary>' +
       '<div class="slot-rows">' +
       slots.map(function (slot) {
         // No title line: the slot's identity (id + state) rides inside the
@@ -1214,24 +1221,18 @@ function renderSlotDetail(host, model, base) {
   // Same job as applyModel, one row at a time: the slot cards are built by the
   // shared buildCards/paintCards pair.  Each card is label + value + a
   // horizontal health bar, and the leading 已生成 card carries the slot's id
-  // and engine state as its first line -- the row has no title of its own
-  // anymore (2026-10-19).
-  // The count line is repainted every tick instead of being written once at
-  // build time.  Baked in, it froze whatever was true the frame that created
-  // these rows: a fold could read "2 个在跑" while both slots had long gone idle
-  // -- a stale label that looked like the panel inventing activity.
-  const running = slots.filter(function (s) { return s.is_processing; }).length;
+  // and engine state inline in its label row -- the row has no title of its
+  // own anymore (2026-10-19).
+  //
+  // The "N 个槽 · M 个在跑" count sentence is gone (2026-10-19 request): the
+  // title line carries the engine's live readings instead (see slotLiveHtml),
+  // repainted every tick the same way, and the solo-path explanation survives
+  // only on the state chip's tooltip.
   const liveState = model.live_state || {};
-  const soloPath = !running && Number(liveState.running) > 0;
-  const countEl = host.querySelector('[data-role="count"]');
-  if (countEl) {
-    countEl.textContent = slots.length + ' 个槽 · ' + running + ' 个在跑' +
-      (soloPath ? ' · 引擎在处理 ' + liveState.running + ' 个请求，但没有一个槽被记账' : '');
-    // Assigned every frame, not only when true: a tooltip left over from a busy
-    // frame keeps explaining a state that no longer applies once the engine is
-    // quiet -- which the real browser run caught after a solo request finished.
-    countEl.title = soloPath ? SOLO_PATH_NOTE : '';
-  }
+  const soloPath = !slots.some(function (s) { return s.is_processing; }) &&
+    Number(liveState.running) > 0;
+  const liveEl = host.querySelector('[data-role="live"]');
+  if (liveEl) liveEl.innerHTML = slotLiveHtml(model);
 
   host.querySelectorAll('.slot-row').forEach(function (row) {
     const id = row.getAttribute('data-slot');

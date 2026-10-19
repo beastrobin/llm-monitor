@@ -1303,6 +1303,23 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
 .collapsible[data-tone="g"] { --sec-c: var(--chart-g); }
 .collapsible[data-tone="h"] { --sec-c: var(--chart-h); }
 .slot-rows { display: flex; flex-direction: column; gap: 10px; }
+/* The title line's right-hand live strip (2026-10-19): three chips then the
+   state note, inline right after the heading -- the h3 stops swallowing the
+   summary's free space so the strip sits next to the words, not at the far
+   edge.  The note loses its margin-right:auto here; it trails the chips. */
+.slot-fold summary h3 { flex: none; }
+.slot-live {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin-left: 10px;
+}
+.slot-live .kv-note { margin-right: 0; }
+/* The no-rows state keeps the same strip next to its reason sentence. */
+.slot-fold.is-empty { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.slot-fold.is-empty .slot-live { margin-left: 0; }
 .slot-row + .slot-row {
   border-top: 1px solid var(--border-soft);
   padding-top: 10px;

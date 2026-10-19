@@ -400,32 +400,30 @@ function readFrames(base, count, timeoutMs) {
   const canvasLeftovers = SLOT_KEYS.filter(function (k) {
     return hasCanvas(busyRow, k);
   }).join('/') || '无';
-  // The count sentence has to follow the frame, not the frame that happened to
-  // build these rows: take one of the two busy slots away and re-render without
-  // changing the row count or any id, and it must say "1 个在跑".  A baked-in
-  // string kept the old number forever -- which read as the panel inventing work.
-  const countText = function () {
-    const c = doc.querySelector('.slot-fold [data-role="count"]');
-    return text(c);
+  // The count sentence on the title line is gone (2026-10-19); the live strip
+  // (累计均值 / prefill 均值 / 处理中 + state note) replaced it and has to
+  // follow every frame, not the frame that built these rows -- a baked-in
+  // string kept old numbers forever, which read as the panel inventing work.
+  // So set requests_processing, re-render changing ONLY that field, and check
+  // the chip moved both times.
+  const liveStrip = function () {
+    return text(doc.querySelector('.slot-fold [data-role="live"]'));
   };
-  const soloTitleSet = function () {
-    const c = doc.querySelector('.slot-fold [data-role="count"]');
-    return !!(c && c.title);
-  };
-  const readingRowBackup = JSON.parse(
-    JSON.stringify(slotFixture.endpoints[0].models[0].slots[1]));
-  slotFixture.endpoints[0].models[0].slots[1].state = 'idle';
-  slotFixture.endpoints[0].models[0].slots[1].is_processing = false;
+  const stripInSummary = !!doc.querySelector('.slot-fold summary [data-role="live"]');
+  const noCountLine = !doc.querySelector('[data-role="count"]');
+  slotFixture.endpoints[0].models[0].metrics.requests_processing = 2;
   win.renderEndpointsForTest(slotFixture);
-  const countFollowsFrame = countText() === '3 个槽 · 1 个在跑' && !soloTitleSet();
-  // Put it back so the reports below still describe a busy panel.
-  slotFixture.endpoints[0].models[0].slots[1] = readingRowBackup;
+  const stripAtTwo = liveStrip();
+  slotFixture.endpoints[0].models[0].metrics.requests_processing = 1;
   win.renderEndpointsForTest(slotFixture);
+  const liveFollowsFrame = stripInSummary && noCountLine &&
+    stripAtTwo.indexOf('处理中2请求') >= 0 &&
+    liveStrip().indexOf('处理中1请求') >= 0;
 
   const slotOk = foldOpen && labelsOk && slotIdOk && tagInside && noTitleRow &&
     anatomyOk && busyOk && readOk &&
     idleOk && idleRailEmpty && tinyRailVisible && ratioRailSane && curvelessOk &&
-    countFollowsFrame && errors.length === slotErrorsBefore;
+    liveFollowsFrame && errors.length === slotErrorsBefore;
   say('slot 明细: ' + (slotOk ? '通过' : '失败') +
     ' | 行 ' + slotRows.length +
     ' | 默认展开 ' + (foldOpen ? '✓' : '✗') +
@@ -440,7 +438,7 @@ function readFrames(base, count, timeoutMs) {
     ' | 空闲血条空 ' + (idleRailEmpty ? '✓' : '✗') +
     ' | 0.2% 血条可见 ' + (tinyRailVisible ? '✓' : '✗') +
     ' | 曲线已移除 ' + (curvelessOk ? '✓' : '✗ 残留 ' + canvasLeftovers) +
-    ' | 计数跟帧 ' + (countFollowsFrame ? '✓' : '✗ 停在「' + countAtBuild + '」'));
+    ' | 标题行活区跟帧 ' + (liveFollowsFrame ? '✓' : '✗ 停在「' + stripAtTwo + '」'));
   if (busyRow) {
     say('   忙碌槽 0: ' + SLOT_KEYS
       .map(function (k) { return text(slotCard(busyRow, k).querySelector('.card-label')) +
@@ -476,22 +474,24 @@ function readFrames(base, count, timeoutMs) {
     }],
   };
   win.renderEndpointsForTest(soloFixture);
-  const soloCount = doc.querySelector('.slot-fold [data-role="count"]');
-  const soloTitle = (soloCount && soloCount.title) || '';
-  const soloStateTitle = (doc.querySelector('.slot-row .slot-state') || {}).title || '';
-  const soloOk = !!soloCount && soloCount.textContent.indexOf('引擎在处理 1 个请求') >= 0 &&
-    soloTitle.length > 40 && soloStateTitle === soloTitle;
+  // Since 2026-10-19 the explanation lives only on the idle state chip --
+  // the count sentence that used to carry it in the title line was removed.
+  const soloStateEl = doc.querySelector('.slot-row .slot-state');
+  const soloTitle = (soloStateEl && soloStateEl.title) || '';
+  const soloOk = soloTitle.length > 40 &&
+    !doc.querySelector('[data-role="count"]') &&
+    text(doc.querySelector('.slot-fold [data-role="live"]')).indexOf('处理中1请求') >= 0;
   say('单请求通道时解释 idle: ' + (soloOk ? '通过' : '失败') +
-    ' | ' + (soloCount ? soloCount.textContent : '（没有计数行）'));
+    ' | 状态位tooltip ' + (soloTitle ? soloTitle.slice(0, 20) + '…' : '（无）'));
   // ...and it must stop explaining once the engine is quiet: same rows, same
   // ids, one field changed. A leftover tooltip describes a state that ended.
   soloFixture.endpoints[0].models[0].live_state.running = 0;
   win.renderEndpointsForTest(soloFixture);
-  const settled = doc.querySelector('.slot-fold [data-role="count"]');
-  const soloClearsOk = !!settled && !settled.title &&
-    settled.textContent === '2 个槽 · 0 个在跑';
+  const settledState = doc.querySelector('.slot-row .slot-state');
+  const soloClearsOk = !!settledState && !settledState.title &&
+    text(settledState) === 'idle';
   say('引擎安静后撤掉解释: ' + (soloClearsOk ? '通过' : '失败') +
-    ' | ' + (settled ? text(settled) + (settled.title ? ' [标题残留]' : '') : '（没有计数行）'));
+    ' | ' + (settledState ? text(settledState) + (settledState.title ? ' [标题残留]' : '') : '（没有状态位）'));
 
   // The other half of the same trap: when the engine gives no rows at all -- no
   // /slots, or Strata with live.slots missing -- the section used to clear its
