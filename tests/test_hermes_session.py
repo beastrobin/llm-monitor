@@ -187,6 +187,40 @@ class HermesSessionTests(unittest.TestCase):
                              ['hermes', 'strata'])
             self.assertEqual(hub.router_covered_by, '')
 
+    def test_the_live_card_survives_the_router_card_being_covered(self):
+        """Dedup silences the polling card, never the log card.
+
+        The live card answers about itself -- whichever instance writes the
+        log, and the child servers only it goes looking for -- so it books no
+        token the covering card also books.  Hiding it alongside the router
+        card silenced the current-model strip exactly when the panel most
+        needed an account of what Hermes is talking to.
+        """
+        self.session({'base_url': 'http://localhost:47831/v1'})
+        log_file = self.home / 'llama-server.log'
+        log_file.write_text('proxying request to model x on port 1\n')
+        config = copy.deepcopy(monitor.DEFAULT_CONFIG)
+        config['live'] = {'enabled': True, 'log': str(log_file)}
+        config['stats']['enabled'] = False
+        config['gpu']['enabled'] = False
+        config['system']['enabled'] = False
+        config['endpoints'] += [
+            {'id': 'strata', 'kind': 'strata', 'base_url': 'http://127.0.0.1:47831'},
+        ]
+        with patch.object(monitor, 'hermes_config_candidates', return_value=[self.config]):
+            hub = monitor.Hub(config)
+            self.addCleanup(hub._pool.shutdown)
+            active = hub._active_endpoints()
+            self.assertEqual(hub.router_covered_by, 'strata')
+            self.assertNotIn(hub.hermes_endpoint, active)
+            lives = [ep for ep in active if getattr(ep, 'log_path', None) is not None]
+            self.assertEqual(lives, [hub.live_endpoint])
+            # The polling card comes back the moment the addresses differ --
+            # the live card was never what dedup was guarding.
+            self.session({'base_url': 'http://localhost:18434/v1'}, activity=30)
+            hub._refresh_router(force=True)
+            self.assertIn(hub.hermes_endpoint, hub._active_endpoints())
+
 
 if __name__ == '__main__':
     unittest.main()

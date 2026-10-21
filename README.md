@@ -606,10 +606,17 @@ column 1`，跟 key 配错长得一模一样。Hermes 把 `model.base_url` 指�
   于是"地址找对了、key 没带上"第三种坏法表现为 `up=True`、模型名与上下文窗口都对，每个数都是空。
   第 1 档认出引擎时若配置里没有 key，直接从同一地址的记录里读（不多发请求）；轮询返回 401 时读记录
   重试一次，同一帧恢复，而不是空 15 个周期。没有对应记录时不猜 key，照实报"unauthorized"。
+- **去重只让跟随卡让位，日志卡留下**：router 地址被别的卡覆盖时，过去连读日志的 live 卡一起藏掉，
+  面板恰在最需要"当前模型"说明的时候安静下来。live 卡回答的是它自己的问题——日志归写它的实例，
+  router 拉起的子 server 也只有它去找——账本里没有一枚 token 是它和覆盖卡重复计的，留下不影响去重。
+  （收尾自一笔中断的改动：它想干这件事，但启动期的 `covered` 判断拿着 spec 字典去调只认 endpoint
+  对象的 `covers_address()`，永远为假，是一段永不执行的死枝；已删死枝、只留每帧判断的正路，
+  `test_hermes_session.py` 补一例钉死"router 卡藏、live 卡在、地址一分开 router 卡回来"。）
 - **测试**：`tests/test_strata_follow.py` 13 例（app→引擎、剥 `/v1`、同端口换 key、引擎地址没 key
   借 app 的 key、没有记录时不猜 key、手起服务不被拽走、app 认下的引擎没起来也跟随、无应答不搬家、
   最新且应答的记录优先、未验证的记录不许搬卡、`discover:false` 一个请求都不发、节流、payload 带理由）；
-  `test_hermes_session.py` 加一例盯住"代表地址"的去重。`python -m unittest discover -s tests` 46 例全过。
+  `test_hermes_session.py` 加一例盯住"代表地址"的去重，再一例盯住"去重不藏日志卡"。
+  `python -m unittest discover -s tests` 47 例全过。
 
 ### v1.8 — 2026-10-19
 

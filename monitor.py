@@ -668,9 +668,14 @@ class Hub(object):
         that server through its own endpoint.  Polling both would put one
         machine on screen twice and -- because the ledger keys a reading by
         (endpoint, model) -- book every token twice.  So the address Hermes
-        follows yields to an endpoint that already covers it, and the live card
-        goes with it: that card exists to find the child process behind a
-        router, and a server that is asked directly has no child to find.
+        follows yields to an endpoint that already covers it.
+
+        Only the router card yields; the live card stays.  It answers about
+        itself -- whichever instance writes the log, and the child servers a
+        router spawns, which only *it* goes looking for -- so its readings
+        belong to no address the covering card reports, and the ledger books
+        them once.  Losing it would silence the current-model strip exactly
+        when the router card can no longer speak for the session.
 
         "Covers" includes an address an endpoint represents without polling it,
         which is what a Strata card watching the engine behind the desktop app
@@ -703,7 +708,7 @@ class Hub(object):
 
         active = []
         for endpoint in self.endpoints:
-            if covered and endpoint in (self.hermes_endpoint, self.live_endpoint):
+            if covered and endpoint is self.hermes_endpoint:
                 continue
             active.append(endpoint)
         return active
