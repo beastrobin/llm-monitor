@@ -1018,6 +1018,19 @@ function readFrames(base, count, timeoutMs) {
     ') 再点复原 ' + (brandBack === 'LLM 监控工作台' ? '✓' : '✗ 得 ' + brandBack) +
     (langOk ? ' — 通过 ✓' : ' — 失败 ✗'));
 
+  // TTFT card replaces the never-filling MTP per-step card (2026-10-22): the
+  // engine reports no drafts-per-step at all, so the old card showed a
+  // permanent dash. TTFT comes from the engine's own request history, so the
+  // new card must exist, the old one must be gone, and a value -- when the
+  // engine supplied samples -- must carry its unit instead of drifting bare.
+  const ttftCard = doc.querySelector('#model-info [data-card="ttft"]');
+  const stepGone = !doc.querySelector('#model-info [data-card="step"]');
+  const ttftValue = text(doc.querySelector('#model-info [data-card="ttft"] .card-value'));
+  const ttftOk = !!ttftCard && stepGone &&
+    (!ttftValue || ttftValue === '—' || /^[0-9.,]+\s*s$/.test(ttftValue));
+  say('TTFT 卡: 存在 ' + (ttftCard ? '✓' : '✗') + ' 旧每步卡清除 ' + (stepGone ? '✓' : '✗') +
+    ' 数值「' + (ttftValue || '—') + '」' + (ttftOk ? ' — 通过 ✓' : ' — 失败 ✗'));
+
   // A half-translated page is the failure mode of a dictionary layer: it reads
   // English until one label stays Chinese. Scan English mode for CJK left in
   // text or in a tooltip; the switch button's own «中文» is the one exception,
@@ -1069,7 +1082,7 @@ function readFrames(base, count, timeoutMs) {
   const code = (errors.length || !routingOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
     !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk ||
-    !verOk || !rowVerOk || !langOk || !langLeaksOk) ? 1 : 0;
+    !verOk || !rowVerOk || !langOk || !langLeaksOk || !ttftOk) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own

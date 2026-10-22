@@ -803,6 +803,26 @@ class StrataEndpoint(LlamaEndpoint):
         tok_s = live.get("tok_s")
         prefill = live.get("prefill_tok_s_mean")
         metrics["decode_tps_inst"] = float(tok_s) if isinstance(tok_s, (int, float)) else None
+        # TTFT is the engine's own measurement -- seconds from a request
+        # arriving to the first token coming out -- and the retained request
+        # history (newest first) is the only place it appears. A row carries
+        # the number once its first token lands, so the newest row that has
+        # one is "the last finished request"; the mean covers every row the
+        # engine kept. llama.cpp /metrics has no such field anywhere, which is
+        # why the card shows a dash there rather than inventing a proxy.
+        ttfts = []
+        for row in (recent or []):
+            value = row.get("first_engine_token_s") if isinstance(row, dict) else None
+            if isinstance(value, (int, float)):
+                ttfts.append(float(value))
+        if ttfts:
+            metrics["ttft_s_last"] = ttfts[0]
+            metrics["ttft_s_mean"] = sum(ttfts) / len(ttfts)
+            metrics["ttft_n"] = len(ttfts)
+        else:
+            metrics["ttft_s_last"] = None
+            metrics["ttft_s_mean"] = None
+            metrics["ttft_n"] = 0
         # `prefill_tok_s_mean` is reported only while the engine is busy, and it
         # holds the current request's prefill rate from the moment it reads the
         # prompt until the request ends.  Not narrowed to the "reading" phase:

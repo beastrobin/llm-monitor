@@ -272,6 +272,39 @@ class FollowTests(unittest.TestCase):
         endpoint.follow_now()
         self.assertEqual(len(servers.calls), asked)
 
+    def test_ttft_comes_from_the_engine_s_request_history(self):
+        """The card reads first-token seconds the engine already measured.
+
+        ``requests`` is newest-first and carries ``first_engine_token_s`` once
+        a request's first token landed -- the newest row that has the number
+        is the last completed request; rows still waiting for their first
+        token carry None and are skipped, never averaged in as zero.
+        """
+        class WithRequests(Servers):
+            def __call__(self, url, api_key="", timeout=2.0):
+                answer = super().__call__(url, api_key, timeout)
+                if isinstance(answer, dict) and url.endswith("/metrics"):
+                    answer["requests"] = [
+                        {"first_engine_token_s": None},
+                        {"first_engine_token_s": 12.5},
+                        {"first_engine_token_s": 7.5},
+                    ]
+                return answer
+
+        servers = WithRequests()
+        endpoint = self.endpoint(ENGINE, api_key=KEY, servers=servers)
+        result = endpoint.poll()
+        metrics = (result.get("models") or [{}])[0].get("metrics") or {}
+        self.assertEqual(metrics["ttft_s_last"], 12.5)
+        self.assertEqual(metrics["ttft_s_mean"], 10.0)
+        self.assertEqual(metrics["ttft_n"], 2)
+        # And an engine without the history leaves every TTFT field empty --
+        # the card shows a dash, it does not invent a latency.
+        plain = self.endpoint(ENGINE, api_key=KEY, servers=Servers())
+        quiet = (plain.poll().get("models") or [{}])[0].get("metrics") or {}
+        self.assertIsNone(quiet["ttft_s_last"])
+        self.assertEqual(quiet["ttft_n"], 0)
+
     def test_the_card_says_what_it_follows(self):
         # run.log and an empty card are the only places a reader learns which
         # process a number came from, so both get the reason and the address it

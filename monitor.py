@@ -705,6 +705,10 @@ class Hub(object):
                 endpoint.id for endpoint in self.endpoints
                 if endpoint not in (self.hermes_endpoint, self.live_endpoint)
                 and covers_address(endpoint, self.router_url))
+        # Tell the log card whose model line the panel should trust, so its
+        # empty verdict can read as a referral instead of a dead end.
+        if self.live_endpoint is not None:
+            self.live_endpoint.covered_by = self.router_covered_by
 
         active = []
         for endpoint in self.endpoints:
@@ -782,6 +786,7 @@ class Hub(object):
                 values[base + ".mtp"] = metrics.get("mtp_accept_ratio")
                 values[base + ".kv"] = metrics.get("kv_hit_ratio")
                 values[base + ".step"] = metrics.get("mtp_tokens_per_step")
+                values[base + ".ttft"] = metrics.get("ttft_s_last")
                 slots = model.get("slots") or []
                 ratios = [s.get("ctx_ratio") for s in slots
                           if s.get("ctx_ratio") is not None]

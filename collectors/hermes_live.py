@@ -89,6 +89,11 @@ class LiveEndpoint(object):
         # Which source the current target came from, so the panel can say where
         # the answer came from instead of guessing.
         self.source = ""
+        # Set by the hub each sample when the router address is covered by
+        # another card: the card then reports WHO speaks for the session
+        # instead of its own "no active model", which would be a half-truth --
+        # the model IS known, another card is simply the one that says so.
+        self.covered_by = ""
         # Discover once up front so the startup log already names the port.
         target = self._read_target()
         if target is not None:
@@ -232,6 +237,7 @@ class LiveEndpoint(object):
             "target_source": self.source,
             "backing_off": False,
             "live": True,
+            "covered_by": self.covered_by,
             "polled_at": time.time(),
         }
 
@@ -259,4 +265,5 @@ class LiveEndpoint(object):
         result["router_url"] = self.router_url
         result["log_reason"] = self.reason
         result["live"] = True
+        result["covered_by"] = self.covered_by
         return result

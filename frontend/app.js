@@ -915,6 +915,14 @@ const ROUTER_REASON = {
 
 function liveNote(endpoint) {
   if (!endpoint || !endpoint.error) return '';
+  if (endpoint.covered_by) {
+    // Not a dead end: the session's current model is known, it is simply
+    // spoken for by the endpoint that covers the address this card asks.
+    // Naming the owner beats reporting "nothing loaded" to a proxy that
+    // answers with a web page.
+    return '<div class="note">当前模型由 <b>' + esc(endpoint.covered_by) +
+      '</b> 卡代为显示</div>';
+  }
   if (endpoint.error === 'no active model') {
     const why = LIVE_REASON[endpoint.log_reason] || endpoint.log_reason || '原因未知';
     // Show where we looked, and show the right thing: a log-shaped answer is
@@ -978,10 +986,11 @@ const MODEL_SPECS = [
       'slot 空闲时服务端会清掉提示词计数，此时数字只剩上次请求的已生成残留，' +
       '脚注会标出"空闲残留"。',
   }),
-  cardSpec('step', 'MTP 每步接受', {
+  cardSpec('ttft', 'TTFT', {
     bar: true,
-    tip: '每个验证步平均接受几个 token（含那一个必然正确的 token）。' +
-      '1.00 表示 MTP 没起作用，接近 2 以上才算真的在加速。',
+    tip: '首 token 延迟 = 引擎实测：从请求进到吐出第一个 token 用了几秒，含排队和读提示词。' +
+      '数值是最近一个已完成请求，脚注给引擎留存样本的平均值与个数。' +
+      'Strata 的 /metrics 请求历史里有这一项；llama.cpp 没有，显示 —。',
   }),
 ];
 
@@ -1027,6 +1036,9 @@ function applyModel(root, endpoint, model) {
     (firstSlot.n_prompt_tokens !== null && firstSlot.n_prompt_tokens !== undefined);
   const decodePeak = rollingPeakOf(decodeSeries, S.history.timestamps);
   const prefillPeak = rollingPeakOf(prefillSeries, S.history.timestamps);
+  const ttftLast = metrics.ttft_s_last;
+  const ttftSeries = seriesOf(base + '.ttft');
+  const ttftPeak = rollingPeakOf(ttftSeries, S.history.timestamps);
 
   // A rate has no natural 0–100% range, so the bar measures "how close to
   // this session's best": current rate ÷ session peak.  An idle engine
@@ -1066,9 +1078,9 @@ function applyModel(root, endpoint, model) {
     mtp: {
       text: pct(mtpRatio), bar: mtpRatio,
       barClass: (mtpRatio === null || mtpRatio === undefined) ? '' : (mtpRatio >= 0.5 ? 'good' : 'warn'),
-      foot: draftSeen
+      foot: draftSeen && stepValue !== null && stepValue !== undefined
         ? '每步接受 ' + num(stepValue, 2) + ' tok'
-        : (mtpEnabled ? '已启用 ' + (model.mtp_type || '') + ' · 暂无草稿' : '未启用 MTP'),
+        : (mtpEnabled ? '已启用 ' + (model.mtp_type || '') + ' · 暂无每步数据' : '未启用 MTP'),
       series: seriesOf(base + '.mtp'),
       sparkOptions: {
         min: 0, max: 1, color: cssVar('--chart-d'), autoscale: true,
@@ -1095,20 +1107,24 @@ function applyModel(root, endpoint, model) {
         format: function (v) { return num(v * 100, 0) + '%'; },
       },
     },
-    step: {
-      text: num(stepValue, 2),
+    ttft: {
+      text: num(ttftLast, 1),
       // A dash is not a reading, so it carries no unit (the slot cards already
-      // follow this rule); "--tok/步" reads like a typo, not like "no drafts".
-      unit: (stepValue === null || stepValue === undefined) ? '' : 'tok/步',
-      bar: (stepValue === null || stepValue === undefined) ? null : Math.min(1, stepValue / 3),
+      // follow this rule).
+      unit: (ttftLast === null || ttftLast === undefined) ? '' : 's',
+      // For a latency the bar means "how close to this session's worst", so a
+      // long fill warns instead of flattering -- the opposite direction from
+      // the rate cards, which measure distance to the best.
+      bar: (ttftLast === null || ttftLast === undefined || !ttftPeak)
+        ? null : Math.max(0, Math.min(1, ttftLast / ttftPeak)),
       barClass: 't-h',
-      foot: draftSeen
-        ? '草稿 ' + countText(drafts) + ' tok'
-        : (mtpEnabled ? 'MTP 已启用 · 暂无草稿' : 'MTP 未启用'),
-      series: seriesOf(base + '.step'),
+      foot: metrics.ttft_n
+        ? '均值 ' + num(metrics.ttft_s_mean, 1) + ' s · ' + metrics.ttft_n + ' 个请求'
+        : '暂无已完成请求',
+      series: ttftSeries,
       sparkOptions: {
         min: 0, color: cssVar('--chart-h'), autoscale: true,
-        format: function (v) { return num(v, 2); },
+        format: function (v) { return num(v, 1); },
       },
     },
   });

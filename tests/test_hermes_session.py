@@ -215,11 +215,16 @@ class HermesSessionTests(unittest.TestCase):
             self.assertNotIn(hub.hermes_endpoint, active)
             lives = [ep for ep in active if getattr(ep, 'log_path', None) is not None]
             self.assertEqual(lives, [hub.live_endpoint])
+            # The log card says WHO speaks for the session while covered, so
+            # the panel can point at the owning card instead of a dead end.
+            live = lives[0]
+            self.assertEqual(live.covered_by, 'strata')
             # The polling card comes back the moment the addresses differ --
             # the live card was never what dedup was guarding.
             self.session({'base_url': 'http://localhost:18434/v1'}, activity=30)
             hub._refresh_router(force=True)
             self.assertIn(hub.hermes_endpoint, hub._active_endpoints())
+            self.assertEqual(live.covered_by, '')
 
 
 if __name__ == '__main__':
