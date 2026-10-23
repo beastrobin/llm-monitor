@@ -1033,7 +1033,11 @@ main {
 
 .tier-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(212px, 1fr));
+  /* auto-FIT, not auto-fill: fill tracks leave empty columns standing, so
+     three tiers occupied a third of a wide row and the spare space parked on
+     the right while the cards themselves were narrow enough to wrap. With
+     auto-fit the empty tracks collapse and the tier cards share the row. */
+  grid-template-columns: repeat(auto-fit, minmax(212px, 1fr));
   gap: 11px;
 }
 .tier-grid:empty { display: none; }
@@ -1083,16 +1087,32 @@ main {
 }
 .tier-metrics {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 10px;
+  /* Column count follows the CARD's width, not a hard-coded two: a wide card
+     lays its five readings in one line, a narrow one drops to two or one.
+     The pairs never wrap mid-label -- CJK breaks anywhere, and a fixed two
+     columns let '预填充速度 4797 t/s' fold into two lines at some window
+     widths and unfold at others, so the card height changed on every resize
+     the panel ever served. */
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 4px 14px;
   margin: 7px 0 8px;
 }
-.tier-item { display: flex; align-items: baseline; gap: 4px; min-width: 0; }
+.tier-item {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  white-space: nowrap;
+}
 .tier-item em { color: var(--muted); font-size: 11px; font-style: normal; }
 .tier-item b {
   font-size: 13px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  /* Values line up on the column's right edge, so a reading's height is
+     decided by its column, never by how wide the label happened to be. */
+  margin-left: auto;
+  text-align: right;
 }
 .tier-unit { color: var(--muted); font-size: 10px; }
 .tier-bar {
