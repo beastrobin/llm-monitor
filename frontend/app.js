@@ -2,6 +2,7 @@
 
 const HISTORY_LIMIT = 900;
 const THEME_KEY = 'llm-monitor-theme';
+const HIST_TAB_KEY = 'llm-moni…tab';
 
 // T() wraps strings that never enter the DOM (window.confirm) -- /i18n.js
 // supplies it before this file runs in index.html. The identity fallback
@@ -916,12 +917,16 @@ const ROUTER_REASON = {
 function liveNote(endpoint) {
   if (!endpoint || !endpoint.error) return '';
   if (endpoint.covered_by) {
-    // Not a dead end: the session's current model is known, it is simply
-    // spoken for by the endpoint that covers the address this card asks.
-    // Naming the owner beats reporting "nothing loaded" to a proxy that
-    // answers with a web page.
-    return '<div class="note">当前模型由 <b>' + esc(endpoint.covered_by) +
-      '</b> 卡代为显示</div>';
+    // Silence, rather than a referral line.  A covered address means another
+    // card is already polling it and has put its model on screen -- usually
+    // with the "running" tag, because the hub reports that owner as the
+    // current endpoint.  So "当前模型由 strata 卡代为显示" only told the reader
+    // what the card above it already said, and it did so in a card of its
+    // own, which read as a stray empty panel (user request 2026-10-23).
+    // Not falling through either: this card's own "no active model" is the
+    // half-truth the referral existed to replace, so printing it here would
+    // be worse than printing nothing.
+    return '';
   }
   if (endpoint.error === 'no active model') {
     const why = LIVE_REASON[endpoint.log_reason] || endpoint.log_reason || '原因未知';
@@ -2592,9 +2597,38 @@ function initLanguage() {
   window.addEventListener('i18n-change', function () { render(); });
 }
 
+// The four ledger views live in tabs on the section head (2026-10-23) where
+// they used to be four stacked folds: one view gets the full row width and
+// the reader picks. The chosen tab persists like the theme and the language;
+// an unknown stored value falls back to the first tab, never to a blank.
+function initHistTabs() {
+  const tabs = Array.prototype.slice.call(
+    document.querySelectorAll('#hist-tabs button[data-pane]'));
+  const panes = Array.prototype.slice.call(
+    document.querySelectorAll('.hist-pane[data-pane]'));
+  if (!tabs.length || !panes.length) return;
+  const show = function (name) {
+    tabs.forEach(function (b) {
+      const on = b.dataset.pane === name;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    panes.forEach(function (p) { p.hidden = p.dataset.pane !== name; });
+    try { localStorage.setItem(HIST_TAB_KEY, name); } catch (e) {}
+  };
+  tabs.forEach(function (b) {
+    b.addEventListener('click', function () { show(b.dataset.pane); });
+  });
+  let saved = '';
+  try { saved = localStorage.getItem(HIST_TAB_KEY) || ''; } catch (e) {}
+  const known = panes.some(function (p) { return p.dataset.pane === saved; });
+  show(known ? saved : tabs[0].dataset.pane);
+}
+
 async function boot() {
   initTheme();
   initLanguage();
+  initHistTabs();
   initRestart();
   initStatsReset();
   document.addEventListener('pointermove', onPointerMove, { passive: true });

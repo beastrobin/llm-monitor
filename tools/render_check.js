@@ -1031,6 +1031,28 @@ function readFrames(base, count, timeoutMs) {
   say('TTFT 卡: 存在 ' + (ttftCard ? '✓' : '✗') + ' 旧每步卡清除 ' + (stepGone ? '✓' : '✗') +
     ' 数值「' + (ttftValue || '—') + '」' + (ttftOk ? ' — 通过 ✓' : ' — 失败 ✗'));
 
+  // Ledger view tabs (2026-10-23): the four views answer to four buttons in
+  // the section head, exactly one pane visible at a time, and the click that
+  // switches is the same one that paints the pill -- a tab bar whose buttons
+  // only look pressed while the panes sit still is the failure this pins.
+  const histBtns = doc.querySelectorAll('#hist-tabs button[data-pane]');
+  const shownPanes = function () {
+    return Array.prototype.filter.call(doc.querySelectorAll('.hist-pane'), function (p) { return !p.hidden; })
+      .map(function (p) { return p.dataset.pane; }).join();
+  };
+  let tabOk = histBtns.length === 4 &&
+    Array.prototype.map.call(histBtns, function (b) { return b.dataset.pane; }).join(',') === 'rank,tiers,combos,days' &&
+    shownPanes() === 'rank';
+  if (tabOk) {
+    histBtns[2].click();
+    tabOk = shownPanes() === 'combos' && histBtns[2].classList.contains('on') &&
+      !histBtns[0].classList.contains('on');
+    histBtns[0].click();
+    tabOk = tabOk && shownPanes() === 'rank' && histBtns[0].classList.contains('on');
+  }
+  say('历史信息选项卡: 四按钮 rank,tiers,combos,days 点击切面板 复原 ' +
+    (tabOk ? '✓ — 通过 ✓' : '✗ — 失败 ✗'));
+
   // A half-translated page is the failure mode of a dictionary layer: it reads
   // English until one label stays Chinese. Scan English mode for CJK left in
   // text or in a tooltip; the switch button's own «中文» is the one exception,
@@ -1082,7 +1104,7 @@ function readFrames(base, count, timeoutMs) {
   const code = (errors.length || !routingOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
     !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk ||
-    !verOk || !rowVerOk || !langOk || !langLeaksOk || !ttftOk) ? 1 : 0;
+    !verOk || !rowVerOk || !langOk || !langLeaksOk || !ttftOk || !tabOk) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own

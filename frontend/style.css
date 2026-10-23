@@ -197,7 +197,41 @@ main {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 11px;
+  flex-wrap: wrap;
 }
+/* Ledger view tabs: pill buttons on the 历史信息 head. The group takes the
+   free space between the title and 清空数据 and never pushes the reset
+   button off row -- it wraps below the title on a narrow window instead. */
+.hist-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.hist-tabs button {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.hist-tabs button:hover { color: var(--text); }
+.hist-tabs button.on {
+  color: var(--text);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--chart-e) 12%, var(--panel));
+  border-color: color-mix(in srgb, var(--chart-e) 48%, transparent);
+}
+.hist-pane-bar {
+  display: flex;
+  justify-content: flex-end;
+  min-height: 14px;
+  margin-bottom: 6px;
+}
+.hist-pane-bar:has(.muted:empty) { display: none; }
 .block-head h2 {
   display: flex;
   align-items: center;

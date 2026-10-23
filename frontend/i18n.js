@@ -383,15 +383,17 @@
     '暂无数据': 'no data', '暂无记录。': 'no records.',
     '显卡不可用': 'GPU unavailable', '系统采集不可用': 'system stats unavailable',
 
-    /* TTFT card + covered-card referral (2026-10-22) */
+    /* TTFT card (2026-10-22) */
     'TTFT': 'TTFT',
     '首 token 延迟 = 引擎实测：从请求进到吐出第一个 token 用了几秒，含排队和读提示词。数值是最近一个已完成请求，脚注给引擎留存样本的平均值与个数。Strata 的 /metrics 请求历史里有这一项；llama.cpp 没有，显示 —。':
       'Time to first token, measured by the engine: seconds from the request arriving to the first token coming out, queue and prompt read included. The number is the most recently completed request; the footnote gives the mean and count over the engine\'s retained samples. Strata\'s /metrics request history carries it; llama.cpp has none, so show —.',
     ' 个请求': ' requests',
     '暂无已完成请求': 'no completed request yet',
     '暂无每步数据': 'no per-step data yet',
-    '当前模型由 ': 'current model shown by the ',
-    ' 卡代为显示': ' card',
+
+    /* ledger view tabs (2026-10-23) */
+    '模型排行': 'Ranking', '运行功率': 'Power',
+    'token明细': 'token detail', '7日汇总': '7 days',
   };
 
   /* ------------------------------------------------------------------ core */
