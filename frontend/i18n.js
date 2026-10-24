@@ -394,6 +394,33 @@
     /* ledger view tabs (2026-10-23) */
     '模型排行': 'Ranking', '运行功率': 'Power',
     'token明细': 'token detail', '7日汇总': '7 days',
+    /* energy pane (2026-10-24) */
+    '能耗面板': 'Energy',
+    '显卡功率 · 近 30 分钟': 'GPU power · last 30 min',
+    'nvidia-smi 实测 · 悬停看精确值': 'measured via nvidia-smi · hover for exact values',
+    '每日能耗': 'Daily energy',
+    '实测 GPU': 'GPU measured', '估算整机': 'machine est.',
+    '显卡功率': 'GPU power', '整机功率': 'Machine power',
+    '墙插功率': 'Wall power', '今日电费': 'Today cost',
+    '估算': 'est.',
+    '实测 · 今日 ': 'measured · today ', '实测 · 今日暂无': 'measured · nothing today',
+    'CPU 估算 + 平台 ': 'CPU est. + platform ',
+    '按电源效率 ': 'at PSU efficiency ',
+    '电价假设 ': 'price assumed ', '元/kWh': 'CNY/kWh',
+    'GPU 实测': 'GPU measured', '整机估算': 'machine est.',
+    '墙插估算': 'wall est.', '电费估算': 'cost est.',
+    '账本未启用：没有能耗积分。': 'ledger off: no energy books.',
+    '能耗自 ': 'energy booked since ',
+    ' 起按采样积分；采样覆盖的时长见明细表『采样』列。':
+      ' per-sample; the Sampled column shows coverage.',
+    '开始记账后每轮采样自动积分，暂无数据。':
+      'energy integrates every sample once the books start; no data yet.',
+    'nvidia-smi 实时读数': 'live nvidia-smi reading',
+    '全部显卡实时功耗之和，nvidia-smi 读数':
+      'sum of all cards, live nvidia-smi readings',
+    '采样': 'Sampled',
+    '把每 2 秒采样的功率积分成电量。GPU 瓦数是 nvidia-smi 实测；『整机』『墙插』『电费』是估算——Windows 上没有 Linux RAPL 那套逐核功耗遥测，CPU 瓦按占用率线性模型估（15 W 空闲 + 最高 65 W），平台（主板/内存/SSD/风扇）记固定 130 W，电源效率按 90% 折算到墙插，电价按 0.60 元/kWh 假设。能耗只覆盖工作台在采样的小时（明细表里有每天采样时长），机器关机或面板没跑的时间不计。':
+      'Watts are integrated every 2 s sample. GPU watts are measured by nvidia-smi; machine, wall and cost are estimates — Windows has no RAPL-style per-core power telemetry, so CPU watts use a flat load model (15 W idle + up to 65 W), the platform (board/RAM/SSD/fans) is a fixed 130 W, the PSU is assumed 90 % efficient and the tariff is an assumed 0.60 CNY/kWh. Energy covers only the hours this dashboard was sampling (see the Sampled column); shutdown and idle time with the panel off are not booked.',
   };
 
   /* ------------------------------------------------------------------ core */

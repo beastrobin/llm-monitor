@@ -109,6 +109,47 @@ def _is_tier_key(key):
         return False
 
 
+# --------------------------------------------------------------------------
+# Energy integration for the 能耗面板 tab.
+#
+# The GPU's watts are NVML's measured draw; everything machine-level is an
+# ESTIMATE.  This host is Windows, which exposes no RAPL-style per-package
+# power telemetry to userland, so the CPU line comes from a flat utilisation
+# model (idle floor + linear ramp to a package-style ceiling) and the platform
+# constant covers board, RAM, SSDs and fans.  The UI labels these numbers 估算
+# and the tooltip says why; only the GPU column is a measurement.  The model
+# constants live here, next to the integrator, so a future correction changes
+# the books and the display together.
+#
+# Coverage rule: watts are integrated only while the monitor samples, exactly
+# like the token books.  A day the dashboard never ran shows no energy, which
+# is why every energy row also carries the sampled seconds behind its hours.
+# --------------------------------------------------------------------------
+PLATFORM_W = 130.0        # board/RAM/SSD/fan baseline, machine-level estimate
+CPU_BASE_W = 15.0         # CPU estimate at 0 % load
+CPU_SLOPE_W = 65.0        # extra CPU watts on top of the floor at 100 % load
+PSU_EFFICIENCY = 0.90     # wall = machine / efficiency (typical 80+ tier)
+ENERGY_PRICE_CNY_PER_KWH = 0.60   # display assumption, labelled as such in UI
+POWER_DT_CAP_S = 30.0     # never integrate across a longer gap than this
+
+
+def _blank_energy():
+    """One day's energy book (watt-hours; float, not the int token shape)."""
+    return {"gpu_wh": 0.0, "cpu_est_wh": 0.0, "machine_wh": 0.0,
+            "hours": 0.0, "samples": 0}
+
+
+def _energy_fields(data):
+    """Sanitise one persisted energy bucket, keeping unknown keys out."""
+    bucket = _blank_energy()
+    for field in bucket:
+        value = data.get(field)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) \
+                and value >= 0:
+            bucket[field] = float(value) if field != "samples" else int(value)
+    return bucket
+
+
 def readings_for(endpoints):
     """Extract one ledger reading per (endpoint, model) from a single sample.
 
@@ -150,6 +191,8 @@ class TokenLedger(object):
         self._models = {}        # "endpoint/model" -> field -> sum
         self._tiers = {}         # "watts" -> field -> sum
         self._combos = {}        # "day|watts|endpoint/model" -> field -> sum
+        self._energy = {}        # "YYYY-MM-DD" -> energy bucket (floats)
+        self._power_ts = None    # last observe_power() timestamp
         self._tier_since = ""    # when tier attribution first booked anything
         self._resets = 0
         self._since = None
@@ -213,6 +256,9 @@ class TokenLedger(object):
         for key, fields in (data.get("combos") or {}).items():
             if isinstance(fields, dict) and len(key.split("|", 2)) == 3:
                 self._combos[key] = _ints(fields)
+        for day, fields in (data.get("energy") or {}).items():
+            if isinstance(fields, dict):
+                self._energy[day] = _energy_fields(fields)
         if isinstance(data.get("tier_since"), str):
             self._tier_since = data["tier_since"]
         if isinstance(data.get("resets"), (int, float)):
@@ -236,7 +282,7 @@ class TokenLedger(object):
             if now - self._last_flush < FLUSH_SECONDS:
                 return False
         payload = {
-            "version": 2,
+            "version": 3,
             "since": self._since,
             "tier_since": self._tier_since,
             "resets": self._resets,
@@ -245,6 +291,7 @@ class TokenLedger(object):
             "models": self._models,
             "tiers": self._tiers,
             "combos": self._combos,
+            "energy": self._energy,
             "seen": self._seen,
         }
         tmp = self.path + ".tmp"
@@ -295,6 +342,7 @@ class TokenLedger(object):
         self._models = {}
         self._tiers = {}
         self._combos = {}
+        self._energy = {}
         self._tier_since = ""
         self._resets = 0
         self._since = None       # the next observe re-stamps it
@@ -390,6 +438,59 @@ class TokenLedger(object):
             self._since = day
         self._trim()
 
+    def observe_power(self, gpu_w=None, cpu_pct=None, now=None):
+        """Integrate one sample's power draw into the daily energy books.
+
+        ``gpu_w`` is the card's measured NVML draw; ``cpu_pct`` drives the
+        CPU *estimate* described on the constants above.  The interval is the
+        wall time since the previous call, capped at POWER_DT_CAP_S: a sleep,
+        a stalled sampler or a long HTTP timeout must not book watts for time
+        nobody was measuring, so the books simply lose coverage there rather
+        than inventing energy.  The first call only sets the baseline.
+
+        Machine watts always integrate platform + GPU + CPU, using each term's
+        floor when that sensor is missing (platform alone when both are down),
+        so a dropped GPU read shrinks the estimate instead of zeroing it.
+        """
+        if now is None:
+            now = time.time()
+        previous, self._power_ts = self._power_ts, now
+        if previous is None:
+            return
+        dt = now - previous
+        if dt <= 0:
+            return
+        if dt > POWER_DT_CAP_S:
+            dt = POWER_DT_CAP_S
+
+        def _clamped(value):
+            try:
+                return max(0.0, float(value))
+            except (TypeError, ValueError):
+                return None
+
+        gpu = _clamped(gpu_w) if gpu_w is not None else None
+        cpu_pct = _clamped(cpu_pct) if cpu_pct is not None else None
+        cpu = (CPU_BASE_W + CPU_SLOPE_W * min(cpu_pct, 100.0) / 100.0
+               if cpu_pct is not None else None)
+        if gpu is None and cpu is None:
+            return
+
+        hours = dt / 3600.0
+        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        bucket = self._energy.setdefault(day, _blank_energy())
+        if gpu is not None:
+            bucket["gpu_wh"] += gpu * hours
+        if cpu is not None:
+            bucket["cpu_est_wh"] += cpu * hours
+        bucket["machine_wh"] += ((gpu if gpu is not None else 0.0)
+                                 + (cpu if cpu is not None else CPU_BASE_W)
+                                 + PLATFORM_W) * hours
+        bucket["hours"] += hours
+        bucket["samples"] += 1
+        self._dirty = True
+        self._gen += 1
+
     def _trim(self):
         """Drop daily buckets past the retention window.
 
@@ -408,6 +509,18 @@ class TokenLedger(object):
                                   if k.split("|", 2)[0] < cutoff):
                     del self._combos[key]
                     self._dirty = True
+                self._gen += 1
+        # Energy days ride the same retention window as the token days; the
+        # check is separate because a machine that only ever idles can have
+        # energy buckets on days no token was ever booked.
+        if self.keep_days > 0 and self._energy:
+            cutoff = time.strftime("%Y-%m-%d", time.localtime(
+                time.time() - self.keep_days * 86400.0))
+            stale = sorted(day for day in self._energy if day < cutoff)
+            if stale:
+                for day in stale:
+                    del self._energy[day]
+                self._dirty = True
                 self._gen += 1
         # Tiers are lifetime totals, so they outlive the day window.  The cap
         # only exists for the pathological case of an unbounded number of
@@ -460,6 +573,23 @@ class TokenLedger(object):
             })
         out.reverse()
         return out
+
+    def _energy_rows(self, limit):
+        """Newest-first daily energy rows; wall is derived, never booked."""
+        rows = []
+        for day in sorted(self._energy)[-limit:]:
+            bucket = self._energy[day]
+            rows.append({
+                "day": day,
+                "gpu_wh": round(bucket["gpu_wh"], 2),
+                "cpu_est_wh": round(bucket["cpu_est_wh"], 2),
+                "machine_wh": round(bucket["machine_wh"], 2),
+                "wall_wh": round(bucket["machine_wh"] / PSU_EFFICIENCY, 2),
+                "hours": round(bucket["hours"], 2),
+                "samples": bucket["samples"],
+            })
+        rows.reverse()
+        return rows
 
     def _tier_rows(self):
         rows = []
@@ -531,6 +661,17 @@ class TokenLedger(object):
             "since": self._since,
             "days": len(self._daily),
             "recent": self._recent(7),
+            "energy_rows": self._energy_rows(7),
+            "energy_price_cny_per_kwh": ENERGY_PRICE_CNY_PER_KWH,
+            # The estimate model itself, so the live "now" cards in the UI
+            # draw their numbers from the same constants the books use --
+            # display and ledger are not allowed to disagree.
+            "energy_model": {
+                "platform_w": PLATFORM_W,
+                "cpu_base_w": CPU_BASE_W,
+                "cpu_slope_w": CPU_SLOPE_W,
+                "psu_efficiency": PSU_EFFICIENCY,
+            },
         }
         self._payload_cache = payload
         self._payload_day = day

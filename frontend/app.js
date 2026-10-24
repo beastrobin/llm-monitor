@@ -2437,6 +2437,212 @@ function renderTokenStats(snapshot) {
     }).join('') + '</tbody></table>' : '';
 }
 
+// ------------------------------------------------------------------ energy
+// The 能耗面板 tab (2026-10-24): Netdata Power Dashboard's content shape,
+// fed by this machine's own books.  One number on this pane is a measurement
+// -- the GPU's NVML draw -- and everything machine-level is an estimate whose
+// model lives in collectors/stats.py and arrives with the payload as
+// energy_model, so the live cards here and the integrator there can never
+// drift apart.  Estimates say 估算 in their own label row, not in a footnote.
+
+function whText(value) {
+  if (value === null || value === undefined || !isFinite(value)) return '—';
+  if (value >= 1000) return num(value / 1000, 2) + ' kWh';
+  return num(value, 0) + ' Wh';
+}
+
+function drawEnergyBars(canvas, rows) {
+  // Ledger rows arrive newest-first; bars read left to right oldest to newest.
+  const days = (rows || []).slice().reverse();
+  const mono = cssVar('--font-mono') || FALLBACK_MONO;
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(64, canvas.clientWidth || 320);
+  const height = Math.max(60, canvas.clientHeight || 150);
+  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+  }
+  const g = canvas.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, width, height);
+
+  if (!days.length) {
+    g.fillStyle = cssVar('--muted');
+    g.font = '12px ' + mono;
+    g.fillText('暂无能耗记录', 8, height / 2);
+    return;
+  }
+
+  let peak = 0;
+  days.forEach(function (row) {
+    peak = Math.max(peak, row.machine_wh || 0, row.gpu_wh || 0);
+  });
+  // Nice ceiling (1/2/5 x 10^n) so the Wh gridlines read as round numbers.
+  let max = peak > 0 ? peak : 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(max)));
+  const norm = max / mag;
+  max = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10) * mag;
+
+  const axisColor = cssVar('--axis');
+  const gridColor = cssVar('--grid');
+  const gpuColor = cssVar('--chart-b');
+  // The machine bar sits behind the GPU bar as a translucent shell, so the
+  // eye reads "measured" as the filled core of "estimated total" -- the
+  // relationship the numbers actually have.
+  const machineColor = 'rgba(124, 148, 190, 0.32)';
+
+  const padL = 40, padR = 8, padT = 10, padB = 18;
+  const plotW = Math.max(10, width - padL - padR);
+  const plotH = Math.max(10, height - padT - padB);
+
+  g.strokeStyle = gridColor;
+  g.fillStyle = axisColor;
+  g.font = '10px ' + mono;
+  g.lineWidth = 1;
+  for (let i = 0; i <= 2; i++) {
+    const value = max * i / 2;
+    const y = padT + plotH - plotH * i / 2;
+    g.beginPath();
+    g.moveTo(padL, y);
+    g.lineTo(width - padR, y);
+    g.stroke();
+    g.fillText(whText(value), 2, y + 3);
+  }
+
+  const slot = plotW / days.length;
+  const barW = Math.max(6, Math.min(26, slot * 0.34));
+  days.forEach(function (row, i) {
+    const cx = padL + slot * (i + 0.5);
+    const mh = Math.max(0, plotH * (row.machine_wh || 0) / max);
+    const gh = Math.max(0, plotH * (row.gpu_wh || 0) / max);
+    g.fillStyle = machineColor;
+    g.fillRect(cx - barW - 1, padT + plotH - mh, barW, mh);
+    g.fillStyle = gpuColor;
+    g.fillRect(cx + 1, padT + plotH - gh, barW, gh);
+    g.fillStyle = axisColor;
+    g.textAlign = 'center';
+    g.fillText((row.day || '').slice(5), cx, height - 5);
+    g.textAlign = 'left';
+  });
+}
+
+function renderEnergyPanel(snapshot) {
+  const cards = document.getElementById('energy-cards');
+  const note = document.getElementById('energy-note');
+  const table = document.getElementById('energy-days');
+  const line = document.getElementById('energy-power-line');
+  const bars = document.getElementById('energy-daily-bars');
+  if (!cards || !note || !table || !line || !bars) return;
+
+  const data = snapshot.stats;
+  const model = (data && data.energy_model) ||
+    { platform_w: 130, cpu_base_w: 15, cpu_slope_w: 65, psu_efficiency: 0.9 };
+  const price = (data && typeof data.energy_price_cny_per_kwh === 'number')
+    ? data.energy_price_cny_per_kwh : 0.6;
+
+  // Live draw: GPU measured (summed over cards that reported), machine/wall
+  // from the ledger's own constants -- the same arithmetic observe_power()
+  // integrates, evaluated at "now" instead of over an interval.
+  const gpus = (snapshot.gpu && snapshot.gpu.gpus) || [];
+  let watts = 0;
+  let hasWatts = false;
+  gpus.forEach(function (card) {
+    if (typeof card.power_w === 'number' && isFinite(card.power_w)) {
+      watts += card.power_w;
+      hasWatts = true;
+    }
+  });
+  const sys = snapshot.system || {};
+  const cpuPct = (sys.available && sys.cpu) ? sys.cpu.load_pct : null;
+  const cpuW = (typeof cpuPct === 'number' && isFinite(cpuPct))
+    ? model.cpu_base_w + model.cpu_slope_w * Math.min(100, Math.max(0, cpuPct)) / 100
+    : null;
+  const machineW = (hasWatts ? watts : 0) +
+    (cpuW === null ? model.cpu_base_w : cpuW) + model.platform_w;
+  const wallW = machineW / (model.psu_efficiency || 0.9);
+
+  const rows = (data && data.energy_rows) || [];
+  const todayRow = (data && rows.length && rows[0].day === data.today) ? rows[0] : null;
+  const costYuan = todayRow ? todayRow.wall_wh / 1000 * price : null;
+
+  const ledgerDown = !data || data.available === false;
+  if (ledgerDown) {
+    note.className = 'stat-note subtle';
+    note.textContent = '账本未启用：没有能耗积分。';
+    cards.innerHTML = '';
+    table.innerHTML = '';
+    drawSpark(line, [], { min: 0, color: cssVar('--chart-b'), format: function (v) { return num(v, 0) + ' W'; } });
+    drawEnergyBars(bars, []);
+    return;
+  }
+
+  const cells = [
+    {
+      label: '显卡功率', est: false, value: hasWatts ? watts : null,
+      unit: 'W', digits: 0,
+      foot: todayRow ? '实测 · 今日 ' + whText(todayRow.gpu_wh) : '实测 · 今日暂无',
+      tip: gpus.length > 1 ? '全部显卡实时功耗之和，nvidia-smi 读数'
+        : 'nvidia-smi 实时读数',
+    },
+    {
+      label: '整机功率', est: true, value: machineW, unit: 'W', digits: 0,
+      foot: 'CPU 估算 + 平台 ' + num(model.platform_w, 0) + ' W',
+    },
+    {
+      label: '墙插功率', est: true, value: wallW, unit: 'W', digits: 0,
+      foot: '按电源效率 ' + num(model.psu_efficiency * 100, 0) + '%',
+    },
+    {
+      label: '今日电费', est: true, value: costYuan, unit: '', digits: null,
+      foot: '电价假设 ' + num(price, 2) + ' 元/kWh',
+    },
+  ];
+  cards.innerHTML = cells.map(function (cell) {
+    let value;
+    if (cell.value === null || cell.value === undefined || !isFinite(cell.value)) {
+      value = '—';
+    } else if (cell.digits === null) {
+      value = '¥' + num(cell.value, 2);
+    } else {
+      value = num(cell.value, cell.digits) +
+        '<span class="stat-unit">' + esc(cell.unit) + '</span>';
+    }
+    return '<div class="stat">' +
+      '<span class="stat-label">' + esc(cell.label) +
+        (cell.est ? ' <i class="est-flag">估算</i>' : '') + '</span>' +
+      '<span class="stat-value"' + (cell.tip ? ' title="' + esc(cell.tip) + '"' : '') + '>' +
+        value + '</span>' +
+      '<span class="stat-foot">' + esc(cell.foot) + '</span>' +
+      '</div>';
+  }).join('');
+
+  // Coverage belongs in the open: a day the dashboard never ran shows no
+  // energy, so the note says when the books actually started.
+  note.className = 'stat-note subtle';
+  note.textContent = data.since
+    ? '能耗自 ' + data.since + ' 起按采样积分；采样覆盖的时长见明细表『采样』列。'
+    : '开始记账后每轮采样自动积分，暂无数据。';
+
+  drawSpark(line, seriesOf('gpu0.power'), {
+    min: 0, color: cssVar('--chart-b'), autoscale: true,
+    format: function (v) { return num(v, 0) + ' W'; },
+  });
+  drawEnergyBars(bars, rows);
+
+  table.innerHTML = rows.length ? '<table><thead><tr><th>日期</th>' +
+    '<th class="num">GPU 实测</th><th class="num">整机估算</th>' +
+    '<th class="num">墙插估算</th><th class="num">电费估算</th>' +
+    '<th class="num">采样</th></tr></thead><tbody>' +
+    rows.map(function (row) {
+      return '<tr><td>' + esc(row.day) + '</td>' +
+        '<td class="num">' + whText(row.gpu_wh) + '</td>' +
+        '<td class="num">' + whText(row.machine_wh) + '</td>' +
+        '<td class="num">' + whText(row.wall_wh) + '</td>' +
+        '<td class="num">¥' + num(row.wall_wh / 1000 * price, 2) + '</td>' +
+        '<td class="num">' + num(row.hours, 1) + ' h / ' + tokenText(row.samples) + ' 次</td></tr>';
+    }).join('') + '</tbody></table>' : '';
+}
+
 // The release is named by the server, not by this file, so a browser holding a
 // cached app.js still shows the version it is actually talking to.  Empty until
 // the first snapshot lands, and hidden by CSS while it is.
@@ -2458,6 +2664,7 @@ function render() {
   renderSystem(snapshot);
   renderPowerControl(snapshot);
   renderTokenStats(snapshot);
+  renderEnergyPanel(snapshot);
 
   const meta = document.getElementById('meta');
   const when = new Date(snapshot.ts * 1000);

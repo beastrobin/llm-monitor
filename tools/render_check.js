@@ -1040,8 +1040,8 @@ function readFrames(base, count, timeoutMs) {
     return Array.prototype.filter.call(doc.querySelectorAll('.hist-pane'), function (p) { return !p.hidden; })
       .map(function (p) { return p.dataset.pane; }).join();
   };
-  let tabOk = histBtns.length === 4 &&
-    Array.prototype.map.call(histBtns, function (b) { return b.dataset.pane; }).join(',') === 'rank,tiers,combos,days' &&
+  let tabOk = histBtns.length === 5 &&
+    Array.prototype.map.call(histBtns, function (b) { return b.dataset.pane; }).join(',') === 'rank,tiers,combos,days,energy' &&
     shownPanes() === 'rank';
   if (tabOk) {
     histBtns[2].click();
@@ -1050,8 +1050,28 @@ function readFrames(base, count, timeoutMs) {
     histBtns[0].click();
     tabOk = tabOk && shownPanes() === 'rank' && histBtns[0].classList.contains('on');
   }
-  say('历史信息选项卡: 四按钮 rank,tiers,combos,days 点击切面板 复原 ' +
+  say('历史信息选项卡: 五按钮 rank,tiers,combos,days,energy 点击切面板 复原 ' +
     (tabOk ? '✓ — 通过 ✓' : '✗ — 失败 ✗'));
+
+  // 能耗面板 (2026-10-24): the tab must actually paint -- four cards, both
+  // canvases mounted, a coverage note -- not just exist as a hidden div.  The
+  // GPU card is the one measured number on the pane, so its value has to
+  // carry the W unit whenever the GPU collector reported.
+  let energyOk = false;
+  if (tabOk) {
+    histBtns[4].click();
+    const energyCards = doc.querySelectorAll('#energy-cards .stat');
+    const gpuValue = energyCards.length ? text(energyCards[0].querySelector('.stat-value')) : '';
+    energyOk = shownPanes() === 'energy' && energyCards.length === 4 &&
+      !!doc.getElementById('energy-power-line') &&
+      !!doc.getElementById('energy-daily-bars') &&
+      !!text(doc.getElementById('energy-note')) &&
+      (!live.pushed || /[0-9]/.test(gpuValue));
+    histBtns[0].click();
+    energyOk = energyOk && shownPanes() === 'rank';
+  }
+  say('能耗面板: 四卡+双画布+口径说明 渲染 ' +
+    (energyOk ? '✓ — 通过 ✓' : '✗ — 失败 ✗'));
 
   // A half-translated page is the failure mode of a dictionary layer: it reads
   // English until one label stays Chinese. Scan English mode for CJK left in
@@ -1104,7 +1124,8 @@ function readFrames(base, count, timeoutMs) {
   const code = (errors.length || !routingOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
     !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk ||
-    !verOk || !rowVerOk || !langOk || !langLeaksOk || !ttftOk || !tabOk) ? 1 : 0;
+    !verOk || !rowVerOk || !langOk || !langLeaksOk || !ttftOk || !tabOk ||
+    !energyOk) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own

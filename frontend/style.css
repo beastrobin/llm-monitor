@@ -1490,3 +1490,65 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
   visibility: hidden;
   transition: opacity .12s ease;
 }
+
+/* ---------------------------------------------------------------- energy pane (v1.10) */
+
+/* Cards reuse .stat wholesale; only the estimate flag and the two chart
+   frames are new.  An estimate is labelled on the card itself, so the flag
+   has to read as a warning-adjacent badge, not as muted decoration. */
+.est-flag {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: 6px;
+  padding: 0 5px;
+  margin-left: 4px;
+  vertical-align: 1px;
+}
+
+.energy-charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 13px;
+  margin-top: 13px;
+}
+@media (max-width: 900px) {
+  .energy-charts { grid-template-columns: 1fr; }
+}
+
+.energy-chart {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-soft);
+  padding: 10px 12px 8px;
+  min-width: 0;
+}
+.energy-chart-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.energy-chart canvas {
+  display: block;
+  width: 100%;
+  height: 150px;
+}
+.energy-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.energy-legend .sw {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.energy-legend .sw.gpu { background: var(--chart-b); }
+.energy-legend .sw.machine { background: rgba(124, 148, 190, 0.45); }

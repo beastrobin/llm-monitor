@@ -65,6 +65,7 @@
         <button type="button" data-pane="tiers">运行功率 <span class="tip" tabindex="0" data-tip="token 增量在记账的那一刻会被打上当时生效的显卡功耗上限，所以这里回答的是『这些 token 是在哪个功率档下跑出来的』。注意这是按时间归因，不是按用量分摊——功耗上限属于整张显卡，同一张卡上同时跑的几个模型都会记到同一个档位，这个数永远不代表某个模型『用掉了多少瓦』。档位归集从本功能启用那一刻开始记，更早的 token 没有记录当时的档位，所以各档之和小于累计总量；采样时读不到功耗上限（显卡采集关闭或驱动查询失败）会单独记成『档位未知』，不会被并进任何一档。">i</span></button>
         <button type="button" data-pane="combos">token明细 <span class="tip" tabindex="0" data-tip="逐行累计每个『某天 + 某档位 + 某模型』组合的增量。速度用的是引擎自己上报的耗时（llama.cpp 的 prompt_seconds / predicted_seconds 计数器），只在引擎真正计算时增长，所以空闲时间不会把速率摊薄——它反映的是『干活时有多快』。注意预填充速率的分子含 KV 缓存命中的 token，而缓存重读几乎不花时间，所以命中越多这个数越大；对照『KV 复用』一列看，它接近预填充量时说明大部分提示词只是重读缓存而不是真在算。某个组合的耗时计数为 0（例如模型刚加载、该 series 还没导出）时显示为 —。">i</span></button>
         <button type="button" data-pane="days">7日汇总</button>
+        <button type="button" data-pane="energy">能耗面板 <span class="tip" tabindex="0" data-tip="把每 2 秒采样的功率积分成电量。GPU 瓦数是 nvidia-smi 实测；『整机』『墙插』『电费』是估算——Windows 上没有 Linux RAPL 那套逐核功耗遥测，CPU 瓦按占用率线性模型估（15 W 空闲 + 最高 65 W），平台（主板/内存/SSD/风扇）记固定 130 W，电源效率按 90% 折算到墙插，电价按 0.60 元/kWh 假设。能耗只覆盖工作台在采样的小时（明细表里有每天采样时长），机器关机或面板没跑的时间不计。">i</span></button>
       </div>
       <button id="stats-reset-btn" type="button" class="danger" title="把账本整体归零：今日与累计 token、模型排行、功率档归集、明细表、近 7 天汇总全部清空，并当场写回 stats.json。引擎计数基线会保留，所以清空后不会把 server 的历史累计重新入账；此操作不可撤销。">清空数据</button>
     </div>
@@ -89,6 +90,25 @@
 
     <div class="hist-pane" data-pane="days" hidden>
       <div id="token-days" class="subtable"></div>
+    </div>
+
+    <!-- 能耗面板（2026-10-24）：仿 Netdata Power Dashboard 的内容结构，数据
+         全部来自本机账本——GPU 瓦数实测，机器/墙插/电费按 stats.py 的模型估算，
+         卡片标签上就把「估算」写死，不做视觉上的暧昧。 -->
+    <div class="hist-pane" data-pane="energy" hidden>
+      <div id="energy-note" class="stat-note subtle"></div>
+      <div class="stat-grid" id="energy-cards"></div>
+      <div class="energy-charts">
+        <div class="energy-chart">
+          <div class="energy-chart-title">显卡功率 · 近 30 分钟 <span class="muted">nvidia-smi 实测 · 悬停看精确值</span></div>
+          <canvas id="energy-power-line"></canvas>
+        </div>
+        <div class="energy-chart">
+          <div class="energy-chart-title">每日能耗 <span class="energy-legend"><i class="sw gpu"></i>实测 GPU</span><span class="energy-legend"><i class="sw machine"></i>估算整机</span></div>
+          <canvas id="energy-daily-bars"></canvas>
+        </div>
+      </div>
+      <div id="energy-days" class="subtable"></div>
     </div>
   </section>
 </main>

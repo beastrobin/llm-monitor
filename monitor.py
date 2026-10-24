@@ -52,7 +52,7 @@ del _stream_name
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.9"
+VERSION = "1.10"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
@@ -902,6 +902,18 @@ class Hub(object):
         # the thread pool, and it must not be able to fail the sample.
         if self.ledger is not None:
             self.ledger.observe(stats.readings_for(endpoints), watts=tier)
+            # Energy books: GPU watts are summed over every card that
+            # reported, CPU load drives the ledger's machine estimate.  Both
+            # may be None when their collector failed -- observe_power then
+            # books nothing rather than guessing.
+            cards = (payload.get("gpu") or {}).get("gpus") or []
+            watts_now = [c.get("power_w") for c in cards
+                         if c.get("power_w") is not None]
+            system = payload.get("system") or {}
+            cpu = system.get("cpu") if system.get("available") else None
+            self.ledger.observe_power(
+                gpu_w=sum(watts_now) if watts_now else None,
+                cpu_pct=(cpu or {}).get("load_pct"))
             self.ledger.flush()
             payload["stats"] = self.ledger.payload()
         else:
