@@ -2822,6 +2822,11 @@ function initHistTabs() {
     });
     panes.forEach(function (p) { p.hidden = p.dataset.pane !== name; });
     try { localStorage.setItem(HIST_TAB_KEY, name); } catch (e) {}
+    // Canvases inside a hidden pane measured 0 wide while hidden, and the
+    // charts only repaint when the next sample lands -- up to 2 s of an empty
+    // chart the moment you switch to a tab. Painting on the switch itself
+    // costs one extra render pass and kills the blank.
+    if (typeof render === 'function') render();
   };
   tabs.forEach(function (b) {
     b.addEventListener('click', function () { show(b.dataset.pane); });

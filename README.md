@@ -590,7 +590,8 @@ HTTP 接口：
   用的是同一套数，不允许多处漂移。积分按「没有覆盖就没有账」：相邻样本间隔封顶 30 s，睡眠或
   面板没跑的时间宁可丢覆盖也不编电量。
 - **落盘**：`stats.json` 新增 `energy` 桶，文件 `version` 2→3（旧文件照读，畸形值清洗后入账）；
-  能耗日桶与 token 日桶同走 `stats.keep_days` 保留窗；`/api/stats-reset` 一并清空。
+  能耗日桶与 token 日桶同走 `stats.keep_days` 保留窗；`/api/stats-reset` 一并清空。切到任何
+  账本选项卡时立即重绘一次 —— 隐藏面板里的 canvas 量得 0 宽，不补这一下会先看到最长 2 秒空图。
 - **测试**：`tests/test_energy_ledger.py` 9 例（首例只立基线、区间积分、长间隔封顶不倒灌、
   时钟回拨不记、传感器全缺不记、缺 GPU 只缩整机不归零、reset 落盘与读回、畸形持久化数据清洗、
   保留窗裁剪、payload 携带模型常量）。`render_check` 的 `tabOk` 改钉五按钮，新增 `energyOk`
