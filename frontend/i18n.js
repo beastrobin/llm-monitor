@@ -419,6 +419,12 @@
     '全部显卡实时功耗之和，nvidia-smi 读数':
       'sum of all cards, live nvidia-smi readings',
     '采样': 'Sampled',
+    '峰 ': 'peak ', ' / 谷 ': ' / valley ', '元/kWh · 按小时': ' CNY/kWh · hourly',
+    '本日含无小时数据的电量，按一口价补算': 'includes pre-TOU energy billed at the flat price',
+    '带＊的日期含无小时数据的电量，该部分按一口价 ': '(* the marked dates include pre-TOU energy priced flat at ',
+    ' 元/kWh 补算。': ' CNY/kWh.)',
+    '把每 2 秒采样的功率积分成电量。GPU 瓦数是 nvidia-smi 实测；『整机』『墙插』『电费』是估算——Windows 上没有 Linux RAPL 那套逐核功耗遥测，CPU 瓦按占用率线性模型估（15 W 空闲 + 最高 65 W），平台（主板/内存/SSD/风扇）记固定 130 W，电源效率按 90% 折算到墙插。电费按 config（stats.tou）的峰谷价逐小时积分；启用峰谷之前记的账没有小时拆分，按一口价 0.60 元/kWh 兜底并在表里标＊。能耗只覆盖工作台在采样的小时（明细表里有每天采样时长），机器关机或面板没跑的时间不计。':
+      'Watts are integrated every 2 s sample. GPU watts are measured by nvidia-smi; machine, wall and cost are estimates — Windows has no RAPL-style per-core power telemetry, so CPU watts use a flat load model (15 W idle + up to 65 W), the platform (board/RAM/SSD/fans) is a fixed 130 W, and the PSU is assumed 90 % efficient. Cost is billed hour by hour against the peak/valley schedule in config (stats.tou); days booked before TOU started have no hourly split and fall back to a flat 0.60 CNY/kWh, marked ＊ in the table. Energy covers only the hours this dashboard was sampling (see the Sampled column); shutdown and idle time with the panel off are not booked.',
     '把每 2 秒采样的功率积分成电量。GPU 瓦数是 nvidia-smi 实测；『整机』『墙插』『电费』是估算——Windows 上没有 Linux RAPL 那套逐核功耗遥测，CPU 瓦按占用率线性模型估（15 W 空闲 + 最高 65 W），平台（主板/内存/SSD/风扇）记固定 130 W，电源效率按 90% 折算到墙插，电价按 0.60 元/kWh 假设。能耗只覆盖工作台在采样的小时（明细表里有每天采样时长），机器关机或面板没跑的时间不计。':
       'Watts are integrated every 2 s sample. GPU watts are measured by nvidia-smi; machine, wall and cost are estimates — Windows has no RAPL-style per-core power telemetry, so CPU watts use a flat load model (15 W idle + up to 65 W), the platform (board/RAM/SSD/fans) is a fixed 130 W, the PSU is assumed 90 % efficient and the tariff is an assumed 0.60 CNY/kWh. Energy covers only the hours this dashboard was sampling (see the Sampled column); shutdown and idle time with the panel off are not booked.',
   };

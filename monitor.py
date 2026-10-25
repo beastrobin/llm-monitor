@@ -52,7 +52,7 @@ del _stream_name
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.10"
+VERSION = "1.11"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
@@ -519,7 +519,10 @@ def build_ledger(config):
         keep_days = int(settings.get("keep_days") or 0)
     except (TypeError, ValueError):
         keep_days = 0
-    return stats.TokenLedger(path, keep_days=keep_days or stats.DEFAULT_KEEP_DAYS)
+    # stats.tou (absent/malformed -> flat): {peak/valley CNY/kWh, peak hour
+    # span}; the ledger validates and refuses to guess a schedule itself.
+    return stats.TokenLedger(path, keep_days=keep_days or stats.DEFAULT_KEEP_DAYS,
+                             tou=settings.get("tou"))
 
 
 class Hub(object):

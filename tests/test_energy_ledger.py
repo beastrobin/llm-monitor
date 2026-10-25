@@ -150,5 +150,138 @@ class ObservePowerTest(unittest.TestCase):
         self.assertGreater(self.ledger.payload()["energy_price_cny_per_kwh"], 0)
 
 
+
+class TouPricingTest(unittest.TestCase):
+    """Peak/valley billing: hourly split, boundaries, and flat fallback."""
+
+    SH = {"peak_price_cny_per_kwh": 0.617, "valley_price_cny_per_kwh": 0.307,
+          "peak_start_hour": 6, "peak_end_hour": 22}
+
+    def setUp(self):
+        self.tmp = _Tmp()
+
+    def tearDown(self):
+        self.tmp.close()
+
+    def _ledger(self, tou=SH):
+        return stats.TokenLedger(self.tmp.path, tou=tou)
+
+    def test_sanitize_accepts_and_rejects(self):
+        self.assertEqual(stats.sanitize_tou(self.SH), self.SH)
+        self.assertIsNone(stats.sanitize_tou(None))
+        self.assertIsNone(stats.sanitize_tou({}))
+        self.assertIsNone(stats.sanitize_tou(
+            {"peak_price_cny_per_kwh": -1, "valley_price_cny_per_kwh": 0.3}))
+        self.assertIsNone(stats.sanitize_tou(
+            {"peak_price_cny_per_kwh": 0.6, "valley_price_cny_per_kwh": 0.3,
+             "peak_start_hour": 9, "peak_end_hour": 9}))
+        self.assertIsNone(stats.sanitize_tou(
+            {"peak_price_cny_per_kwh": 0.6, "valley_price_cny_per_kwh": 0.3,
+             "peak_start_hour": 25, "peak_end_hour": 6}))
+
+    def test_hour_boundaries_pick_the_right_rate(self):
+        # peak span [6, 22): 5 is valley, 6 is peak, 21 is peak, 22 is valley.
+        for hour, rate in ((5, 0.307), (6, 0.617), (21, 0.617), (22, 0.307)):
+            self.assertAlmostEqual(stats._tou_price(
+                stats.sanitize_tou(self.SH), hour), rate, places=9)
+
+    def test_peak_span_wrapping_midnight(self):
+        night = stats.sanitize_tou({"peak_price_cny_per_kwh": 1.0,
+                                    "valley_price_cny_per_kwh": 0.2,
+                                    "peak_start_hour": 22,
+                                    "peak_end_hour": 6})
+        self.assertTrue(stats._tou_price(night, 23) == 1.0)
+        self.assertTrue(stats._tou_price(night, 3) == 1.0)
+        self.assertTrue(stats._tou_price(night, 12) == 0.2)
+
+    def test_bill_uses_the_hour_the_energy_landed_in(self):
+        ledger = self._ledger()
+        # Two samples one hour apart inside two different rate hours:
+        # book from hour 5 (valley) into hour 6 (peak) via a real hour span.
+        ledger.observe_power(gpu_w=360.0, cpu_pct=50.0,
+                             now=NOW)                       # baseline
+        ledger.observe_power(gpu_w=360.0, cpu_pct=50.0,
+                             now=NOW + 10.0)                # one 10 s slice
+        day = time.strftime("%Y-%m-%d")
+        hour = str(time.localtime(NOW + 10.0).tm_hour)
+        bucket = ledger._energy[day]
+        self.assertIn(hour, bucket["by_hour"])
+        # Charge it and cross-check _cost against the rate of that hour.
+        cost, basis = ledger._cost(bucket)
+        self.assertEqual(basis, "tou")
+        part_wh = bucket["by_hour"][hour]["machine_wh"]
+        want = part_wh / stats.PSU_EFFICIENCY * stats._tou_price(
+            stats.sanitize_tou(self.SH), int(hour)) / 1000.0
+        self.assertAlmostEqual(cost, want, places=6)
+
+    def test_day_without_hourly_split_bills_flat(self):
+        ledger = self._ledger()
+        day = time.strftime("%Y-%m-%d")
+        legacy = stats._blank_energy()
+        legacy.pop("by_hour")
+        ledger._energy[day] = legacy
+        legacy.update({"machine_wh": 900.0, "hours": 3.0, "samples": 1})
+        cost, basis = ledger._cost(ledger._energy[day])
+        self.assertEqual(basis, "flat")
+        self.assertAlmostEqual(cost, 900.0 / stats.PSU_EFFICIENCY
+                               * stats.ENERGY_PRICE_CNY_PER_KWH / 1000.0,
+                               places=6)
+
+
+    def test_mixed_day_bills_split_at_tou_and_residual_flat(self):
+        # The migration day: energy booked before the hourly books existed
+        # sits in the same bucket as the new split hours.  The split hours
+        # must be billed at TOU and the unsplit remainder at the flat price;
+        # the row must not pretend to be a pure TOU bill.
+        ledger = self._ledger()
+        day = time.strftime("%Y-%m-%d")
+        bucket = ledger._energy.setdefault(day, stats._blank_energy())
+        legacy_wh = 1800.0
+        hour = str(time.localtime(NOW).tm_hour)
+        bucket["by_hour"][hour] = {"gpu_wh": 100.0, "machine_wh": 200.0}
+        bucket["machine_wh"] = legacy_wh + 200.0
+        cost, basis = ledger._cost(bucket)
+        self.assertEqual(basis, "mixed")
+        want = (200.0 / stats.PSU_EFFICIENCY
+                * stats._tou_price(stats.sanitize_tou(self.SH), int(hour))
+                + legacy_wh / stats.PSU_EFFICIENCY
+                * stats.ENERGY_PRICE_CNY_PER_KWH) / 1000.0
+        self.assertAlmostEqual(cost, want, places=6)
+
+    def test_rows_and_pricing_shape_reach_the_ui(self):
+        ledger = self._ledger()
+        ledger.observe_power(gpu_w=300.0, cpu_pct=25.0, now=NOW)
+        ledger.observe_power(gpu_w=300.0, cpu_pct=25.0, now=NOW + 10.0)
+        payload = ledger.payload()
+        self.assertEqual(payload["energy_pricing"]["mode"], "tou")
+        self.assertEqual(payload["energy_pricing"]["tou"]["peak_start_hour"], 6)
+        row = payload["energy_rows"][0]
+        self.assertIn("cost_yuan", row)
+        self.assertEqual(row["cost_basis"], "tou")
+        # A flat-mode ledger labels its bills accordingly.
+        flat = self._ledger(tou=None)
+        self.assertEqual(flat.payload()["energy_pricing"]["mode"], "flat")
+
+    def test_by_hour_survives_persist_and_rejects_garbage(self):
+        ledger = self._ledger()
+        ledger.observe_power(gpu_w=300.0, cpu_pct=25.0, now=NOW)
+        ledger.observe_power(gpu_w=300.0, cpu_pct=25.0, now=NOW + 10.0)
+        ledger.flush(force=True)
+        with open(self.tmp.path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        for bucket in raw["energy"].values():
+            bucket["by_hour"]["99"] = {"gpu_wh": 5}      # impossible hour
+            bucket["by_hour"]["7"] = {"machine_wh": "x"}  # not a number
+            bucket["by_hour"]["8"] = "junk"
+        revived = stats.TokenLedger(self.tmp.path, tou=self.SH)
+        bucket = revived._energy[time.strftime("%Y-%m-%d")]
+        self.assertNotIn("99", bucket["by_hour"])
+        self.assertNotIn("7", bucket["by_hour"])
+        self.assertNotIn("8", bucket["by_hour"])
+        # The real hour survived and the bill is still 'tou', not flat.
+        self.assertTrue(bucket["by_hour"])
+        self.assertEqual(revived.payload()["energy_rows"][0]["cost_basis"], "tou")
+
+
 if __name__ == "__main__":
     unittest.main()

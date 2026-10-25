@@ -2563,7 +2563,12 @@ function renderEnergyPanel(snapshot) {
 
   const rows = (data && data.energy_rows) || [];
   const todayRow = (data && rows.length && rows[0].day === data.today) ? rows[0] : null;
-  const costYuan = todayRow ? todayRow.wall_wh / 1000 * price : null;
+  // Cost comes from the ledger's own bill (hourly peak/valley when the books
+  // have an hourly split; flat otherwise) -- the UI never re-prices energy.
+  const pricing = (data && data.energy_pricing) || { mode: 'flat' };
+  const costYuan = todayRow ? todayRow.cost_yuan : null;
+  const flatToday = !!(pricing.mode === 'tou' && todayRow &&
+    todayRow.cost_basis !== 'tou');
 
   const ledgerDown = !data || data.available === false;
   if (ledgerDown) {
@@ -2594,7 +2599,11 @@ function renderEnergyPanel(snapshot) {
     },
     {
       label: '今日电费', est: true, value: costYuan, unit: '', digits: null,
-      foot: '电价假设 ' + num(price, 2) + ' 元/kWh',
+      foot: pricing.mode === 'tou' && pricing.tou
+        ? '峰 ' + num(pricing.tou.peak_price_cny_per_kwh, 3) + ' / 谷 ' +
+          num(pricing.tou.valley_price_cny_per_kwh, 3) + ' 元/kWh · 按小时'
+        : '电价假设 ' + num(price, 2) + ' 元/kWh',
+      tip: flatToday ? '本日含无小时数据的电量，按一口价补算' : '',
     },
   ];
   cards.innerHTML = cells.map(function (cell) {
@@ -2617,11 +2626,16 @@ function renderEnergyPanel(snapshot) {
   }).join('');
 
   // Coverage belongs in the open: a day the dashboard never ran shows no
-  // energy, so the note says when the books actually started.
+  // energy, so the note says when the books actually started.  Days booked
+  // before the hourly split get a flat-price bill, and the note says that
+  // too rather than letting ＊ sit there unexplained.
+  const flatDays = pricing.mode === 'tou' &&
+    rows.some(function (row) { return row.cost_basis !== 'tou'; });
   note.className = 'stat-note subtle';
-  note.textContent = data.since
+  note.textContent = (data.since
     ? '能耗自 ' + data.since + ' 起按采样积分；采样覆盖的时长见明细表『采样』列。'
-    : '开始记账后每轮采样自动积分，暂无数据。';
+    : '开始记账后每轮采样自动积分，暂无数据。') +
+    (flatDays ? '带＊的日期含无小时数据的电量，该部分按一口价 ' + num(price, 2) + ' 元/kWh 补算。' : '');
 
   drawSpark(line, seriesOf('gpu0.power'), {
     min: 0, color: cssVar('--chart-b'), autoscale: true,
@@ -2638,7 +2652,9 @@ function renderEnergyPanel(snapshot) {
         '<td class="num">' + whText(row.gpu_wh) + '</td>' +
         '<td class="num">' + whText(row.machine_wh) + '</td>' +
         '<td class="num">' + whText(row.wall_wh) + '</td>' +
-        '<td class="num">¥' + num(row.wall_wh / 1000 * price, 2) + '</td>' +
+        '<td class="num"' + (row.cost_basis !== 'tou' && pricing.mode === 'tou'
+          ? ' title="本日含无小时数据的电量，按一口价补算"' : '') + '>¥' +
+          num(row.cost_yuan, 2) + (row.cost_basis !== 'tou' && pricing.mode === 'tou' ? '＊' : '') + '</td>' +
         '<td class="num">' + num(row.hours, 1) + ' h / ' + tokenText(row.samples) + ' 次</td></tr>';
     }).join('') + '</tbody></table>' : '';
 }

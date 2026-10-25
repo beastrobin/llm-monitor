@@ -129,24 +129,81 @@ PLATFORM_W = 130.0        # board/RAM/SSD/fan baseline, machine-level estimate
 CPU_BASE_W = 15.0         # CPU estimate at 0 % load
 CPU_SLOPE_W = 65.0        # extra CPU watts on top of the floor at 100 % load
 PSU_EFFICIENCY = 0.90     # wall = machine / efficiency (typical 80+ tier)
-ENERGY_PRICE_CNY_PER_KWH = 0.60   # display assumption, labelled as such in UI
+ENERGY_PRICE_CNY_PER_KWH = 0.60   # flat fallback, labelled as such in the UI
 POWER_DT_CAP_S = 30.0     # never integrate across a longer gap than this
+
+
+def sanitize_tou(raw):
+    """Validate a ``stats.tou`` config block, or return None (flat pricing).
+
+    Rates are CNY/kWh and the peak span is the half-open hour interval
+    ``[start, end)`` in local time; a start past the end wraps midnight
+    (22 -> 6 is a night peak).  Anything malformed disables TOU rather than
+    guessing a schedule -- a wrong bill is worse than a flat one.
+    """
+    if not isinstance(raw, dict):
+        return None
+    try:
+        peak = float(raw.get("peak_price_cny_per_kwh"))
+        valley = float(raw.get("valley_price_cny_per_kwh"))
+        start = int(raw.get("peak_start_hour", 6))
+        end = int(raw.get("peak_end_hour", 22))
+    except (TypeError, ValueError):
+        return None
+    if peak <= 0 or valley <= 0:
+        return None
+    if not (0 <= start <= 23 and 0 <= end <= 23) or start == end:
+        return None
+    return {"peak_price_cny_per_kwh": peak,
+            "valley_price_cny_per_kwh": valley,
+            "peak_start_hour": start, "peak_end_hour": end}
+
+
+def _tou_price(tou, hour):
+    """Rate for one local hour of a validated TOU schedule."""
+    start, end = tou["peak_start_hour"], tou["peak_end_hour"]
+    if start < end:
+        is_peak = start <= hour < end
+    else:  # interval wraps midnight
+        is_peak = hour >= start or hour < end
+    return (tou["peak_price_cny_per_kwh"] if is_peak
+            else tou["valley_price_cny_per_kwh"])
 
 
 def _blank_energy():
     """One day's energy book (watt-hours; float, not the int token shape)."""
     return {"gpu_wh": 0.0, "cpu_est_wh": 0.0, "machine_wh": 0.0,
-            "hours": 0.0, "samples": 0}
+            "hours": 0.0, "samples": 0, "by_hour": {}}
 
 
 def _energy_fields(data):
     """Sanitise one persisted energy bucket, keeping unknown keys out."""
     bucket = _blank_energy()
     for field in bucket:
+        if field == "by_hour":
+            continue
         value = data.get(field)
         if isinstance(value, (int, float)) and not isinstance(value, bool) \
                 and value >= 0:
             bucket[field] = float(value) if field != "samples" else int(value)
+    # Hourly splits power the TOU bill.  A day recorded before the hourly
+    # books existed simply has no by_hour, which _cost reads as "charge flat"
+    # -- the hours were never measured, and splitting them afterwards would
+    # invent the very thing the split exists to price honestly.
+    hours = data.get("by_hour")
+    if isinstance(hours, dict):
+        for key, part in hours.items():
+            if not (isinstance(key, str) and key.isdigit() and 0 <= int(key) <= 23) \
+                    or not isinstance(part, dict):
+                continue
+            clean = {}
+            for field in ("gpu_wh", "machine_wh"):
+                value = part.get(field)
+                if isinstance(value, (int, float)) and not isinstance(value, bool) \
+                        and value >= 0:
+                    clean[field] = float(value)
+            if clean:
+                bucket["by_hour"][str(int(key))] = clean
     return bucket
 
 
@@ -182,9 +239,10 @@ def readings_for(endpoints):
 class TokenLedger(object):
     """Accumulates llama-server counters into daily, per-model and per-tier totals."""
 
-    def __init__(self, path, keep_days=DEFAULT_KEEP_DAYS):
+    def __init__(self, path, keep_days=DEFAULT_KEEP_DAYS, tou=None):
         self.path = path
         self.keep_days = keep_days
+        self._tou = sanitize_tou(tou)  # None -> flat pricing for every bill
         self._seen = {}          # "endpoint/model" -> {field: raw counter}
         self._totals = _blank()  # field -> lifetime sum
         self._daily = {}         # "YYYY-MM-DD" -> field -> sum
@@ -477,15 +535,27 @@ class TokenLedger(object):
             return
 
         hours = dt / 3600.0
-        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        local = time.localtime(now)
+        day = time.strftime("%Y-%m-%d", local)
+        hour_key = str(local.tm_hour)
         bucket = self._energy.setdefault(day, _blank_energy())
         if gpu is not None:
             bucket["gpu_wh"] += gpu * hours
         if cpu is not None:
             bucket["cpu_est_wh"] += cpu * hours
-        bucket["machine_wh"] += ((gpu if gpu is not None else 0.0)
-                                 + (cpu if cpu is not None else CPU_BASE_W)
-                                 + PLATFORM_W) * hours
+        machine_wh = ((gpu if gpu is not None else 0.0)
+                      + (cpu if cpu is not None else CPU_BASE_W)
+                      + PLATFORM_W) * hours
+        bucket["machine_wh"] += machine_wh
+        # Hourly split for the TOU bill: the whole interval is charged at the
+        # hour its sample landed in.  With a two-second interval the most a
+        # sample can straddle is two seconds of the wrong tariff, which is
+        # noise next to the estimate the machine watts already carry.
+        part = bucket["by_hour"].setdefault(
+            hour_key, {"gpu_wh": 0.0, "machine_wh": 0.0})
+        if gpu is not None:
+            part["gpu_wh"] += gpu * hours
+        part["machine_wh"] += machine_wh
         bucket["hours"] += hours
         bucket["samples"] += 1
         self._dirty = True
@@ -575,21 +645,66 @@ class TokenLedger(object):
         return out
 
     def _energy_rows(self, limit):
-        """Newest-first daily energy rows; wall is derived, never booked."""
+        """Newest-first daily energy rows; wall is derived, never booked.
+
+        ``cost_yuan`` follows the pricing the ledger was built with: TOU days
+        are billed hour by hour, days without an hourly split (recorded before
+        the hourly books, or flat mode) at the flat price -- ``cost_basis``
+        tells the UI which of the two it is looking at, so the table can say
+        so instead of blending the two into one indistinguishable column.
+        """
         rows = []
         for day in sorted(self._energy)[-limit:]:
             bucket = self._energy[day]
+            cost, basis = self._cost(bucket)
             rows.append({
                 "day": day,
                 "gpu_wh": round(bucket["gpu_wh"], 2),
                 "cpu_est_wh": round(bucket["cpu_est_wh"], 2),
                 "machine_wh": round(bucket["machine_wh"], 2),
                 "wall_wh": round(bucket["machine_wh"] / PSU_EFFICIENCY, 2),
+                "cost_yuan": round(cost, 4),
+                "cost_basis": basis,
                 "hours": round(bucket["hours"], 2),
                 "samples": bucket["samples"],
             })
         rows.reverse()
         return rows
+
+    def _cost(self, bucket):
+        """(yuan, basis) for one day bucket.  Basis: 'tou', 'mixed', 'flat'.
+
+        A day can hold two vintages of book: hours logged after TOU started
+        (which carry an hourly split) and whatever was already booked before
+        it (which cannot be split honestly).  Each half is billed at its own
+        price and the basis says so -- reporting such a day as pure 'tou'
+        would silently drop the unsplit half from the bill.
+
+        The books are watt-hours and the tariff is yuan per kilowatt-hour,
+        so every branch divides by 1000 exactly once -- a missing factor of
+        a thousand is the classic way this function lies.
+        """
+        if not self._tou:
+            return (bucket.get("machine_wh", 0.0) / PSU_EFFICIENCY
+                    * ENERGY_PRICE_CNY_PER_KWH) / 1000.0, "flat"
+        by_hour = bucket.get("by_hour") or {}
+        cost = 0.0
+        split_wh = 0.0
+        for key, part in by_hour.items():
+            wh = part.get("machine_wh", 0.0)
+            split_wh += wh
+            cost += wh / PSU_EFFICIENCY * _tou_price(self._tou, int(key))
+        residual = max(0.0, bucket.get("machine_wh", 0.0) - split_wh)
+        if not by_hour:
+            # Nothing is split: the whole day is the unsplit remainder, and
+            # it is billed flat -- checking this branch after the residual
+            # would have the early return hand back a bill of zero.
+            return (bucket.get("machine_wh", 0.0) / PSU_EFFICIENCY
+                    * ENERGY_PRICE_CNY_PER_KWH) / 1000.0, "flat"
+        if residual > 1e-9:
+            cost += residual / PSU_EFFICIENCY * ENERGY_PRICE_CNY_PER_KWH
+            return cost / 1000.0, "mixed"
+        return cost / 1000.0, "tou"
 
     def _tier_rows(self):
         rows = []
@@ -663,6 +778,15 @@ class TokenLedger(object):
             "recent": self._recent(7),
             "energy_rows": self._energy_rows(7),
             "energy_price_cny_per_kwh": ENERGY_PRICE_CNY_PER_KWH,
+            # Which pricing the bills above actually used.  The UI labels its
+            # cost column from this object instead of hard-coding a tariff.
+            "energy_pricing": ({"mode": "tou", "tou": self._tou,
+                                "flat_price_cny_per_kwh":
+                                    ENERGY_PRICE_CNY_PER_KWH}
+                               if self._tou else
+                               {"mode": "flat",
+                                "flat_price_cny_per_kwh":
+                                    ENERGY_PRICE_CNY_PER_KWH}),
             # The estimate model itself, so the live "now" cards in the UI
             # draw their numbers from the same constants the books use --
             # display and ledger are not allowed to disagree.
