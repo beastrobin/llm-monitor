@@ -48,15 +48,15 @@ CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 # The ceiling sweep measured on a 600 W-class card.  These four values carry
 # real data: the 150-600 W decode power curve (short and long context) flattens
-# after ~450 W, and 400 W sits at the efficiency peak -- ~95% of peak speed at
-# the best t/s-per-watt.  See power_curve/.  A card that spans this window
-# keeps the menu; anything else gets one derived from its own limits.
-#
-# Balanced is 400 W, not 450 W, for the reason above.
+# from ~500 W -- 300 W is the daily cap that still keeps ~86% of peak decode,
+# 400 W sits near the efficiency knee (flattens past ~500 W), 500 W is where the
+# plateau starts (measured draw already undershoots the cap there) and 600 W is
+# the factory ceiling.  See power_curve/.  A card that spans this window keeps
+# the menu; anything else gets one derived from its own limits.
 TUNED_PRESETS = [
-    {"id": "eco", "watts": 150},
-    {"id": "quiet", "watts": 300},
-    {"id": "balanced", "watts": 400},
+    {"id": "eco", "watts": 300},
+    {"id": "quiet", "watts": 400},
+    {"id": "balanced", "watts": 500},
     {"id": "full", "watts": 600},
 ]
 TUNED_MAX_W = 575.0
@@ -158,7 +158,7 @@ def read_state(index=0):
 def presets_for(low, high):
     """The preset menu this card can actually accept, or [] when unreadable.
 
-    The window comes from the card, so the menu has to as well: 150/300/400/600
+    The window comes from the card, so the menu has to as well: 300/400/500/600
     hard-coded on a card whose range is 5-175 W offers three buttons the driver
     has to refuse.  A card wide enough to cover the measured sweep keeps the
     tuned values, because those four carry the decode power curve; everything

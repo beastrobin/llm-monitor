@@ -305,25 +305,22 @@
     /* power tiers */
     '静音': 'Silent', '低耗': 'Eco', '均衡': 'Balanced', '满血': 'Full',
     '复原': 'Stock',
-    '最低档：最凉最静、最省电。解码（出字）卡在显存带宽，掉速通常有限，':
-      'Lowest tier: coolest, quietest, thriftiest. Decoding is bandwidth-bound so the loss is usually modest,',
-    '预填充（首字延迟）会明显变长，长提示词尤其。':
-      ' but prefill (time to first token) stretches clearly, especially on long prompts.',
+    '最低档：日常长对话的安静选择，解码约为满血的 86%，代价主要在预填充（首字延迟），长提示词尤其。':
+      'Lowest tier: the quiet daily driver for long chats; decode keeps ~86% of full speed and the cost lands on prefill (time to first token), especially on long prompts.',
     '低耗': 'Eco',
-    '中低档：日常长对话的安静选择，解码速度一般接近满血，代价主要在预填充。':
-      'Low-mid tier: the quiet daily driver for long chats; decode stays near full speed, the cost lands on prefill.',
-    '中高档：接近满速、能效最好的区间。解码与满血档通常只差几个百分点，':
-      'Mid-high tier: near full speed with the best efficiency. Decode trails the top tier by a few percent,',
+    '中低档：接近满速、能效最好的区间。解码与满血档通常只差几个百分点，功耗和风扇噪声却低不少。':
+      'Low-mid tier: near full speed with the best efficiency. Decode trails the top tier by a few percent, yet draws and sounds noticeably less.',
     '均衡': 'Balanced',
-    '功耗和风扇噪声却低不少。': ' yet draws and sounds noticeably less.',
+    '中高档：进入曲线平台，再往上加瓦数几乎不涨速——满载实测功耗在这里已经开始抽不满上限，只换时钟顶。':
+      'Mid-high tier: the curve plateau — extra watts barely add speed; under load the draw already undershoots this cap, buying only the clock ceiling.',
     '最高档：放开整张卡的功耗上限。预填充最快，代价是功耗、温度和噪声都到顶。':
       'Top tier: full power ceiling. Fastest prefill, at the cost of peak power, heat and noise.',
-    '实测：~634MHz，decode ~19t/s，3K 上下文 prefill 要 ~33s。':
-      ' Measured: ~634MHz, decode ~19t/s, 3K-context prefill ~33s.',
     '实测：~1386MHz，decode ~61t/s（长上下文），prefill ~10s。':
       ' Measured: ~1386MHz, decode ~61t/s (long context), prefill ~10s.',
-    '实测：~2350MHz，decode ~67t/s，峰值速度的 95%，能效最高档（曲线在 450W 后变平）。':
-      ' Measured: ~2350MHz, decode ~67t/s, 95% of peak speed, best efficiency (the curve flattens past 450W).',
+    '实测：~2350MHz，decode ~67t/s，峰值速度的 95%，能效最高档（曲线在 ~500W 后变平）。':
+      ' Measured: ~2350MHz, decode ~67t/s, 95% of peak speed, best efficiency (the curve flattens past ~500W).',
+    '实测：~2755MHz，decode ~70t/s，平台起点；满载平均只抽 ~491W，上限已不是瓶颈。':
+      ' Measured: ~2755MHz, decode ~70t/s, the plateau starts here; loaded draw averages only ~491W, so the cap stops being the constraint.',
     '实测：~2777MHz 到时钟顶，decode ~70t/s（长上下文）/159t/s（短）；出厂默认，也就是「复原」。':
       ' Measured: ~2777MHz clock ceiling, decode ~70t/s (long context) / 159t/s (short); factory default, i.e. "Stock".',
     '需要管理员权限': 'admin rights required',

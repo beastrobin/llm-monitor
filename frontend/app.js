@@ -1848,17 +1848,18 @@ function renderSystem(snapshot) {
 const POWER_LABELS = {
   eco: {
     name: '静音',
-    note: '最低档：最凉最静、最省电。解码（出字）卡在显存带宽，掉速通常有限，' +
-      '预填充（首字延迟）会明显变长，长提示词尤其。',
+    note: '最低档：日常长对话的安静选择，解码约为满血的 86%，代价主要在预填充' +
+      '（首字延迟），长提示词尤其。',
   },
   quiet: {
     name: '低耗',
-    note: '中低档：日常长对话的安静选择，解码速度一般接近满血，代价主要在预填充。',
+    note: '中低档：接近满速、能效最好的区间。解码与满血档通常只差几个百分点，' +
+      '功耗和风扇噪声却低不少。',
   },
   balanced: {
     name: '均衡',
-    note: '中高档：接近满速、能效最好的区间。解码与满血档通常只差几个百分点，' +
-      '功耗和风扇噪声却低不少。',
+    note: '中高档：进入曲线平台，再往上加瓦数几乎不涨速——满载实测功耗在这里' +
+      '已经开始抽不满上限，只换时钟顶。',
   },
   full: {
     name: '满血',
@@ -1870,9 +1871,9 @@ const POWER_LABELS = {
 // purpose: these are properties of that card's curve, not of the role, so they
 // only make sense next to the tuned preset that produced them.
 const POWER_MEASURED = {
-  150: '实测：~634MHz，decode ~19t/s，3K 上下文 prefill 要 ~33s。',
   300: '实测：~1386MHz，decode ~61t/s（长上下文），prefill ~10s。',
-  400: '实测：~2350MHz，decode ~67t/s，峰值速度的 95%，能效最高档（曲线在 450W 后变平）。',
+  400: '实测：~2350MHz，decode ~67t/s，峰值速度的 95%，能效最高档（曲线在 ~500W 后变平）。',
+  500: '实测：~2755MHz，decode ~70t/s，平台起点；满载平均只抽 ~491W，上限已不是瓶颈。',
   600: '实测：~2777MHz 到时钟顶，decode ~70t/s（长上下文）/159t/s（短）；出厂默认，也就是「复原」。',
 };
 
