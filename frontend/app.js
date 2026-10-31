@@ -66,12 +66,6 @@ function esc(text) {
     .replace(/"/g, '&quot;');
 }
 
-function shortPath(p) {
-  if (!p) return '—';
-  const parts = String(p).split(/[\\/]/);
-  return parts[parts.length - 1] || p;
-}
-
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
@@ -854,7 +848,10 @@ function shortModelName(id) {
 var S_VERSIONS = {};
 function rowVerHtml(row) {
   const key = String(row.endpoint || '').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-  const v = S_VERSIONS[key];
+  // Prefer the build the ledger booked WITH the row's tokens: it survives the
+  // engine going offline (the strata->basalt swap), while the live map only
+  // covers sources that report a version right now.
+  const v = row.engine_version || S_VERSIONS[key];
   return v ? '<span class="row-ver">' + esc(v) + '</span>' : '';
 }
 
@@ -891,62 +888,32 @@ function endpointChip(endpoint) {
     '</span>';
 }
 
-// Why the live probe found nothing, said in the panel's own words.
+// Why the live probe found nothing.
 //
-// The empty model card is the most confusing state this dashboard has: it looks
-// identical whether no model is loaded, the router log moved, or the path in
-// config.json never existed at all.  Only the collector knows which, so its
-// reason code and the path it actually opened both go on screen -- otherwise
-// the answer lives in run.log and the card just looks broken.
-const LIVE_REASON = {
-  'log missing': '日志文件不存在',
-  'log empty': '日志是空的',
-  'log unreadable': '日志读不出来',
-  'no proxy line in tail': '日志尾部没有模型请求记录',
-  'router reports no loaded model': 'router 上没有任何预设处于加载状态',
-  'router unreachable': 'router 没有应答',
-};
-
-// The reasons that came from asking the router rather than from reading a file.
-// These are the ones where the address matters and the log path does not.
-const ROUTER_REASON = {
-  'router unreachable': true,
-  'router reports no loaded model': true,
-};
-
+// The empty model card used to explain itself here: the collector's reason code
+// plus, depending on where that answer came from, the log path it opened or the
+// router address it asked.  That line is gone (user request 2026-10-28).  It sat
+// directly under "no model loaded yet" and restated it -- the only fact it added
+// was a port number Hermes re-rolls on every restart, so the most alarming thing
+// on an otherwise empty panel was usually just a stale number.  Nothing was
+// really lost: run.log still carries the authoritative
+// "hermes router: <address> (<reason>)" line, and the endpoint payload still
+// ships log_reason / log_path / router_url for anyone reading the API.
+//
+// Two states still speak up, because they are not "nothing to show": a model the
+// router names but whose port has not answered yet, and any other transport
+// error whose own words are worth reading as-is.
 function liveNote(endpoint) {
   if (!endpoint || !endpoint.error) return '';
-  if (endpoint.covered_by) {
-    // Silence, rather than a referral line.  A covered address means another
-    // card is already polling it and has put its model on screen -- usually
-    // with the "running" tag, because the hub reports that owner as the
-    // current endpoint.  So "当前模型由 strata 卡代为显示" only told the reader
-    // what the card above it already said, and it did so in a card of its
-    // own, which read as a stray empty panel (user request 2026-10-23).
-    // Not falling through either: this card's own "no active model" is the
-    // half-truth the referral existed to replace, so printing it here would
-    // be worse than printing nothing.
-    return '';
-  }
-  if (endpoint.error === 'no active model') {
-    const why = LIVE_REASON[endpoint.log_reason] || endpoint.log_reason || '原因未知';
-    // Show where we looked, and show the right thing: a log-shaped answer is
-    // about a file, so it names the path; an answer that came from the router
-    // names the address that was asked.  Printing the log path beside a router
-    // verdict would send the reader to a file that is not the problem -- and a
-    // stale address is exactly what "router 没有应答" almost always means.
-    let where = '';
-    if (ROUTER_REASON[endpoint.log_reason]) {
-      if (endpoint.router_url) {
-        where = '；已询问 <code title="' + esc(endpoint.router_url) + '">' +
-          esc(endpoint.router_url) + '</code>';
-      }
-    } else if (endpoint.log_path) {
-      where = '；查找位置 <code title="' + esc(endpoint.log_path) + '">' +
-        esc(shortPath(endpoint.log_path)) + '</code>';
-    }
-    return '<div class="err">未找到当前模型：' + esc(why) + where + '</div>';
-  }
+  // Silence for both empty-card cases.  A covered address means another card is
+  // already polling it and putting that model on screen, so a referral line only
+  // repeated what the card above already said -- dropped 2026-10-23.  "No active
+  // model" is the same story told by the tracker itself.  Not falling through
+  // either: this card's raw reason is the half-truth the old line existed to
+  // dress up, so printing it here would be worse than printing nothing.
+  if (endpoint.covered_by) return '';
+  if (endpoint.error === 'no active model') return '';
+
   // A model is named as loaded, but nothing answers on its port yet -- the
   // normal state for the seconds a child takes to come up, and otherwise
   // indistinguishable from a broken panel.

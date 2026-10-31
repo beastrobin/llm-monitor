@@ -585,6 +585,37 @@ HTTP 接口：
 报出一个前端自己编的号。**改动要写进版本记录；版本号按发布批次递增 —— 未发布的改动合并进
 同一个版本条目，不逐笔跳号**（页头徽章靠它区分"改过了没有"）。
 
+### v1.13 — 2026-10-28
+
+- **新增 basalt 引擎卡片**（`kind: "basalt"`，`collectors/basalt.py`）：接替换常驻引擎的
+  basalt（8085）。它的 `/metrics` 没有 `totals`，只有已完成请求的环形缓冲，收集器按
+  `id@time` 把每条请求**恰好一次**累加成累计计数器（重启复用 `r_0001` 式 id，故带 time 键），
+  账本与卡片均速走和 strata 相同的口径；瞬时速度只认 `live.tok_s`/`prefill_tok_s_mean`，
+  空闲即留空。`live.slots` 没有按槽行，槽位明细如实为空，`total_slots` 取
+  `engine.batch_slots`。TTFT 在 basalt 叫 `ttft_s`、Strata 叫 `first_engine_token_s`，
+  `strata.py` 现两个名字都读。手工固定端口启动，`discover` 强制关闭，不去跟 .strata
+  实例目录。单测 6 个（`tests/test_basalt_collector.py`）：累加恰一次、重启再计、
+  读数只从 live 来、槽位不发明。
+- **账本行的版本小字改为随下单存档**（换引擎当天暴露）：原先小字在渲染时现查在线源
+  （`S_VERSIONS`），strata 下线那天 19 条历史行全体丢版本。现在 `TokenLedger.observe`
+  把下单时的 `engine_version` 存进 `combo_versions`（`stats.json` version 3 同文件），
+  随 `_trim`/`reset` 同进退，`readings_for` 逐读数携带端点版本（老的二元组读数照旧
+  可用）；`rowVerHtml` 优先读行内存档、回落在线源。`render_check` 的对应断言从
+  「任何源报版本则全部 strata 行必须带小字」（换引擎后永不成立）改为双向逐源：
+  在线报版本的源不得渲染哑行，payload 带存档版本的行必须渲染出小字（按源计数配对，
+  不做会被实时帧改序的索引配对）。单测 `tests/test_combo_version_stamping.py`。
+- **空卡片的「未找到当前模型：…；已询问 …」整句删掉**（用户要求）：它紧跟在"当前没有已加载的
+  模型"下面 —— 前半句把上面那句重说一遍，后半句里的端口（如 `http://127.0.0.1:47831`）是 Hermes
+  用 `--port 0` 每次启动重摇的，空面板上最扎眼的往往只是一个过期号码。离线源 chip 自 v1.8 起
+  就不渲染，所以那串地址是整页唯一露它的地方；判断"地址漂移 / 模型没加载 / router 没起"改看
+  `run.log` 的权威行 `hermes router: <地址> (<原因>)`，端点 payload 里的 `log_reason` /
+  `log_path` / `router_url` 照旧下发，API 侧与排查脚本不受影响。`liveNote` 现在只为两种状态
+  说话：router 点了名但端口还没应答（加载中提示）、以及其他原样值得读的传输层错误；
+  `covered_by` 继续静默（v1.9）。`i18n.js` 里对应的 10 条译文键一并删除（含 `；已询问 ` /
+  `；查找位置 ` 两条切分键）。`render_check` 新增 `silentOk`：喂一条 `no active model` +
+  `router unreachable` 的端点，卡片必须**没有**原因行、**没有**地址，且"当前没有已加载的模型"
+  仍在。
+
 ### v1.12 — 2026-10-26
 
 - **标定档位改组为 300 / 400 / 500 / 600 W**（用户指定）：150 W 档撤下（日常用不到），

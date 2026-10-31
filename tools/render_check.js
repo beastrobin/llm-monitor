@@ -232,6 +232,27 @@ function readFrames(base, count, timeoutMs) {
   win.renderEndpointsForTest(routingFixture);
   const noFalseCurrent = selected() === null;
   const routingOk = selectedSecond && switchedFirst && noFalseCurrent;
+
+  // The empty card stopped explaining itself (user request 2026-10-28).  A live
+  // tracker that found nothing used to print "未找到当前模型：<reason>；已询问
+  // <address>" under the fallback line: a reason that restated "nothing loaded",
+  // plus a port Hermes re-rolls on every restart.  Pin the silence -- the
+  // fallback sentence stays, neither the reason nor the address comes back.
+  win.renderEndpointsForTest({
+    current_endpoint_id: null,
+    endpoints: [{
+      id: 'hermes', label: 'Hermes', up: false, base_url: null,
+      models: [], error: 'no active model', live: true,
+      log_reason: 'router unreachable', router_url: 'http://127.0.0.1:47831',
+      log_path: 'D:\\AI\\hermes\\logs\\llama-server.log', covered_by: '',
+    }],
+  });
+  const emptyText = text(doc.querySelector('#endpoints'));
+  const silentOk = emptyText.indexOf('未找到当前模型') < 0 &&
+    emptyText.indexOf('已询问') < 0 &&
+    emptyText.indexOf('47831') < 0 &&
+    emptyText.indexOf('当前没有已加载的模型') >= 0;
+
   win.renderEndpointsForTest(payload.snapshot);
 
   // The live payload is what the user actually sees, so the per-slot section has
@@ -535,6 +556,8 @@ function readFrames(base, count, timeoutMs) {
   win.renderEndpointsForTest(payload.snapshot);
 
   say('当前模型来源切换: ' + (routingOk ? '通过' : '失败'));
+  say('空卡片静默: 无原因行/无地址 ' + (silentOk ? '✓' : '✗ 「' + emptyText + '」') +
+    (silentOk ? ' — 通过 ✓' : ' — 失败 ✗'));
   say('实时 slot 区块: ' + liveHosts.map(function (h) {
     return h.rows + ' 行' + (h.note ? ' / 说明「' + h.note + '」' : '');
   }).join(' , ') + ' （已加载模型 ' + liveLoaded + ' 个，宿主 ' + liveHosts.length + ' 个）');
@@ -714,13 +737,53 @@ function readFrames(base, count, timeoutMs) {
     ' | 带版本的源 ' + (epsVer.map(function (e) {
       return e.id + '@' + e.engine_version;
     }).join(', ') || '（无）'));
-  const comboStrataRows = Array.prototype.filter.call(
-    doc.querySelectorAll('#token-combos tbody tr'),
-    function (tr) { return !!tr.querySelector('.src-strata'); });
-  const rowVerOk = !(epsVer.length && comboStrataRows.length) ||
-    comboStrataRows.every(function (tr) { return !!tr.querySelector('.row-ver'); });
-  say('账本行版本小字: ' + (rowVerOk ? '通过' : '失败') +
-    ' | 明细 strata 行 ' + comboStrataRows.length +
+  // Per-source pairing, not a strata-shaped universal: a ledger row can only
+  // be annotated while its source is online reporting that build (rowVerHtml
+  // keys the live version map by endpoint id).  The old check demanded every
+  // historical strata row carry a version as soon as ANY source reported one,
+  // which the engine swap made unsatisfiable -- basalt online, strata offline.
+  // The still-asserted direction: a source that is online and reports a build
+  // must not render its own ledger rows silent.
+  const comboRows = Array.prototype.slice.call(
+    doc.querySelectorAll('#token-combos tbody tr'));
+  const rowVerMissing = [];
+  epsVer.forEach(function (e) {
+    const src = String(e.id).toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+    comboRows.forEach(function (tr) {
+      if (tr.querySelector('.src-' + src) && !tr.querySelector('.row-ver')) {
+        rowVerMissing.push(src);
+      }
+    });
+  });
+  const rowVerOk = !rowVerMissing.length;
+  // Second direction since the ledger stores the build with the row: every
+  // payload combo that carries a booked engine_version must render it.
+  // Matched per source by count -- the table is re-rendered from live frames
+  // between the payload fetch and this assert, so index pairing is unsafe.
+  const savedCombos = ((payload.snapshot.stats || {}).combos) || [];
+  const wantBySrc = {};
+  savedCombos.forEach(function (row) {
+    if (row.engine_version) {
+      const src = String(row.endpoint || '').toLowerCase();
+      wantBySrc[src] = (wantBySrc[src] || 0) + 1;
+    }
+  });
+  const haveBySrc = {};
+  comboRows.forEach(function (tr) {
+    if (!tr.querySelector('.row-ver')) return;
+    const chip = tr.querySelector('.src-tag');
+    const src = chip
+      ? String(chip.textContent).replace(/\/+$/, '').toLowerCase() : '';
+    haveBySrc[src] = (haveBySrc[src] || 0) + 1;
+  });
+  const savedMissing = Object.keys(wantBySrc)
+    .filter(function (src) { return (haveBySrc[src] || 0) < wantBySrc[src]; })
+    .map(function (src) {
+      return src + ' 缺 ' + (wantBySrc[src] - (haveBySrc[src] || 0)) + ' 行';
+    });
+  say('账本行版本小字: ' + ((rowVerOk && !savedMissing.length) ? '通过' : '失败') +
+    ' | 在线缺标源 ' + (rowVerMissing.join(', ') || '无') +
+    ' | 存档缺标 ' + (savedMissing.join(', ') || '无') +
     ' | 带小字 ' + doc.querySelectorAll('#token-combos tbody .row-ver').length);
   doc.querySelectorAll('.model').forEach(function (model) {
     const id = model.querySelector('.id');
@@ -1121,7 +1184,7 @@ function readFrames(base, count, timeoutMs) {
   const noFill = areaCards.length && areaFilled.length !== areaCards.length;
   // An unexplained blank where the per-slot breakdown should be is the report
   // this harness was asked to chase down, so it fails the run like anything else.
-  const code = (errors.length || !routingOk || frozenCards || frozenLedger ||
+  const code = (errors.length || !routingOk || !silentOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
     !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk ||
     !verOk || !rowVerOk || !langOk || !langLeaksOk || !ttftOk || !tabOk ||

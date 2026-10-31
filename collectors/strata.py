@@ -812,7 +812,14 @@ class StrataEndpoint(LlamaEndpoint):
         # why the card shows a dash there rather than inventing a proxy.
         ttfts = []
         for row in (recent or []):
-            value = row.get("first_engine_token_s") if isinstance(row, dict) else None
+            value = None
+            if isinstance(row, dict):
+                # ``first_engine_token_s`` is Strata's name for it; the basalt
+                # engine (same Monitor dialect) calls the same measurement
+                # ``ttft_s``.  Read either so one TTFT path serves both.
+                value = row.get("first_engine_token_s")
+                if not isinstance(value, (int, float)):
+                    value = row.get("ttft_s")
             if isinstance(value, (int, float)):
                 ttfts.append(float(value))
         if ttfts:

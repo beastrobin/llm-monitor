@@ -36,6 +36,7 @@ from urllib.parse import unquote, urlparse
 from collectors import gpu, power, stats, system
 from collectors.llama import LlamaEndpoint, _get_json, _resolve_api_key
 from collectors.strata import StrataEndpoint
+from collectors.basalt import BasaltEndpoint
 from collectors.hermes_live import LiveEndpoint
 from collectors.hermes_session import latest_desktop_selection
 
@@ -52,7 +53,7 @@ del _stream_name
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.12"
+VERSION = "1.13"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
@@ -220,7 +221,8 @@ def resolve_hermes_router(configured, live_log=None, api_key=""):
 # and would still have to guess for anything that answers like llama.cpp.
 # An unset or unknown kind reads as llama.cpp, so an old config.json keeps
 # working untouched.
-ENDPOINT_KINDS = {"llama": LlamaEndpoint, "strata": StrataEndpoint}
+ENDPOINT_KINDS = {"llama": LlamaEndpoint, "strata": StrataEndpoint,
+                  "basalt": BasaltEndpoint}
 
 
 def address_key(url):

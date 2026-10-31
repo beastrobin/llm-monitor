@@ -114,14 +114,9 @@
     '在线': 'online', '离线': 'offline',
     'spawn 子 server': 'spawned child server',
     '启用': 'enabled',
-    '日志文件不存在': 'log file missing',
-    '日志是空的': 'log file is empty',
-    '日志读不出来': 'log file unreadable',
-    '日志尾部没有模型请求记录': 'no model requests in the log tail',
-    'router 上没有任何预设处于加载状态': 'no loaded preset on the router',
-    'router 没有应答': 'router not answering',
-    '原因未知': 'reason unknown',
-    '未找到当前模型：': 'current model not found: ',
+    // No keys for the empty-card reason line any more: app.js stopped printing
+    // it (2026-10-28), so the reason codes, the log path and the router address
+    // have no Chinese text to translate.
     // app.js splits this explanation around <code>/<b> tags, so each run of
     // text arrives as its own node and needs its own key.
     'router 已把 ': 'the router lists ',
@@ -133,9 +128,8 @@
     '当前没有已加载的模型 —— 服务在线时指标会自动出现在这里。':
       'No model loaded yet -- metrics appear here as soon as the engine is online.',
     // Also split around <code>: 位 on its own means "digit" and is dropped in
-    // the slot cards, so these two must carry 位置 whole or it eats a char.
-    '；已询问 ': '; asked ',
-    '；查找位置 ': '; looked for ',
+    // the slot cards, so the keys that carry 位置 must keep it whole or it eats
+    // a char.
     '占已归集生成量的 ': 'of the booked generated tokens ',
     '当前模型来源切换:': 'source switched:',
 

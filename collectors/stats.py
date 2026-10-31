@@ -232,6 +232,9 @@ def readings_for(endpoints):
                     "prompt_seconds": counters.get("prompt_seconds"),
                     "predicted_seconds": counters.get("predicted_seconds"),
                 },
+                # The build that produced these counters, carried so the
+                # ledger can stamp it on the row it books (see observe).
+                endpoint.get("engine_version"),
             ))
     return readings
 
@@ -249,6 +252,11 @@ class TokenLedger(object):
         self._models = {}        # "endpoint/model" -> field -> sum
         self._tiers = {}         # "watts" -> field -> sum
         self._combos = {}        # "day|watts|endpoint/model" -> field -> sum
+        # combo key -> the engine build that produced its tokens.  Stored with
+        # the row, not looked up from the live endpoint at render time, so a
+        # row keeps the version that achieved its numbers after that engine
+        # is gone (the strata->basalt swap took the live lookup's data).
+        self._combo_ver = {}
         self._energy = {}        # "YYYY-MM-DD" -> energy bucket (floats)
         self._power_ts = None    # last observe_power() timestamp
         self._tier_since = ""    # when tier attribution first booked anything
@@ -314,6 +322,9 @@ class TokenLedger(object):
         for key, fields in (data.get("combos") or {}).items():
             if isinstance(fields, dict) and len(key.split("|", 2)) == 3:
                 self._combos[key] = _ints(fields)
+        for key, ver in (data.get("combo_versions") or {}).items():
+            if isinstance(ver, str) and key in self._combos:
+                self._combo_ver[key] = ver
         for day, fields in (data.get("energy") or {}).items():
             if isinstance(fields, dict):
                 self._energy[day] = _energy_fields(fields)
@@ -349,6 +360,7 @@ class TokenLedger(object):
             "models": self._models,
             "tiers": self._tiers,
             "combos": self._combos,
+            "combo_versions": self._combo_ver,
             "energy": self._energy,
             "seen": self._seen,
         }
@@ -400,6 +412,7 @@ class TokenLedger(object):
         self._models = {}
         self._tiers = {}
         self._combos = {}
+        self._combo_ver = {}
         self._energy = {}
         self._tier_since = ""
         self._resets = 0
@@ -422,7 +435,11 @@ class TokenLedger(object):
         tier = _tier_key(watts)
         stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(now))
         day_bucket = self._daily.setdefault(day, _blank())
-        for key, counters in readings:
+        for entry in readings:
+            # ``readings_for`` emits (key, counters, engine_version); callers
+            # that build readings by hand may still pass pairs.
+            key, counters = entry[0], entry[1]
+            version = entry[2] if len(entry) > 2 else None
             track = self._seen.setdefault(key, {})
             # Captured before the loop: the loop adds to ``track`` as it goes,
             # so asking again later would call a brand-new pair "known" from
@@ -488,6 +505,14 @@ class TokenLedger(object):
                 model_bucket[field] += delta
                 tier_bucket[field] += delta
                 combo_bucket[field] += delta
+            if isinstance(version, str) and version:
+                # Last build seen while the row was earning tokens.  A row
+                # can span an upgrade mid-day; the stamp then reads as the
+                # newer build, which is honest enough next to a two-second
+                # sampler -- and strictly better than today's live lookup
+                # that goes blank when the engine leaves.
+                if self._combo_ver.get(combo_key) != version:
+                    self._combo_ver[combo_key] = version
             self._dirty = True
             self._gen += 1
             if reset:
@@ -609,6 +634,10 @@ class TokenLedger(object):
                 del self._combos[key]
             self._dirty = True
             self._gen += 1
+        # A version stamp without its row is pure drift -- whichever trim
+        # dropped the combo (day expiry or cap), the stamp goes with it.
+        for key in [k for k in self._combo_ver if k not in self._combos]:
+            del self._combo_ver[key]
 
     # -- reporting --------------------------------------------------------
 
@@ -722,11 +751,17 @@ class TokenLedger(object):
             if len(parts) != 3:
                 continue
             endpoint, _, model = parts[2].partition("/")
-            row = self._detail(bucket)
+            # ``dict(...)`` copy: _detail's inferred key set is fixed at its
+            # FIELDS plus the derived rates, and this row gains identity
+            # fields (day/watts/endpoint/model/engine_version) on top.
+            row = dict(self._detail(bucket))
             row["day"] = parts[0]
             row["watts"] = int(parts[1])
             row["endpoint"] = endpoint
             row["model"] = model or parts[2]
+            stored = self._combo_ver.get(key)
+            if stored:
+                row["engine_version"] = stored
             rows.append(row)
         # Newest day first, then the busiest row of that day, so the top of the
         # table is what just happened.
