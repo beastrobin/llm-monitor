@@ -18,12 +18,13 @@ What actually differs, and why each difference needs code:
   complete and be evicted between two scrapes on this engine; a basalt
   restart simply starts a new id sequence that adds nothing to the old one
   (ids repeat, so the id is keyed with its ``time``).
-* **Slot rows.**  Strata reports one row per batch slot with live state;
-  basalt's ``live.slots`` is just ``{total, active, queue_depth}``.  There is
-  nothing to draw a per-slot card from, so ``_slots`` reports none and the
-  panel shows no slot breakdown rather than invented rows.  The engine does
-  say how many slots it runs (``engine.batch_slots``), so ``total_slots`` is
-  still filled and the "why is the breakdown empty" note has its number.
+* **Slot rows.**  Strata carries per-slot rows inside ``/metrics``; basalt
+  keeps its ``/metrics live.slots`` as just ``{total, active, queue_depth}``
+  and answers a llama-shaped ``/slots`` dump instead -- the same table its
+  own dashboard's Slots panel draws (``serve/service.py``'s ``slot_table``).
+  ``_slots`` scrapes that endpoint and maps the rows; a failed scrape leaves
+  the panel's "why is the breakdown empty" note with the reason
+  (``slots_error``), never with invented rows.
 * **TTFT name.**  Basalt's request rows call it ``ttft_s`` where Strata calls
   it ``first_engine_token_s``; :mod:`.strata` reads both names now, so the
   TTFT card works on both engines.
@@ -36,6 +37,7 @@ What actually differs, and why each difference needs code:
 
 import time
 
+from .llama import _get_json, _ratio
 from .strata import StrataEndpoint
 
 
@@ -61,6 +63,9 @@ class BasaltEndpoint(StrataEndpoint):
             "decode_ms", "drafts_offered", "drafts_accepted")}
         self._booked = set()
         self._engine_block = {}
+        # Filled by ``_slots`` each poll: a failed ``/slots`` scrape names the
+        # reason the panel would otherwise only call "no data this round".
+        self._slots_error = None
 
     def _series(self, payload):
         """Lifetime counters rebuilt from the finished-request ring.
@@ -114,15 +119,99 @@ class BasaltEndpoint(StrataEndpoint):
         }
 
     def _slots(self, payload):
-        """No per-slot rows exist on basalt -- report none, invent none."""
-        return []
+        """One entry per batch slot, from basalt's native ``/slots`` dump.
+
+        ``live.slots`` in ``/metrics`` is only ``{total, active,
+        queue_depth}``; the row-per-slot table lives on a llama-shaped
+        ``/slots`` (``serve/service.py``'s ``slot_table``), which is what
+        basalt's own dashboard draws.  Two of its readings have no llama
+        equivalent and need a rule, both learned off the live server:
+
+        * ``reused`` is the slot's own prefix-cache hit for the request it
+          runs -- a direct measurement like llama.cpp's cache/processed
+          split (Strata has to attribute), arriving a few polls into the
+          request (it is ``null`` the first frames, then a count).  A count
+          larger than its own prompt is counter skew, not a >100% hit, so
+          the ratio clamps; ``null`` stays ``None`` so the card shows "—".
+        * ``live.prefill_tok_s_mean`` is engine-global and keeps reporting
+          the last read after the read ended (observed: 414 t/s during
+          pure decoding), so it is attributed only to a slot whose state
+          is ``prefill`` -- and only when exactly one slot is reading, the
+          same one-reader rule Strata's ``_slots`` documents.
+
+        Idle rows carry the slot's retained prefix (``ctx_used``) and its
+        last finished request's draft counts; the engine fills the live
+        request fields with zeros there, and zeros would read as
+        measurements -- they map to ``None`` so the card shows "—".
+        ``tok_s`` belongs to ``decoding`` only: a prefilling slot has no
+        generated-per-second yet.
+        """
+        self._slots_error = None
+        try:
+            rows = _get_json(self._url("/slots"), self.api_key)
+        except Exception as exc:  # noqa: BLE001 - one bad scrape must not kill the poll
+            self._slots_error = "%s: %s" % (type(exc).__name__, exc)
+            return []
+        rows = rows if isinstance(rows, list) else []
+        prefill = (payload.get("live") or {}).get("prefill_tok_s_mean")
+        if not isinstance(prefill, (int, float)) or prefill <= 0:
+            prefill = None
+        reading = [r for r in rows if isinstance(r, dict) and r.get("state") == "prefill"]
+        prefill_for = prefill if (prefill is not None and len(reading) == 1) else None
+        slots = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            busy = bool(row.get("is_processing"))
+            state = row.get("state")
+            context = row.get("n_ctx")
+            used = row.get("ctx_used")
+            prompt = row.get("prompt_tokens") if busy else None
+            reused = row.get("reused") if busy else None
+            kv_hit = (min(1.0, reused / prompt)
+                      if (reused is not None and prompt) else None)
+            slots.append({
+                "id": row.get("id"),
+                "n_ctx": context,
+                "is_processing": busy,
+                "n_prompt_tokens": prompt or None,
+                "n_prompt_tokens_processed":
+                    (prompt - reused) if (prompt and reused is not None) else None,
+                "n_prompt_tokens_cache": reused,
+                "n_decoded": row.get("generated") if busy else None,
+                "ctx_used": used,
+                "ctx_ratio": _ratio(used, context),
+                "state": state,
+                "tok_s": row.get("tok_s") if state == "decoding" else None,
+                "elapsed_s": None,
+                "prefill_tok_s": prefill_for if state == "prefill" else None,
+                "kv_hit": kv_hit,
+                "spec_types": None,
+                # Readings basalt gives per slot that llama.cpp does not:
+                # the slot's own TTFT, draft window length, and the draft
+                # counters of its last finished request.  No card draws
+                # them yet; they ride along rather than being dropped.
+                "ttft_s": row.get("ttft_s"),
+                "draft_len": row.get("draft_len"),
+                "drafts_offered": row.get("drafts_offered"),
+                "drafts_accepted": row.get("drafts_accepted"),
+            })
+        return slots
 
     def _model_detail(self, model_id, params, now, preset_args=None):
         detail = super()._model_detail(model_id, params, now,
                                        preset_args=preset_args)
-        # The inherited card wants a slot count; basalt names it in the
-        # engine block instead of in a row-per-slot list.
+        # ``_reported_slot_count`` was written for Strata's row-per-slot
+        # ``live.slots``; on basalt that key is a ``{total, active,
+        # queue_depth}`` dict and its ``len`` is a key count that matches
+        # the slot number only by accident.  Prefer the scraped ``/slots``
+        # rows, then the engine block's ``batch_slots``.
+        rows = detail.get("slots") or []
         batch = self._engine_block.get("batch_slots")
-        if batch and not detail.get("total_slots"):
+        if rows:
+            detail["total_slots"] = len(rows)
+        elif batch:
             detail["total_slots"] = batch
+        if "slots" in detail and getattr(self, "_slots_error", None):
+            detail["slots_error"] = self._slots_error
         return detail

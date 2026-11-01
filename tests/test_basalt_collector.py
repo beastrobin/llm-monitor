@@ -13,11 +13,13 @@ accumulates the ring itself.  The two properties that matter are therefore:
 
 The rest pins the translation into the llama.cpp counter names ``ModelSampler``
 reads (prompt minus reused, ms -> seconds), the ``live`` gauges basalt does
-report, and the deliberate emptiness of the per-slot view.
+report, and the mapping of basalt's separate ``/slots`` dump onto the per-slot
+row shape the context cards read.
 """
 
 import time
 import unittest
+from unittest import mock
 
 from collectors.basalt import BasaltEndpoint
 
@@ -89,11 +91,141 @@ class RingAccumulation(unittest.TestCase):
         self.assertEqual(ep._series(payload([], live=solo))
                          ["llamacpp:requests_processing"], 1)
 
-    def test_no_invented_slot_rows_but_the_slot_count_survives(self):
+    def test_slot_count_falls_back_to_the_engine_block(self):
+        # With no /slots rows this poll (a scrape failure), total_slots
+        # still names how many slots the engine runs (engine.batch_slots).
         ep = make_endpoint()
         ep._series(payload([]))  # caches the engine block
-        self.assertEqual(ep._slots(payload([])), [])
+        with mock.patch("collectors.basalt._get_json", side_effect=OSError("down")):
+            self.assertEqual(ep._slots(payload([])), [])
+        self.assertEqual(ep._slots_error, "OSError: down")
         self.assertEqual(ep._engine_block.get("batch_slots"), 3)
+
+
+class SlotMapping(unittest.TestCase):
+    """basalt's separate /slots dump -> the per-slot row shape the card reads.
+
+    Rows captured from the live server: a decoding slot, an idle slot that
+    keeps a prefix, and a slot still reading its prompt.
+    """
+
+    def slots_dump(self):
+        return [
+            {"id": 0, "n_ctx": 262144, "is_processing": True, "state": "decoding",
+             "tok_s": 318.1, "generated": 2139, "max_tokens": 2500,
+             "prompt_tokens": 75, "prefill_done": 75, "reused": 60, "ttft_s": 0.2,
+             "draft_len": 3.0, "ctx_used": 2214, "drafts_offered": 581,
+             "drafts_accepted": 471},
+            {"id": 1, "n_ctx": 262144, "is_processing": False, "state": "idle",
+             "tok_s": 0.0, "generated": 0, "max_tokens": None, "prompt_tokens": 0,
+             "prefill_done": 0, "reused": None, "ttft_s": None, "draft_len": None,
+             "ctx_used": 42711, "drafts_offered": 668, "drafts_accepted": 456},
+            {"id": 2, "n_ctx": 262144, "is_processing": True, "state": "prefill",
+             "tok_s": 0.0, "generated": 0, "max_tokens": 500,
+             "prompt_tokens": 4000, "prefill_done": 1500, "reused": 0,
+             "ttft_s": None, "draft_len": None, "ctx_used": 4000,
+             "drafts_offered": None, "drafts_accepted": None},
+        ]
+
+    def scrape(self, ep, live=None):
+        dump = self.slots_dump()
+        with mock.patch("collectors.basalt._get_json", return_value=dump):
+            return ep._slots(payload([], live=live or {
+                "state": "generating", "prefill_tok_s_mean": 5000.0,
+                "slots": {"total": 3, "active": 2, "queue_depth": 0}}))
+
+    def test_decoding_slot_carries_its_live_readings(self):
+        ep = make_endpoint()
+        s0 = self.scrape(ep)[0]
+        self.assertTrue(s0["is_processing"])
+        self.assertEqual(s0["state"], "decoding")
+        self.assertEqual(s0["n_decoded"], 2139)
+        self.assertEqual(s0["ctx_used"], 2214)
+        # tok_s is the decode rate only while decoding.
+        self.assertEqual(s0["tok_s"], 318.1)
+        # kv_hit is the slot's own prefix reuse: 60/75, clamped to <= 1.
+        self.assertAlmostEqual(s0["kv_hit"], 60 / 75)
+        # ctx_ratio is used/n_ctx; a prefilling/decoding slot gets no global
+        # prefill rate attributed to it (only a slot caught mid-read does).
+        self.assertAlmostEqual(s0["ctx_ratio"], 2214 / 262144)
+        self.assertIsNone(s0["prefill_tok_s"])
+        # basalt extras ride along rather than being dropped.
+        self.assertEqual(s0["ttft_s"], 0.2)
+        self.assertEqual(s0["drafts_accepted"], 471)
+
+    def test_idle_slot_keeps_prefix_and_blanks_the_rest(self):
+        ep = make_endpoint()
+        s1 = self.scrape(ep)[1]
+        self.assertFalse(s1["is_processing"])
+        self.assertEqual(s1["ctx_used"], 42711)
+        # The engine fills live-request fields with zeros when idle; the card
+        # must read "—" (None), not those zeros.
+        self.assertIsNone(s1["n_decoded"])
+        self.assertIsNone(s1["n_prompt_tokens"])
+        self.assertIsNone(s1["tok_s"])
+        self.assertIsNone(s1["kv_hit"])
+        self.assertIsNone(s1["prefill_tok_s"])
+        # Last request's draft counters survive on the idle row.
+        self.assertEqual(s1["drafts_offered"], 668)
+
+    def test_only_one_reading_slot_gets_the_global_prefill_rate(self):
+        ep = make_endpoint()
+        slots = self.scrape(ep)
+        s2 = slots[2]  # the prefill slot
+        self.assertEqual(s2["state"], "prefill")
+        # tok_s is not a decode rate yet while reading its prompt.
+        self.assertIsNone(s2["tok_s"])
+        # Exactly one slot is prefilling, so the engine's one global prefill
+        # rate belongs to it.
+        self.assertEqual(s2["prefill_tok_s"], 5000.0)
+
+    def test_prefill_rate_dropped_when_two_slots_read_at_once(self):
+        ep = make_endpoint()
+        dump = self.slots_dump()
+        # Make slot 1 also a prefill reader -> the single-owner rule breaks.
+        dump[1].update(is_processing=True, state="prefill", prompt_tokens=100)
+        with mock.patch("collectors.basalt._get_json", return_value=dump):
+            slots = ep._slots(payload([], live={
+                "state": "generating", "prefill_tok_s_mean": 5000.0}))
+        self.assertIsNone(slots[1]["prefill_tok_s"])
+        self.assertIsNone(slots[2]["prefill_tok_s"])
+
+    def test_kv_hit_clamps_when_reused_exceeds_prompt(self):
+        ep = make_endpoint()
+        dump = self.slots_dump()
+        dump[0]["reused"] = 90  # > prompt_tokens 75: counter skew
+        with mock.patch("collectors.basalt._get_json", return_value=dump):
+            slots = ep._slots(payload([], live={"state": "generating"}))
+        self.assertEqual(slots[0]["kv_hit"], 1.0)
+
+    def model_detail(self, ep, dump=None, dump_error=None):
+        """Drive the inherited _model_detail: /metrics+/props from the
+        strata namespace, the /slots dump from the basalt one."""
+        def slots_getter(*a, **kw):
+            if dump_error:
+                raise dump_error
+            return dump if dump is not None else self.slots_dump()
+        with mock.patch("collectors.strata._get_json", return_value=payload([])), \
+                mock.patch("collectors.basalt._get_json", side_effect=slots_getter):
+            return ep._model_detail("basalt-model", {}, time.time())
+
+    def test_model_detail_counts_slots_from_the_rows(self):
+        ep = make_endpoint()
+        detail = self.model_detail(ep)
+        self.assertEqual(detail["total_slots"], 3)
+        self.assertEqual(len(detail["slots"]), 3)
+        self.assertNotIn("slots_error", detail)
+
+    def test_failed_scrape_names_the_reason(self):
+        ep = make_endpoint()
+        detail = self.model_detail(ep, dump_error=OSError("down"))
+        self.assertEqual(detail["slots"], [])
+        self.assertEqual(detail["slots_error"], "OSError: down")
+        # The engine block still says how many slots exist...
+        self.assertEqual(detail["total_slots"], 3)
+        # ...and _series runs before the slot scrape on the same payload, so
+        # the fallback number is in place even though _model_detail asked
+        # for the engine block through the ring pass.
 
 
 class Registration(unittest.TestCase):

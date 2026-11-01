@@ -585,6 +585,25 @@ HTTP 接口：
 报出一个前端自己编的号。**改动要写进版本记录；版本号按发布批次递增 —— 未发布的改动合并进
 同一个版本条目，不逐笔跳号**（页头徽章靠它区分"改过了没有"）。
 
+### v1.14 — 2026-11-01
+
+- **basalt 卡片补上逐槽明细**（用户指出：basalt 自带 dashboard 有 Slots 面板，监控台却显示
+  「引擎这一轮没有上报逐槽数据」）：v1.13 只看了 `/metrics` 的 `live.slots`（那里确实只有
+  `{total, active, queue_depth}`），漏了 basalt 另有一张 llama 形态的 `/slots` dump
+  （`serve/service.py` 的 `slot_table`，它自家面板就是画这个）。`collectors/basalt.py`
+  的 `_slots` 改为逐轮抓 `/slots` 并映射到卡片行形：`decoding` 槽带 `tok_s`/已生成/本轮
+  KV 命中（`reused/prompt`，实测该字段会在请求开始后几拍才从 `null` 变成计数，`null` 显示
+  「—」而不是 0，超过 prompt 的畸形值钳到 100%）；`prefill` 槽归属全局
+  `prefill_tok_s_mean`——实测它在纯解码期间仍残留上一轮读数（414 t/s），所以只归属给状态
+  恰为 `prefill` 的槽、且仅当只有一个槽在读（与 strata 同一把单读者规则）；空闲槽保留
+  `ctx_used`（为下一轮留的前缀）与上一轮 draft 计数，引擎填零的活请求字段一律映射为
+  「—」。basalt 还多给逐槽 `ttft_s`/`draft_len`/draft 计数，先随行进 payload，暂无卡渲染。
+  `total_slots` 不再依赖 `_reported_slot_count` 对 dict 取 `len` 的巧合（那是 strata
+  行数组口径写的），改为抓到的行数、回落 `engine.batch_slots`；抓槽失败时面板的空明细
+  说明带上新鲜的 `slots_error` 原因而不是只剩「配置里有 N 个槽」。单测 +7
+  （`tests/test_basalt_collector.py`：解码/空闲/读入三形映射、单读者归属、双读者弃权、
+  KV 钳位、行数定槽数、抓取失败报因）。
+
 ### v1.13 — 2026-10-28
 
 - **新增 basalt 引擎卡片**（`kind: "basalt"`，`collectors/basalt.py`）：接替换常驻引擎的
