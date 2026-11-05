@@ -46,14 +46,20 @@ import time
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
-# The ceiling sweep measured on a 600 W-class card.  These four values carry
+# The ceiling sweep measured on a 600 W-class card.  Every value here carries
 # real data: the 150-600 W decode power curve (short and long context) flattens
-# from ~500 W -- 300 W is the daily cap that still keeps ~86% of peak decode,
-# 400 W sits near the efficiency knee (flattens past ~500 W), 500 W is where the
-# plateau starts (measured draw already undershoots the cap there) and 600 W is
-# the factory ceiling.  See power_curve/.  A card that spans this window keeps
-# the menu; anything else gets one derived from its own limits.
+# from ~500 W -- 600 W is the factory ceiling, 500 W where the plateau starts
+# (measured draw already undershoots the cap there), 400 W near the efficiency
+# knee, and 300 W the daily cap that still keeps ~86% of peak decode.  The two
+# bottom rungs were added on 2026-11-03 at the user's request: 150 W is the
+# card's own floor (power.min_limit), where decode drops to ~26% of peak, and
+# 200 W lands at ~48% -- slow, but both are real settings for an idle box or a
+# second card that should not draw 500 W just to sit there.  See power_curve/.
+# A card that spans this window keeps the menu; anything else gets one derived
+# from its own limits.
 TUNED_PRESETS = [
+    {"id": "idle", "watts": 150},
+    {"id": "low", "watts": 200},
     {"id": "eco", "watts": 300},
     {"id": "quiet", "watts": 400},
     {"id": "balanced", "watts": 500},
@@ -65,6 +71,11 @@ TUNED_MAX_W = 575.0
 # of its maximum.  The four intents survive the rescaling -- an extreme quiet
 # end, a mild daily cap, a near-peak setting, and the card's full TGP.  Snapped
 # to 5 W, because that is the granularity the driver exposes anyway.
+#
+# This menu stays at four while the tuned one grew to six: the two extra rungs
+# there are wattages measured on a 600 W card, and rescaling them onto a 175 W
+# laptop would put two buttons inside 40 W of each other for no benefit.  The
+# role names are shared, so a derived "eco" and a tuned "eco" are the same idea.
 ROLE_IDS = ("eco", "quiet", "balanced", "full")
 DERIVED_FRACTIONS = (0.40, 0.60, 0.80, 1.00)
 WATTS_STEP = 5
@@ -158,11 +169,16 @@ def read_state(index=0):
 def presets_for(low, high):
     """The preset menu this card can actually accept, or [] when unreadable.
 
-    The window comes from the card, so the menu has to as well: 300/400/500/600
-    hard-coded on a card whose range is 5-175 W offers three buttons the driver
+    The window comes from the card, so the menu has to as well: 150-600 W
+    hard-coded on a card whose range is 5-175 W offers five buttons the driver
     has to refuse.  A card wide enough to cover the measured sweep keeps the
-    tuned values, because those four carry the decode power curve; everything
+    tuned values, because those six carry the decode power curve; everything
     else is rescaled onto its own maximum.
+
+    The rungs are filtered by the card's own window, so a card whose floor is
+    above 150 W simply loses the bottom entry instead of offering a value the
+    driver would clamp.  ``tuned`` is stamped on what survives: the UI uses it
+    to attach the measured numbers, which only exist for the sweep's card.
     """
     if low is None or high is None or high <= low:
         return []

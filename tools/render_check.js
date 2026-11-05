@@ -198,10 +198,50 @@ function readFrames(base, count, timeoutMs) {
     }
     appScript = appScript.replace(needle, '/* sabotaged for the negative control */');
   }
+  // RC_BREAK_GPU_PICK=1 pins every watts button to card 0, which is the exact
+  // failure the 换卡 check is meant to catch: the chip lights up, the menu
+  // changes, and the write still lands on the primary card.  (Breaking the
+  // state write instead proves nothing -- the choice is persisted to
+  // localStorage and read back on the very next render.)
+  if (process.env.RC_BREAK_GPU_PICK) {
+    const needle = 'data-index="\' + state.index + \'"';
+    if (appScript.indexOf(needle) < 0) {
+      throw new Error('RC_BREAK_GPU_PICK: 在 app.js 里找不到按钮的 data-index 写入，检查已经改名了');
+    }
+    appScript = appScript.replace(needle, 'data-index="0"');
+  }
 
   win.eval(i18nScript);
   win.eval(appScript + '\nwindow.renderEndpointsForTest = renderEndpoints;' +
-    '\nwindow.appendPointForTest = appendPoint;');
+    '\nwindow.appendPointForTest = appendPoint;' +
+    // Read-only probe: the same row rendered for a process without admin
+    // rights.  The watts buttons must all disable, while the card selector
+    // stays usable -- on a read-only dashboard the limits of every card are
+    // still worth reading, so switching cards is not a write.
+    '\nwindow.powerReadOnlyProbe = function () {' +
+    '  var real = S.config;' +
+    '  var copy = JSON.parse(JSON.stringify(real || {}));' +
+    '  copy.elevated = false;' +
+    '  S.config = copy;' +
+    '  renderPowerControl(S.snapshot || {});' +
+    '  var box = document.getElementById("power-control");' +
+    '  var out = { buttons: 0, disabled: true, chips: 0, chipsEnabled: true,' +
+    '    hint: false };' +
+    '  if (box) {' +
+    '    var btns = box.querySelectorAll("button[data-watts]");' +
+    '    out.buttons = btns.length;' +
+    '    out.disabled = Array.prototype.every.call(btns, function (b) {' +
+    '      return b.disabled; });' +
+    '    var chips = box.querySelectorAll("button[data-power-gpu]");' +
+    '    out.chips = chips.length;' +
+    '    out.chipsEnabled = Array.prototype.every.call(chips, function (b) {' +
+    '      return !b.disabled; });' +
+    '    out.hint = !!box.querySelector(".pw-hint, .pw-lock");' +
+    '  }' +
+    '  S.config = real;' +
+    '  renderPowerControl(S.snapshot || {});' +
+    '  return out;' +
+    '};');
   await new Promise(function (resolve) { setTimeout(resolve, 60); });
 
   // ------------------------------------------------------------------ report
@@ -820,6 +860,11 @@ function readFrames(base, count, timeoutMs) {
   say('');
   say('—— 功耗控制 ——');
   const powerBox = doc.getElementById('power-control');
+  // The GPU selector is the one control whose failure is invisible in a
+  // screenshot: wrong wiring looks exactly like right wiring until the wrong
+  // card's limit changes.  So it is clicked, and the buttons are asked which
+  // card they now address.
+  let gpuPick = { chips: 0, switched: 'n/a', restored: 'n/a', multi: false };
   if (powerBox && powerBox.innerHTML) {
     const buttons = powerBox.querySelectorAll('button[data-watts]');
     const active = powerBox.querySelector('.pw-btn.on');
@@ -834,8 +879,59 @@ function readFrames(base, count, timeoutMs) {
     say('  权限: ' + (powerBox.querySelector('.pw-hint') ? '只读' : '可写'));
     const hint = powerBox.querySelector('.pw-hint');
     if (hint) say('  只读提示: ' + text(hint));
+
+    const chips = Array.prototype.slice.call(
+      powerBox.querySelectorAll('button[data-power-gpu]'));
+    gpuPick.chips = chips.length;
+    if (chips.length) {
+      say('  显卡选择: ' + chips.length + ' 张 · 当前 ' +
+        text(powerBox.querySelector('.pw-gpu.on')));
+      gpuPick.multi = chips.length > 1;
+      if (gpuPick.multi) {
+        const firstIndex = Number(chips[0].dataset.powerGpu);
+        const target = chips[chips.length - 1];
+        const targetIndex = Number(target.dataset.powerGpu);
+        target.click();
+        const after = Array.prototype.slice.call(
+          powerBox.querySelectorAll('button[data-watts]'));
+        const addressed = after.map(function (b) { return Number(b.dataset.index); });
+        const lit = powerBox.querySelector('.pw-gpu.on');
+        const allOne = addressed.length > 0 && addressed.every(function (i) {
+          return i === targetIndex;
+        });
+        const chipMoved = !!lit && Number(lit.dataset.powerGpu) === targetIndex;
+        gpuPick.switched = (allOne && chipMoved) ? '切到 GPU' + targetIndex
+          : '未切换（按钮仍指向 ' + Array.from(new Set(addressed)).join(',')
+            + '）';
+        // Put it back: every check below reads the row this run started with.
+        const back = powerBox.querySelector(
+          'button[data-power-gpu="' + firstIndex + '"]');
+        if (back) back.click();
+        const restored = Array.prototype.slice.call(
+          powerBox.querySelectorAll('button[data-watts]'));
+        gpuPick.restored = restored.length && restored.every(function (b) {
+          return Number(b.dataset.index) === firstIndex;
+        }) ? '已复原 GPU' + firstIndex : '复原失败';
+        gpuPick.ok = gpuPick.switched.indexOf('切到') === 0 &&
+          gpuPick.restored.indexOf('已复原') === 0;
+        say('  换卡: ' + gpuPick.switched + ' / ' + gpuPick.restored +
+          (gpuPick.ok ? ' ✓ — 通过' : ' ✗ — 失败'));
+      }
+    }
   } else {
     say('  控制条未渲染（未提权或显卡不可用）');
+  }
+
+  // Degraded render: read-only, same row.  A disabled button that must not
+  // exist is a bug the happy path cannot show, and neither can a selector that
+  // greys out with it and takes the other card's numbers away.
+  let readOnly = { ok: true, note: 'n/a' };
+  if (win.powerReadOnlyProbe && powerBox && powerBox.innerHTML) {
+    const probe = win.powerReadOnlyProbe();
+    readOnly.ok = probe.disabled && probe.chipsEnabled && probe.hint;
+    readOnly.note = probe.buttons + ' 个档位全禁用=' + probe.disabled +
+      ' · 换卡可用=' + probe.chipsEnabled + ' · 提示=' + probe.hint;
+    say('  只读降级: ' + readOnly.note + (readOnly.ok ? ' ✓' : ' ✗ — 失败'));
   }
 
   say('');
@@ -1182,13 +1278,17 @@ function readFrames(base, count, timeoutMs) {
   // A card that draws a line but fills nothing under it is the failure the user
   // reported, so the fill assertion counts as much as the render exception.
   const noFill = areaCards.length && areaFilled.length !== areaCards.length;
+  // The GPU selector only exists on a multi-card machine, and there it must
+  // actually retarget the buttons -- a decorative chip that leaves them
+  // writing to the primary card is the failure this run was asked to catch.
+  const gpuPickOk = !gpuPick.multi || !!gpuPick.ok;
   // An unexplained blank where the per-slot breakdown should be is the report
   // this harness was asked to chase down, so it fails the run like anything else.
   const code = (errors.length || !routingOk || !silentOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
     !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk ||
     !verOk || !rowVerOk || !langOk || !langLeaksOk || !ttftOk || !tabOk ||
-    !energyOk) ? 1 : 0;
+    !energyOk || !gpuPickOk || !readOnly.ok) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own

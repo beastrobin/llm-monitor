@@ -40,8 +40,10 @@
 <main>
   <section class="block" data-accent="d">
     <!-- 系统信息标题取消（2026-10-19）；档位开关同日挪去顶栏后，
-         这个 block-head 已经没有住户，整行删除。 -->
-    <div id="sys" class="grid compact"></div>
+         这个 block-head 已经没有住户，整行删除。
+         2026-11-03 双卡：容器从「一个 6 列网格」改为「若干行」——单卡仍是
+         一行 6 张（结构由 app.js 的 sysRows 决定，这里只管容器）。 -->
+    <div id="sys" class="sys-stack"></div>
   </section>
 
   <section class="block" data-accent="a" id="model-info">

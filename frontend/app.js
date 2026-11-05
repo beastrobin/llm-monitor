@@ -1643,7 +1643,12 @@ function renderEndpoints(snapshot) {
   });
 }
 
-const SYS_SPECS = [
+// ---------------------------------------------------------------- system cards
+
+// One card's four headline metrics.  Drawn once per GPU, so a two-card machine
+// gets two rows of identical cards that line up column for column -- reading
+// GPU0 against GPU1 down one column is the whole point of the second row.
+const GPU_SYS_SPECS = [
   cardSpec('util', '显卡利用率', {
     bar: true,
     tip: 'nvidia-smi 的 utilization.gpu，采样区间内 SM 处于工作状态的时间占比。' +
@@ -1666,6 +1671,10 @@ const SYS_SPECS = [
       '由 Dynamic Boost 在最大 TGP 之内动态调整，所以会在一个区间里浮动。' +
       '接近上限说明这张卡已经在全力跑。档位切换在顶栏更新时间左边。',
   }),
+];
+
+// The host's own two cards, unchanged since the single-card layout.
+const HOST_SYS_SPECS = [
   cardSpec('cpu', 'CPU 负载', {
     bar: true,
     tip: 'GetSystemTimes 两次采样差分算出的整机 CPU 占用。' +
@@ -1679,11 +1688,171 @@ const SYS_SPECS = [
   }),
 ];
 
+// Machine-wide totals, drawn only when there is more than one card.  On a
+// single card they would repeat the 功耗 and 显存 cards sitting directly above
+// them, so this pair is added by sysRows() rather than to every layout.
+const FLEET_SYS_SPECS = [
+  cardSpec('fleetpower', '显卡总功耗', {
+    bar: true,
+    tip: '全部显卡的实时功耗之和，上限也逐卡相加。双卡并行推理时只有这里代表整机真实负载：' +
+      '上面每张卡的功耗卡只看自己那一张，看到 20 W 不代表另一张没在跑。' +
+      '能耗面板积分的也是这个和。',
+  }),
+  cardSpec('fleetmem', '显存合计', {
+    bar: true,
+    tip: '所有显卡的已用显存之和 ÷ 显存总量之和，比例按每卡容量加权，' +
+      '所以两张容量不同的卡不会把比例算歪。一个大模型被切到多张卡上时，' +
+      '这里才是模型实际吃掉的显存；单卡那张只报其中一片。',
+  }),
+];
+
+// The single-card layout stays one row of six, exactly as it was before the
+// second card arrived -- a one-GPU machine should not pay for the grouping.
+const SYS_SPECS = GPU_SYS_SPECS.concat(HOST_SYS_SPECS);
+// ------------------------------------------------------------- system layout
+
+// nvidia-smi's index for one card, as a number.  The collector reads that
+// column as text through one ladder rung and as a number through another, and
+// everything downstream -- series keys, row identity -- needs one shape.
+function sysIndex(card, position) {
+  const raw = card ? card.index : null;
+  if (raw === null || raw === undefined || raw === '') return position;
+  const value = Number(raw);
+  return isFinite(value) ? value : position;
+}
+
+// A row tile has about 22 characters of room, and "NVIDIA RTX PRO 6000
+// Blackwell Workstation Edition" spends most of them on vendor and marketing
+// words that do not say which card this is.  The full string still rides in
+// the tile's tooltip.
+function shortGpuName(name) {
+  return String(name || '')
+    .replace(/^NVIDIA\s+/i, '')
+    .replace(/\s+Workstation Edition$/i, ' WS')
+    .replace(/\s+Founders Edition$/i, ' FE')
+    .replace(/\s+Laptop GPU$/i, ' Laptop');
+}
+
+// Which slot the card sits in, taken from nvidia-smi's *max* columns.  The
+// current pair cannot answer that: an idle card parks its link at gen1 x4 and
+// only widens while transferring, so GPU1 would read as a crippled slot until
+// something wakes it up.  A driver that reports neither leaves the tile with
+// two lines instead of three.
+function pcieText(card) {
+  const gen = firstNumber(card.pcie_gen_max);
+  const width = firstNumber(card.pcie_width_max);
+  if (gen === null && width === null) return '';
+  const parts = [];
+  if (gen !== null) parts.push('PCIe ' + num(gen, 0) + '.0');
+  if (width !== null) parts.push('×' + num(width, 0));
+  return parts.join(' ');
+}
+
+// The identity tile beside a row.  Only the multi-card layout draws one: the
+// two rows are otherwise identical, and the tile is what says which card the
+// numbers below it belong to.
+function sysRowHead(kind, card, index, host) {
+  if (kind === 'host') {
+    const cpu = host.cpu || {};
+    const memory = host.memory || {};
+    const meta = [];
+    const cores = firstNumber(cpu.cores);
+    if (cores !== null) meta.push(num(cores, 0) + ' 线程');
+    if (firstNumber(memory.total_mb) !== null) {
+      meta.push('内存 ' + gb(memory.total_mb, 0) + ' GB');
+    }
+    // The row holds more than the host: the two machine-wide totals ride on it
+    // too, so the tile has to name all four -- a tile reading "CPU 与内存" over
+    // a row whose right half is 显卡总功耗 would be describing the wrong thing.
+    return {
+      tag: '整机',
+      name: host.available ? 'CPU、内存与全部显卡' : '系统采集不可用',
+      title: '',
+      meta: meta.join(' · '),
+    };
+  }
+  return {
+    tag: 'GPU' + index,
+    name: shortGpuName(card && card.name),
+    title: (card && card.name) || '',
+    meta: pcieText(card || {}),
+  };
+}
+
+// One row per card once there is more than one, plus a machine row.  A single
+// GPU keeps the flat row of six: grouping one card under a tile reading "GPU0"
+// would only restate what the page already implies, and it would cost a row.
+function sysRows(gpus, host) {
+  if (gpus.length <= 1) {
+    return [{
+      key: 'flat', kind: 'flat', index: 0, card: gpus[0] || null,
+      specs: SYS_SPECS, head: null,
+    }];
+  }
+  const rows = gpus.map(function (card, position) {
+    const index = sysIndex(card, position);
+    return {
+      key: 'gpu' + index, kind: 'gpu', index: index, card: card,
+      specs: GPU_SYS_SPECS, head: sysRowHead('gpu', card, index, host),
+    };
+  });
+  rows.push({
+    key: 'host', kind: 'host', index: null, card: null,
+    specs: HOST_SYS_SPECS.concat(FLEET_SYS_SPECS),
+    head: sysRowHead('host', null, null, host),
+  });
+  return rows;
+}
+
+function sysRowMarkup(row) {
+  const head = row.head
+    ? '<div class="sys-id">' +
+        '<span class="sys-tag">' + esc(row.head.tag) + '</span>' +
+        '<span class="sys-name"' + (row.head.title
+          ? ' title="' + esc(row.head.title) + '"' : '') + '>' +
+          esc(row.head.name) + '</span>' +
+        (row.head.meta ? '<span class="sys-meta">' + esc(row.head.meta) + '</span>' : '') +
+      '</div>'
+    : '';
+  return '<div class="sys-row' + (head ? ' has-id' : '') +
+    '" data-row="' + esc(row.key) + '">' + head +
+    '<div class="grid compact"></div></div>';
+}
+
+// Element-wise arithmetic over per-card curves, for the machine-wide pair.
+// History arrays are left-padded when a key first appears, so two series can
+// differ in length; both are right-aligned first so the newest sample stays on
+// the newest timestamp.  ``average`` (weighted by each part's ``weight``) is for
+// ratios like 显存占用 -- adding two ratios up would report 145% used.
+function combineSeries(parts, average) {
+  const length = parts.reduce(function (longest, part) {
+    return Math.max(longest, (part.series || []).length);
+  }, 0);
+  const out = [];
+  for (let i = 0; i < length; i += 1) {
+    let sum = 0;
+    let weight = 0;
+    parts.forEach(function (part) {
+      const series = part.series || [];
+      const value = series[series.length - length + i];
+      if (typeof value !== 'number' || !isFinite(value)) return;
+      const share = part.weight === undefined ? 1 : part.weight;
+      sum += average ? value * share : value;
+      weight += share;
+    });
+    // A sample no card reported stays a gap instead of a zero: 0 W would read
+    // as "the cards went idle", not as "nothing was read".
+    out.push(weight > 0 ? (average ? sum / weight : sum) : null);
+  }
+  return out;
+}
+
 // One merged block at the top of the page: the card's main vitals (GPU util /
-// VRAM / temp / power) plus the host's (CPU load / commit memory), with the
-// power-limit switch right underneath.  The per-section GPU and system grids
-// used to sit two blocks down and took a full screen; these six are what a
-// glance actually needs, so they lead and everything else is one scroll away.
+// VRAM / temp / power) plus the host's (CPU load / commit memory).  The
+// per-section GPU and system grids used to sit two blocks down and took a full
+// screen; these lead and everything else is one scroll away.  With a second
+// card the same four vitals are drawn once per GPU and the host pair moves to
+// a row of its own, alongside the machine-wide totals.
 // The power-limit SWITCH moved to the top bar on 2026-10-19 (left of the
 // update time); the 功耗 card itself stayed here -- watts belong to the grid,
 // the tier buttons are the thing worth keeping one click away at all times.
@@ -1691,17 +1860,43 @@ function renderSystem(snapshot) {
   const container = document.getElementById('sys');
   if (!container) return;
 
-  const gpuState = snapshot.gpu || {};
   const host = snapshot.system || {};
-  const gpus = gpuState.gpus || [];
-  const gpu = gpus.length ? gpus[0] : null;
-  const cpu = host.cpu || {};
-  const memory = host.memory || {};
+  const gpus = (snapshot.gpu || {}).gpus || [];
+  const rows = sysRows(gpus, host);
 
-  const refs = ensureCards(container, SYS_SPECS);
-  if (!refs) return;
+  // Rebuilding the block moves the canvases, and a fresh canvas loses the
+  // scale it had accumulated, so the DOM is rebuilt only when the row list
+  // itself changes: a card appearing or disappearing, or the box gaining a GPU.
+  const signature = rows.map(function (row) {
+    return row.key + ':' + row.specs.map(function (spec) { return spec.key; }).join(',');
+  }).join('|');
+  if (container.dataset.rows !== signature) {
+    container.dataset.rows = signature;
+    container.innerHTML = rows.map(sysRowMarkup).join('');
+  }
 
-  const index = gpu && (gpu.index === undefined || gpu.index === null) ? 0 : (gpu ? gpu.index : 0);
+  rows.forEach(function (row) {
+    const node = container.querySelector('[data-row="' + row.key + '"]');
+    if (!node) return;
+    // ensureCards keys its refs off the container it is handed, so each row
+    // owns its own refs map and two rows may both hold a card called "power".
+    const refs = ensureCards(node.querySelector('.grid') || node, row.specs);
+    if (!refs) return;
+    let values;
+    if (row.kind === 'gpu') {
+      values = gpuCardValues(row.card, row.index);
+    } else if (row.kind === 'host') {
+      values = Object.assign(hostCardValues(host), fleetCardValues(gpus));
+    } else {
+      values = Object.assign(gpuCardValues(row.card, row.index), hostCardValues(host));
+    }
+    paintCards(refs, values);
+  });
+}
+
+// One card's four vitals.  Every GPU row is drawn from here, so the flat row
+// and a per-card row cannot drift apart.
+function gpuCardValues(gpu, index) {
   const memRatio = gpu ? gpu.mem_ratio : null;
   // Which ceiling the bar is drawn against.  The software limit is the honest
   // denominator where it exists; where it does not (laptop GPUs, where the
@@ -1716,11 +1911,8 @@ function renderSystem(snapshot) {
   const hot = temp !== null && temp !== undefined && temp >= 83;
   const warm = temp !== null && temp !== undefined && temp >= 75;
   const memTight = gpu && (memRatio || 0) > 0.9;
-  const cpuLoad = host.available ? cpu.load_pct : null;
-  const commitRatio = host.available ? memory.commit_ratio : null;
-  const commitTight = (commitRatio || 0) > 0.9;
 
-  paintCards(refs, {
+  return {
     util: {
       text: gpu ? num(gpu.util_pct, 0) : '—', unit: gpu ? '%' : '',
       bar: gpu ? (gpu.util_pct || 0) / 100 : null,
@@ -1770,6 +1962,18 @@ function renderSystem(snapshot) {
         format: function (v) { return num(v, 0); },
       },
     },
+  };
+}
+
+// The host pair: CPU load and commit charge, untouched by the GPU layout.
+function hostCardValues(host) {
+  const cpu = host.cpu || {};
+  const memory = host.memory || {};
+  const cpuLoad = host.available ? cpu.load_pct : null;
+  const commitRatio = host.available ? memory.commit_ratio : null;
+  const commitTight = (commitRatio || 0) > 0.9;
+
+  return {
     cpu: {
       text: host.available ? num(cpuLoad, 1) : '—', unit: host.available ? '%' : '',
       bar: host.available ? (cpuLoad || 0) / 100 : null,
@@ -1798,7 +2002,74 @@ function renderSystem(snapshot) {
         format: function (v) { return num(v * 100, 0) + '%'; },
       },
     },
+  };
+}
+
+// The machine-wide pair.  Pure arithmetic over the cards in this sample plus
+// their curves combined point by point; nothing here is measured separately,
+// so it can never disagree with the cards above it.
+function fleetCardValues(gpus) {
+  let watts = null;
+  let ceiling = null;
+  let used = 0;
+  let hasUsed = false;
+  let total = 0;
+  const powerParts = [];
+  const memParts = [];
+  gpus.forEach(function (card, position) {
+    const index = sysIndex(card, position);
+    const draw = firstNumber(card.power_w);
+    if (draw !== null) watts = (watts === null ? 0 : watts) + draw;
+    const cap = firstNumber(card.power_requested_w, card.power_enforced_w);
+    if (cap !== null) ceiling = (ceiling === null ? 0 : ceiling) + cap;
+    powerParts.push({ series: seriesOf('gpu' + index + '.power') });
+    const cardTotal = firstNumber(card.mem_total_mb);
+    const cardUsed = firstNumber(card.mem_used_mb);
+    if (cardUsed !== null) { used += cardUsed; hasUsed = true; }
+    if (cardTotal) {
+      total += cardTotal;
+      // The capacity is the weight: a 96 GB card and a 24 GB card have to
+      // contribute to the total ratio in proportion, not as two 50% votes.
+      memParts.push({ series: seriesOf('gpu' + index + '.mem'), weight: cardTotal });
+    }
   });
+
+  const memRatio = total ? used / total : null;
+  const powerRatio = (watts !== null && ceiling) ? watts / ceiling : null;
+  const memTight = (memRatio || 0) > 0.9;
+  const cards = gpus.length;
+
+  return {
+    fleetpower: {
+      text: watts === null ? '—' : num(watts, 0), unit: watts === null ? '' : 'W',
+      bar: powerRatio,
+      barClass: (powerRatio || 0) > 0.95 ? 'warn' : 't-g',
+      // "2 GPU" rather than "2 张卡": every visible string here has to be in
+      // the i18n dictionary, and "张卡" is a substring of the much older
+      // "这张卡" -- one key would have rewritten all of those to "这 cards".
+      foot: ceiling === null
+        ? '上限 — W'
+        : '上限 ' + num(ceiling, 0) + ' W · ' + cards + ' GPU',
+      series: combineSeries(powerParts, false),
+      sparkOptions: {
+        min: 0, color: cssVar('--chart-g'), autoscale: true,
+        format: function (v) { return num(v, 0); },
+      },
+    },
+    fleetmem: {
+      text: hasUsed ? gb(used, 1) : '—', unit: hasUsed ? 'GB' : '',
+      bar: memRatio,
+      barClass: memTight ? 'bad' : ((memRatio || 0) > 0.8 ? 'warn' : 't-e'),
+      foot: total
+        ? '上限 ' + gb(total, 1) + ' GB · ' + cards + ' GPU' + (memTight ? ' · 接近上限' : '')
+        : '上限 — GB',
+      series: combineSeries(memParts, true),
+      sparkOptions: {
+        min: 0, max: 1, color: cssVar('--chart-e'), autoscale: true,
+        format: function (v) { return num(v * 100, 0) + '%'; },
+      },
+    },
+  };
 }
 
 // ---------------------------------------------------------------- power limit
@@ -1813,6 +2084,16 @@ function renderSystem(snapshot) {
 // decode sweep, belong to the card it was run on, and are appended only for the
 // presets the backend marks `tuned` (i.e. the ones that sweep actually produced).
 const POWER_LABELS = {
+  idle: {
+    name: '极省',
+    note: '最低档（这张卡能设的下限）：只留够跑通的速度，风扇基本听不见，' +
+      '适合挂机、夜间或让第二张卡空转时用。解码只剩满血的三成不到。',
+  },
+  low: {
+    name: '轻载',
+    note: '第二低档：解码约为满血的一半，预填充慢一倍多。' +
+      '轻量对话够用，长提示词会明显感到等首字。',
+  },
   eco: {
     name: '静音',
     note: '最低档：日常长对话的安静选择，解码约为满血的 86%，代价主要在预填充' +
@@ -1838,6 +2119,8 @@ const POWER_LABELS = {
 // purpose: these are properties of that card's curve, not of the role, so they
 // only make sense next to the tuned preset that produced them.
 const POWER_MEASURED = {
+  150: '实测（这张卡的下限）：~634MHz，decode ~18.5t/s，prefill ~33s —— 只有满血的 26%，首字要多等 3.6 倍。',
+  200: '实测：~790MHz，decode ~33.8t/s（满血的 48%），prefill ~24s。',
   300: '实测：~1386MHz，decode ~61t/s（长上下文），prefill ~10s。',
   400: '实测：~2350MHz，decode ~67t/s，峰值速度的 95%，能效最高档（曲线在 ~500W 后变平）。',
   500: '实测：~2755MHz，decode ~70t/s，平台起点；满载平均只抽 ~491W，上限已不是瓶颈。',
@@ -1874,10 +2157,21 @@ const POWER_ERRORS = {
   bad_origin: '跨站请求已被拒绝',
   missing_header: '缺少必要的请求头',
   bad_body: '请求内容不合法',
+  bad_index: '没有这张显卡',
   not_found: '接口不存在',
 };
 
-const POWER_UI = { pending: null, message: null };
+const POWER_UI = { pending: null, index: null, message: null };
+// Which card the row is pointed at, remembered across reloads: the choice is a
+// preference, like the theme and the history tab, not session state.
+const POWER_GPU_KEY = 'llm-monitor-power-gpu';
+
+function storedPowerGpu() {
+  let raw = null;
+  try { raw = localStorage.getItem(POWER_GPU_KEY); } catch (error) { return null; }
+  const value = Number(raw);
+  return raw !== null && raw !== '' && isFinite(value) ? value : null;
+}
 
 function powerMessage() {
   const message = POWER_UI.message;
@@ -1887,6 +2181,60 @@ function powerMessage() {
   return (Date.now() - message.at < 8000) ? message : null;
 }
 
+// One entry per card the control can address.  The menu, the refusal flag and
+// the last applied value are server state (config.power_gpus), the live watts
+// and the window come from the sample.  Both halves are needed: the menu is
+// derived from the card's own window on the server, so a browser that invented
+// one would offer values the driver refuses.
+//
+// A server that predates the per-card list still answers with the three
+// single-card keys, which describe the primary card -- so this degrades to the
+// old behaviour instead of showing an empty row.
+function powerCards(config, gpus) {
+  const blocks = (config.power_gpus && config.power_gpus.length)
+    ? config.power_gpus
+    : [{ index: 0, presets: config.power_presets || [],
+         settable: config.power_settable, applied_w: config.power_applied_w }];
+  const byIndex = {};
+  (gpus || []).forEach(function (card) {
+    byIndex[Number(card.index)] = card;
+  });
+  return blocks.map(function (block) {
+    const index = Number(block.index);
+    return {
+      index: index,
+      presets: block.presets || [],
+      // False once the driver refused a software power limit for THAT card.
+      // There is nothing to retry, so its buttons go away and the row reports
+      // the live ceiling instead of offering a write that cannot land.
+      settable: block.settable !== false,
+      applied: firstNumber(block.applied_w),
+      card: byIndex[index] || null,
+    };
+  }).filter(function (entry) { return entry.card; });
+}
+
+// The card the row currently addresses.  An explicit choice wins while that
+// card is still present; otherwise the list decides, so unplugging a card
+// cannot leave the buttons pointing at a number nothing answers for.  A card
+// whose window the driver did not report has no menu, so it yields to one that
+// has: an empty menu on one card must not blank the control for the machine.
+function selectedPowerCard(cards) {
+  const wanted = POWER_UI.index !== null ? POWER_UI.index : storedPowerGpu();
+  const usable = cards.filter(function (entry) { return entry.presets.length; });
+  const pool = usable.length ? usable : cards;
+  const hit = pool.filter(function (entry) {
+    return entry.index === wanted;
+  })[0];
+  return hit || pool[0];
+}
+
+function selectPowerCard(index) {
+  POWER_UI.index = index;
+  try { localStorage.setItem(POWER_GPU_KEY, String(index)); } catch (error) { /* private mode */ }
+  renderPowerControl(S.snapshot || {});
+}
+
 function renderPowerControl(snapshot) {
   const box = document.getElementById('power-control');
   if (!box) return;
@@ -1894,20 +2242,20 @@ function renderPowerControl(snapshot) {
   const gpuState = (snapshot && snapshot.gpu) || {};
   const gpus = gpuState.gpus || [];
   const config = S.config || {};
-  const presets = config.power_presets || [];
-  // False once the driver has refused a software power limit outright.  There
-  // is nothing to retry in that case, so the buttons go away and the row
-  // reports the live ceiling instead of offering a write that cannot land.
-  const settable = config.power_settable !== false;
+  // Every card the row can point at, in the order the server lists them.
+  const cards = powerCards(config, gpus);
 
-  if (!gpus.length) {
+  if (!cards.length) {
     // Nothing readable to draw against -- a machine with no NVIDIA card here.
     box.innerHTML = '';
     box.dataset.sig = '';
     return;
   }
 
-  const gpu = gpus[0];
+  const entry = selectedPowerCard(cards);
+  const gpu = entry.card;
+  const presets = entry.presets;
+  const settable = entry.settable;
   // Three different numbers, and the row wants all of them: what the card draws
   // right now, the ceiling it is holding, and which preset owns that ceiling.
   // Only the middle one is always readable -- laptop GPUs report no software
@@ -1918,7 +2266,7 @@ function renderPowerControl(snapshot) {
   const ceiling = firstNumber(requested, enforced);
   const dynamic = requested === null && enforced !== null;
   const live = firstNumber(gpu.power_w);
-  const applied = firstNumber(config.power_applied_w);
+  const applied = entry.applied;
   const current = firstNumber(requested, applied);
   const elevated = !!config.elevated;
   const pending = POWER_UI.pending;
@@ -1947,14 +2295,20 @@ function renderPowerControl(snapshot) {
   // The readout ticks with every sample, and rebuilding the whole row that
   // often would fight the pointer and flicker the hover state -- so the markup
   // is gated on this signature and the numbers are patched in below.
+  //
+  // The selected card is part of the signature: switching cards changes the
+  // menu, the highlight and the range, and a stale signature would leave the
+  // row looking like the click did nothing.
   const sig = JSON.stringify([current, ceiling, dynamic, elevated, settable,
-    pending, note ? note.text + note.tone : '', compact, presets.length]);
+    pending, note ? note.text + note.tone : '', compact, presets.length,
+    entry.index, cards.length]);
   if (box.dataset.sig !== sig) {
     box.dataset.sig = sig;
-    box.innerHTML = powerMarkup(presets, {
-      gpu: gpu, settable: settable, elevated: elevated, pending: pending,
-      note: note, compact: compact, current: current, live: live,
-      ceiling: ceiling, dynamic: dynamic,
+    box.innerHTML = powerMarkup(cards, {
+      index: entry.index, card: gpu, presets: presets, settable: settable,
+      elevated: elevated, pending: pending, note: note, compact: compact,
+      current: current, live: live, ceiling: ceiling, dynamic: dynamic,
+      multi: cards.length > 1,
     });
   }
 }
@@ -1962,35 +2316,53 @@ function renderPowerControl(snapshot) {
 // The structural half of the power row: buttons, labels, status and range.
 // Called only when the signature above changes, so it can afford to build the
 // whole string at once.
-function powerMarkup(presets, state) {
+function powerMarkup(cards, state) {
   const compact = state.compact;
-  const buttons = presets.map(function (preset) {
+  // Which card the buttons below belong to, and a way to move between cards.
+  // Only rendered for a multi-GPU machine: one card needs no selector, and the
+  // top bar has no room to spare.
+  const selectors = state.multi ? '<span class="pw-group pw-gpus">' +
+    cards.map(function (entry) {
+      const on = entry.index === state.index ? ' on' : '';
+      const name = (entry.card && entry.card.name) || '';
+      return '<button type="button" class="pw-gpu' + on + '" data-power-gpu="' +
+        entry.index + '" title="' + esc((name ? name + ' · ' : '') +
+          (entry.index === state.index ? '当前调节对象' : '切换到此卡')) + '">' +
+        'GPU' + entry.index + '</button>';
+    }).join('') + '</span>' : '';
+
+  const buttons = state.presets.map(function (preset) {
     // Highlight from the measured limit, not from what we last asked for: if
     // something else changes the card the buttons follow reality.
     const active = state.current !== null &&
       Math.abs(preset.watts - state.current) < 1;
     const classes = ['pw-btn'];
     if (active) classes.push('on');
-    if (state.pending === preset.watts) classes.push('pending');
+    // Only the card being written shows the pending state; the other card's
+    // identical wattage is not what is in flight.
+    if (state.pending && state.pending.index === state.index &&
+        state.pending.watts === preset.watts) classes.push('pending');
     const disabled = (state.elevated && state.settable) ? '' : ' disabled';
+    // The index rides on the button rather than in module state: the row is
+    // rebuilt between the click and the request, and a resolved-at-click-time
+    // index cannot go stale if the user switches cards mid-flight.
+    const attrs = '" data-watts="' + preset.watts +
+      '" data-index="' + state.index + '"' + disabled +
+      ' title="' + esc(presetTip(preset)) + '">';
     if (compact) {
       // One line, watts only: the preset name and its explanation move into
       // the tooltip because the section head has no room for a second line.
-      return '<button type="button" class="' + classes.join(' ') +
-        '" data-watts="' + preset.watts + '"' + disabled +
-        ' title="' + esc(presetTip(preset)) + '">' +
+      return '<button type="button" class="' + classes.join(' ') + attrs +
         '<span class="pw-watts">' + preset.watts + 'W</span></button>';
     }
-    return '<button type="button" class="' + classes.join(' ') +
-      '" data-watts="' + preset.watts + '"' + disabled +
-      ' title="' + esc(presetTip(preset)) + '">' +
+    return '<button type="button" class="' + classes.join(' ') + attrs +
       '<span class="pw-watts">' + preset.watts + ' W</span>' +
       '<span class="pw-note">' + esc(presetName(preset)) + '</span></button>';
   }).join('');
 
-  const low = firstNumber(state.gpu.power_min_w);
-  const high = firstNumber(state.gpu.power_max_w);
-  const factory = firstNumber(state.gpu.power_default_w);
+  const low = firstNumber(state.card.power_min_w);
+  const high = firstNumber(state.card.power_max_w);
+  const factory = firstNumber(state.card.power_default_w);
   const rangeParts = [];
   if (low !== null && high !== null) {
     rangeParts.push('可用范围 ' + num(low, 0) + '–' + num(high, 0) + ' W');
@@ -1998,15 +2370,19 @@ function powerMarkup(presets, state) {
   if (factory !== null) rangeParts.push('出厂默认 ' + num(factory, 0) + ' W');
   const range = rangeParts.join(' · ');
 
+  // A machine with two cards has two of these rows' worth of numbers, so an
+  // unprefixed "已设为 400 W" would be ambiguous about which one moved.
+  const prefix = state.multi ? 'GPU' + state.index + ' ' : '';
   let status = '';
   if (state.note) {
     status = '<span class="pw-status ' + (state.note.tone || '') + '">' +
-      esc(state.note.text) + '</span>';
+      esc(prefix + state.note.text) + '</span>';
   } else if (!state.settable) {
     // Not an error: the driver simply does not implement the setting.  Say
     // what is in force instead, which is the number the user actually asked to
     // see in the first place.
-    status = '<span class="pw-status">此卡不接受软件功耗墙，上限由 Dynamic Boost 动态管理</span>';
+    status = '<span class="pw-status">' + esc(prefix) +
+      '此卡不接受软件功耗墙，上限由 Dynamic Boost 动态管理</span>';
   }
 
   let tipText = '对应 nvidia-smi -pl 的功率墙。' +
@@ -2022,6 +2398,10 @@ function powerMarkup(presets, state) {
   if (!state.settable) {
     tipText += '驱动已经明确拒绝过软件设限，所以档位按钮不再提供。';
   }
+  if (state.multi) {
+    tipText += '这台机器有多张显卡：左边的 GPU0 / GPU1 选择这排按钮作用在哪一张，' +
+      '每张卡的上限是独立设置的，切换不会改动另一张。';
+  }
   const tip = '<span class="tip" tabindex="0" data-tip="' + esc(tipText) + '">i</span>';
   // The live "当前 X W · 上限 Y W" readout used to sit here; the power card
   // right above already shows both numbers, so the row is buttons only.
@@ -2035,7 +2415,7 @@ function powerMarkup(presets, state) {
       ? '<div class="pw-group">' + buttons + '</div>' : '';
     return '<div class="pw-row">' +
         '<span class="pw-title">显卡功耗' + tip + lock + '</span>' +
-        group + status +
+        selectors + group + status +
       '</div>';
   }
 
@@ -2043,7 +2423,7 @@ function powerMarkup(presets, state) {
     ? '<div class="pw-group">' + buttons + '</div>' : '';
   return '<div class="pw-row">' +
       '<span class="pw-title">功耗上限' + tip + '</span>' +
-      group + status +
+      selectors + group + status +
       (range ? '<span class="pw-range">' + range + '</span>' : '') +
     '</div>' +
     (state.elevated ? '' : '<div class="pw-hint">当前进程没有管理员权限，改不了功耗上限' +
@@ -2051,7 +2431,10 @@ function powerMarkup(presets, state) {
       '请关闭本窗口，改用 <b>start_monitor_admin.vbs</b> 启动（双击，会弹一次 UAC 确认）。</div>');
 }
 
-function applyPowerLimit(watts) {
+// ``index`` names the card the clicked button belongs to; the row carries it in
+// data-index so the request cannot land on a card the user has since switched
+// away from.
+function applyPowerLimit(watts, index) {
   const config = S.config || {};
   if (!config.elevated) {
     POWER_UI.message = { text: POWER_ERRORS.not_elevated, tone: 'bad', at: Date.now() };
@@ -2061,15 +2444,20 @@ function applyPowerLimit(watts) {
   if (POWER_UI.pending !== null) return;
 
   const gpus = (S.snapshot && S.snapshot.gpu && S.snapshot.gpu.gpus) || [];
-  const active = gpus.length
-    ? firstNumber(gpus[0].power_requested_w, config.power_applied_w) : null;
+  // "Already there" has to be judged against the card being written, not
+  // against the primary one: two cards sit on different limits.
+  const entry = powerCards(config, gpus).filter(function (item) {
+    return item.index === index;
+  })[0];
+  const active = entry
+    ? firstNumber((entry.card || {}).power_requested_w, entry.applied) : null;
   if (active !== null && Math.abs(active - watts) < 1) {
     POWER_UI.message = { text: '当前已经是该档位', tone: '', at: Date.now() };
     renderPowerControl(S.snapshot || {});
     return;
   }
 
-  POWER_UI.pending = watts;
+  POWER_UI.pending = { index: index, watts: watts };
   POWER_UI.message = { text: '正在设置…', tone: '', at: Date.now() };
   renderPowerControl(S.snapshot || {});
 
@@ -2079,7 +2467,7 @@ function applyPowerLimit(watts) {
     // and this server never answers OPTIONS, so another site cannot get the
     // request out at all.  See Handler._write_refusal.
     headers: { 'Content-Type': 'application/json', 'X-LLM-Monitor': '1' },
-    body: JSON.stringify({ watts: watts }),
+    body: JSON.stringify({ watts: watts, index: index }),
   }).then(function (response) {
     return response.json().then(function (body) { return body || {}; });
   }).then(function (body) {
@@ -2088,14 +2476,20 @@ function applyPowerLimit(watts) {
       // Move the highlight on this frame; the next sample overwrites it with
       // what the driver actually reports.
       const applied = firstNumber(body.applied);
-      if (gpus.length && applied !== null) gpus[0].power_requested_w = applied;
+      // Which card the write landed on: the server echoes the index it used,
+      // and the highlight of the *other* card must not move.
+      const target_index = body.index === undefined ? index : Number(body.index);
+      const card = gpus.filter(function (item) {
+        return Number(item.index) === target_index;
+      })[0];
+      if (card && applied !== null) card.power_requested_w = applied;
       // The server remembers what it set for exactly this case: a card that
       // accepts the write but will not report it back has no other basis for
       // the highlight, and the memory is dropped the moment the driver starts
       // reporting a value of its own.
-      config.power_applied_w = applied !== null ? applied : watts;
-      const previous = firstNumber(body.previous);
       const target = applied !== null ? applied : watts;
+      rememberPowerApplied(config, target_index, target);
+      const previous = firstNumber(body.previous);
       POWER_UI.message = {
         text: '已设为 ' + num(target, 0) + ' W' +
           (applied === null ? '（驱动不回读软件功耗墙，按请求值显示）' : '') +
@@ -2107,8 +2501,9 @@ function applyPowerLimit(watts) {
       const code = body.error || 'unknown';
       if (code === 'unsupported') {
         // Verified refusal: the driver does not implement this setting at all,
-        // so stop offering it now rather than on the next sample.
-        config.power_settable = false;
+        // so stop offering it now rather than on the next sample.  Only for the
+        // card that refused -- the other one still takes a limit.
+        markPowerSettable(config, index, false);
       }
       POWER_UI.message = {
         text: (POWER_ERRORS[code] || '设置失败（' + code + '）') +
@@ -2122,6 +2517,28 @@ function applyPowerLimit(watts) {
     POWER_UI.message = { text: '请求失败：' + error.message, tone: 'bad', at: Date.now() };
     renderPowerControl(S.snapshot || {});
   });
+}
+
+// Per-card writes to the config block, so the row repaints from optimistic
+// state for one frame instead of waiting for the server's next sample.  The
+// legacy scalars are the primary card's view and stay in step with it.
+function powerBlockFor(config, index) {
+  const blocks = config.power_gpus || [];
+  return blocks.filter(function (block) {
+    return Number(block.index) === index;
+  })[0] || null;
+}
+
+function rememberPowerApplied(config, index, value) {
+  const block = powerBlockFor(config, index);
+  if (block) block.applied_w = value;
+  if (!block || index === 0) config.power_applied_w = value;
+}
+
+function markPowerSettable(config, index, value) {
+  const block = powerBlockFor(config, index);
+  if (block) block.settable = value;
+  if (!block || index === 0) config.power_settable = value;
 }
 
 // ---------------------------------------------------------------- token ledger
@@ -2834,9 +3251,17 @@ async function boot() {
   const powerBox = document.getElementById('power-control');
   if (powerBox) {
     powerBox.addEventListener('click', function (event) {
+      // The card selector lives in the same row; it changes which card the
+      // preset buttons address and never writes to the driver.
+      const pick = event.target.closest('button[data-power-gpu]');
+      if (pick && !pick.disabled) {
+        selectPowerCard(Number(pick.dataset.powerGpu));
+        return;
+      }
       const button = event.target.closest('button[data-watts]');
       if (!button || button.disabled) return;
-      applyPowerLimit(Number(button.dataset.watts));
+      applyPowerLimit(Number(button.dataset.watts),
+        button.dataset.index === undefined ? 0 : Number(button.dataset.index));
     });
   }
 

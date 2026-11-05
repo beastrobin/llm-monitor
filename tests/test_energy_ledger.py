@@ -267,17 +267,24 @@ class TouPricingTest(unittest.TestCase):
         ledger.observe_power(gpu_w=300.0, cpu_pct=25.0, now=NOW)
         ledger.observe_power(gpu_w=300.0, cpu_pct=25.0, now=NOW + 10.0)
         ledger.flush(force=True)
+        # Two hour keys are needed that the real sample cannot occupy -- the
+        # test used to hardcode "7" and "8", which collided with the wall clock
+        # for two hours a day (the real bucket then kept its good numbers and
+        # the assertion failed on a filename, not on the sanitiser).
+        real_hour = time.localtime(NOW).tm_hour
+        bad_shape_hour = (real_hour + 1) % 24
+        bad_value_hour = (real_hour + 2) % 24
         with open(self.tmp.path, "r", encoding="utf-8") as fh:
             raw = json.load(fh)
         for bucket in raw["energy"].values():
             bucket["by_hour"]["99"] = {"gpu_wh": 5}      # impossible hour
-            bucket["by_hour"]["7"] = {"machine_wh": "x"}  # not a number
-            bucket["by_hour"]["8"] = "junk"
+            bucket["by_hour"][str(bad_shape_hour)] = {"machine_wh": "x"}
+            bucket["by_hour"][str(bad_value_hour)] = "junk"
         revived = stats.TokenLedger(self.tmp.path, tou=self.SH)
         bucket = revived._energy[time.strftime("%Y-%m-%d")]
         self.assertNotIn("99", bucket["by_hour"])
-        self.assertNotIn("7", bucket["by_hour"])
-        self.assertNotIn("8", bucket["by_hour"])
+        self.assertNotIn(str(bad_shape_hour), bucket["by_hour"])
+        self.assertNotIn(str(bad_value_hour), bucket["by_hour"])
         # The real hour survived and the bill is still 'tou', not flat.
         self.assertTrue(bucket["by_hour"])
         self.assertEqual(revived.payload()["energy_rows"][0]["cost_basis"], "tou")

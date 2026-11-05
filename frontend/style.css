@@ -289,6 +289,35 @@ main {
   border-radius: 9px;
 }
 
+/* Card selector -- which GPU the tier buttons act on.  Only rendered when the
+   machine has more than one card, so it is sized for the one-line header row
+   rather than as a second control strip: two small pills between the title and
+   the presets, with the addressed card lit in the accent colour. */
+.pw-gpus { gap: 1px; padding: 1px; }
+.pw-gpu {
+  min-width: 0;
+  padding: 3px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: .01em;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.pw-gpu:hover { color: var(--text); background: var(--track); }
+.pw-gpu:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Selecting a card changes what the buttons write to, so the choice has to be
+   as visible as the active tier -- same accent, different shape. */
+.pw-gpu.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--track);
+}
+
 .pw-btn {
   display: flex;
   flex-direction: column;
@@ -424,6 +453,78 @@ main {
    info tooltip), so the compact cards reclaim that height too.  They stay a
    touch shorter than the mid-page cards, which use the base 58px. */
 .grid.compact .spark { height: 48px; }
+
+/* ------------------------------------------------- system block: N rows ---
+   The top block used to be one six-column grid.  It is now a stack of rows,
+   so a two-card machine can give each GPU a row of its own: the numbers under
+   GPU0 and GPU1 land in the same columns, and that shared ruler is the only
+   reason comparing the two cards at a glance works.  A single-card machine
+   still gets one row of six -- sysRows() hands back a flat row and this stack
+   has nothing to stack. */
+
+.sys-stack { display: block; }
+.sys-row { display: block; }
+.sys-row + .sys-row { margin-top: 14px; }
+
+/* A row that carries an identity tile is two columns: the tile, then that
+   card's four metrics.  The tile is a fixed 158px so every row's metric
+   columns start at the same x. */
+.sys-row.has-id {
+  display: grid;
+  grid-template-columns: 158px minmax(0, 1fr);
+  gap: 14px;
+  align-items: stretch;
+}
+.sys-row.has-id .grid.compact { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+.sys-id {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 2px 4px 2px 2px;
+}
+.sys-tag {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  color: var(--text);
+}
+.sys-name {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.sys-meta {
+  color: var(--faint);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Below this the 158px gutter costs more than it gives: the tile turns into a
+   header line and the four metrics keep the full width. */
+@media (max-width: 1180px) {
+  .sys-row.has-id { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  /* justify-content centres the tile vertically while it is a column; once the
+     media query flips it to a row that same rule would centre it horizontally
+     over the cards, so the axis has to be reset with the direction. */
+  .sys-id {
+    flex-direction: row; flex-wrap: wrap; align-items: baseline;
+    justify-content: flex-start; gap: 8px;
+  }
+  .sys-name { -webkit-line-clamp: 1; }
+}
+@media (max-width: 720px) {
+  .sys-row.has-id .grid.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 
 .card {
   display: flex;
@@ -1294,6 +1395,23 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
   color: var(--muted);
   font-size: 12px;
   text-align: center;
+}
+
+/* The header is one line by design, and with four tiers it stayed one line on
+   any desktop width.  Six tiers plus the card selector made the switch row
+   ~160 px wider (2026-11-03), and the bar has no shrink room to give: the row
+   is nowrap, so the overflow walked the theme / language / restart buttons off
+   the right edge -- clipped, not shrunk, and the browser does not even show a
+   scrollbar for a sticky bar.  Below this width the right cluster wraps onto a
+   second line instead; a 30 px taller header costs less than an unreachable
+   restart button. */
+@media (max-width: 1180px) {
+  .topbar-right { flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; }
+}
+/* Narrower than the switch row itself the tier group has to break too, or it
+   pushes the buttons off again from the inside. */
+@media (max-width: 900px) {
+  .power-control.top .pw-row { flex-wrap: wrap; }
 }
 
 @media (max-width: 720px) {

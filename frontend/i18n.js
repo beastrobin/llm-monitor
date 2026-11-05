@@ -296,7 +296,37 @@
     '风扇': 'fan', '· 动态': '· dynamic', '上限 — W': 'limit — W',
     '基准': 'stock', '· 负载饱和': '· saturated', '· 压力偏高': '· high pressure',
 
+    /* system block, one row per card (2026-11-03) */
+    '整机': 'Whole box', 'CPU、内存与全部显卡': 'CPU, RAM & all GPUs',
+    '线程': ' threads', '内存 ': 'RAM ',
+    '显卡总功耗': 'Total GPU power',
+    '全部显卡的实时功耗之和，上限也逐卡相加。双卡并行推理时只有这里代表整机真实负载：':
+      'Live draw summed over every card, ceilings added too. On a two-card box this is the only figure that reads as real load:',
+    '上面每张卡的功耗卡只看自己那一张，看到 20 W 不代表另一张没在跑。':
+      ' each card\u2019s own power tile only sees itself, so 20 W there does not mean the other card is idle.',
+    '能耗面板积分的也是这个和。': 'The energy panel integrates this same sum.',
+    '显存合计': 'Total VRAM',
+    '所有显卡的已用显存之和 ÷ 显存总量之和，比例按每卡容量加权，':
+      'Summed used VRAM \u00f7 summed capacity, weighted by each card\u2019s size,',
+    '所以两张容量不同的卡不会把比例算歪。一个大模型被切到多张卡上时，':
+      ' so two cards of different sizes cannot skew the ratio. When one model is split across cards,',
+    '这里才是模型实际吃掉的显存；单卡那张只报其中一片。':
+      ' this is what the model actually holds; a single card\u2019s tile reports only its share.',
+
     /* power tiers */
+    '极省': 'Minimal', '轻载': 'Light',
+    '最低档（这张卡能设的下限）：只留够跑通的速度，风扇基本听不见，':
+      'Lowest rung (this card\u2019s own floor): just enough speed to keep working, fans all but silent,',
+    '适合挂机、夜间或让第二张卡空转时用。解码只剩满血的三成不到。':
+      ' for leaving a box on overnight or letting a second card idle. Decode falls below 30% of full.',
+    '第二低档：解码约为满血的一半，预填充慢一倍多。':
+      'Second rung: decode around half of full, prefill more than twice as slow.',
+    '轻量对话够用，长提示词会明显感到等首字。':
+      ' Fine for small chats; a long prompt makes the wait for the first token obvious.',
+    '实测（这张卡的下限）：~634MHz，decode ~18.5t/s，prefill ~33s —— 只有满血的 26%，首字要多等 3.6 倍。':
+      'measured (the card\u2019s floor): ~634MHz, decode ~18.5t/s, prefill ~33s \u2014 26% of full, 3.6\u00d7 the wait.',
+    '实测：~790MHz，decode ~33.8t/s（满血的 48%），prefill ~24s。':
+      'measured: ~790MHz, decode ~33.8t/s (48% of full), prefill ~24s.',
     '静音': 'Silent', '低耗': 'Eco', '均衡': 'Balanced', '满血': 'Full',
     '复原': 'Stock',
     '最低档：日常长对话的安静选择，解码约为满血的 86%，代价主要在预填充（首字延迟），长提示词尤其。':
@@ -328,6 +358,7 @@
     '跨站请求已被拒绝': 'cross-site request refused',
     '缺少必要的请求头': 'required header missing',
     '请求内容不合法': 'bad request body',
+    '没有这张显卡': 'no such GPU',
     '接口不存在': 'endpoint not found',
     '可用范围': 'allowed range',
     '出厂默认': 'factory default',
@@ -347,6 +378,10 @@
     '这也是「动态」两个字的来历。': ' hence the "dynamic" tag.',
     '驱动已经明确拒绝过软件设限，所以档位按钮不再提供。':
       ' The driver has refused software caps, so tier buttons are gone.',
+    '这台机器有多张显卡：左边的 GPU0 / GPU1 选择这排按钮作用在哪一张，每张卡的上限是独立设置的，切换不会改动另一张。':
+      ' This machine has more than one GPU: the GPU0 / GPU1 pills pick which card the tier buttons address. Each card keeps its own ceiling, so switching never changes the other one.',
+    '当前调节对象': 'addressing this card',
+    '切换到此卡': 'switch to this card',
     '档位菜单未到，连接恢复后自动补上':
       'tier menu not here yet; it appears once the connection recovers',
     '此卡不接受软件功耗墙，上限由 Dynamic Boost 动态管理':

@@ -50,6 +50,13 @@ GPU_FIELDS = [
     ("clocks.mem", "clock_mem_mhz", float),
     ("pcie.link.gen.current", "pcie_gen", str),
     ("pcie.link.width.current", "pcie_width", str),
+    # The maximum pair answers "which slot is this card in", which the current
+    # pair cannot: an idle card parks its link at gen1 x4 and only widens while
+    # it is transferring.  On a two-card box that difference is the thing worth
+    # showing (GPU0 on a gen5 slot, GPU1 on a gen4 one), so the tile in the
+    # dashboard reads these and the card's own tooltip keeps the live values.
+    ("pcie.link.gen.max", "pcie_gen_max", str),
+    ("pcie.link.width.max", "pcie_width_max", str),
 ]
 
 # Fallback ladder for drivers that reject one of the optional columns above: a
@@ -142,6 +149,8 @@ def _query_gpus(timeout=6.0):
             "power_min_w": None,
             "power_max_w": None,
             "power_default_w": None,
+            "pcie_gen_max": None,
+            "pcie_width_max": None,
         }
         for (_, key, cast), raw in zip(fields, parts):
             gpu[key] = _to_number(raw, cast)

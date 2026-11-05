@@ -5,7 +5,8 @@ Serves a single-page dashboard plus three JSON endpoints:
 * ``GET  /api/snapshot``     -- the current sample and the retained history,
   used once on page load so a refresh does not wipe the charts.
 * ``GET  /api/stream``       -- server-sent events, one sample every interval.
-* ``POST /api/power-limit``  -- apply a GPU power preset.
+* ``POST /api/power-limit``  -- apply a power preset to one GPU (the body's
+  optional ``index`` names the card; it defaults to the primary one).
 * ``POST /api/restart``      -- relaunch this process and exit.
 * ``POST /api/stats-reset``  -- clear the token ledger's buckets, keeping
   the counter baselines.  The writes are fenced off the same way; see
@@ -53,7 +54,7 @@ del _stream_name
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.14"
+VERSION = "1.15"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
@@ -402,6 +403,45 @@ def _timed(fn):
     return run
 
 
+def gpu_index(card, position=0):
+    """The nvidia-smi index of one card, normalised to an int.
+
+    The collector reads that column as text, and which ladder rung answered
+    decides whether it arrives as ``"0"`` or ``0``; every consumer addresses a
+    card by this number (the selector, the write path, the series keys), so the
+    conversion lives here.  A fallback query that drops the column leaves the
+    card's position as the only identity it has, and that is better than no
+    identity at all.
+    """
+    try:
+        return int(str(card.get("index")).strip())
+    except (TypeError, ValueError, AttributeError):
+        return position
+
+
+def power_gpu_blocks(hub):
+    """The per-card power state the selector reads, one block per GPU.
+
+    Keyed by card because the ceiling belongs to the card: two GPUs of a
+    different class (a 600 W workstation beside a 175 W laptop) accept
+    different menus, and one card refusing a software limit must not take the
+    other card's buttons away.  ``power_presets`` / ``power_settable`` /
+    ``power_applied_w`` stay as the primary card's single-card view, which is
+    what the ledger's tier stamping and the power card still read.
+    """
+    states = getattr(hub, "power_by_gpu", None) or {}
+    if not states:
+        # A hub that has not sampled yet (or a stub in a test): fall back to
+        # the scalar view so the block keeps its shape.
+        return [{"index": 0, "presets": hub.power_presets,
+                 "settable": hub.power_settable,
+                 "applied_w": hub.power_applied_w}]
+    return [{"index": index, "presets": state["presets"],
+             "settable": state["settable"],
+             "applied_w": state["applied_w"]}
+            for index, state in sorted(states.items())]
+
+
 def active_power_tier(payload):
     """The GPU power wall in force for this sample, or None if unreadable.
 
@@ -503,6 +543,13 @@ def config_block(hub):
         # the buttons can work.
         "power_settable": hub.power_settable,
         "power_applied_w": hub.power_applied_w,
+        # The same three facts per card.  The keys above describe the primary
+        # card only -- enough for a single-GPU machine, which is what the
+        # ledger's tier stamping assumes -- while this list is what the GPU
+        # selector offers.  Both are served here rather than derived in the
+        # browser, because the menu depends on each card's own window and that
+        # lives in the collector.
+        "power_gpus": power_gpu_blocks(hub),
     }
 
 
@@ -603,19 +650,18 @@ class Hub(object):
         # token cannot change under a running process, and the UI needs it
         # before it can decide whether to offer the power control at all.
         self.elevated = power.is_elevated()
-        # The preset menu for whatever card is installed.  Refreshed from each
-        # sample (the card reports its own window there), emptied when no card
-        # answers -- an empty menu is what hides the control in the UI.
-        self.power_presets = []
-        # A card can also refuse software power limits outright; the driver
-        # says so only when asked, so the answer is remembered here and the
-        # panel stops offering dead buttons for the rest of the run.
-        self.power_settable = True
-        # What this dashboard last set, for the case where the driver will not
-        # report it back (laptops): without it the active-preset highlight has
-        # nothing to stand on.  Any value the driver *does* report wins over
-        # this, so someone else changing the limit still moves the highlight.
-        self.power_applied_w = None
+        # Per-card power state, keyed by nvidia-smi's index:
+        #
+        #   presets    the menu this card accepts (refreshed every sample)
+        #   settable   False once the driver refused a software limit
+        #   applied_w  what this dashboard last set, for cards that accept the
+        #              write but will not report it back (laptops)
+        #
+        # Keyed by card rather than held as three scalars: a second GPU has a
+        # ceiling of its own, and one card's refusal or write must not move the
+        # other's buttons.  The three properties below keep the single-card
+        # view (the primary card) for the ledger and the power card.
+        self.power_by_gpu = {}
         # A power-limit change should land on the charts immediately instead of
         # waiting out the interval, so the sampler waits on this rather than
         # sleeping blind.  A generation counter plus a condition (not a bare
@@ -632,6 +678,38 @@ class Hub(object):
         # the Hub that touches the disk, and a slow or malformed stats file
         # must not delay the first sample.  None when the feature is disabled.
         self.ledger = build_ledger(config)
+
+    def _power_state(self, index, create=False):
+        """That card's power state, created on first use when asked to.
+
+        Reads never create: ``config_block`` runs on every stream frame, and a
+        machine with no card must not grow a phantom entry just by being asked
+        what it offers.
+        """
+        state = self.power_by_gpu.get(index)
+        if state is None:
+            if not create:
+                return {"presets": [], "settable": True, "applied_w": None}
+            state = {"presets": [], "settable": True, "applied_w": None}
+            self.power_by_gpu[index] = state
+        return state
+
+    # The primary card's view, read-only.  These were plain attributes until a
+    # second GPU made "the power limit" ambiguous; keeping the names as
+    # properties means the ledger, the config block and the power card go on
+    # reading the first card without knowing the state moved.
+
+    @property
+    def power_presets(self):
+        return self._power_state(0)["presets"]
+
+    @property
+    def power_settable(self):
+        return self._power_state(0)["settable"]
+
+    @property
+    def power_applied_w(self):
+        return self._power_state(0)["applied_w"]
 
     def _refresh_router(self, force=False):
         """Follow session switches and router restarts on the sampling cadence.
@@ -889,18 +967,11 @@ class Hub(object):
         cards = gpu_payload.get("gpus") or []
         if cards:
             cards[0]["power_tier_w"] = tier
-        # The preset menu follows the card, and this sample already carries its
-        # window -- deriving it here keeps one source of truth with the write
-        # path (the handler passes this exact list back in) without spending an
-        # extra nvidia-smi spawn on every request.
-        menu = power.presets_for(
-            cards[0].get("power_min_w") if cards else None,
-            cards[0].get("power_max_w") if cards else None)
-        if menu != self.power_presets:
-            self.power_presets = menu
-            log("power presets: %s" % (", ".join(
-                "%s %dW" % (preset["id"], preset["watts"]) for preset in menu)
-                or "none -- the card did not report its limits"))
+        # The preset menu follows each card, and this sample already carries
+        # every card's window -- deriving it here keeps one source of truth
+        # with the write path (the handler passes this exact list back in)
+        # without spending an extra nvidia-smi spawn on every request.
+        self._refresh_power_menus(cards)
 
         # Fold this sample's counters into the lifetime ledger.  It is pure
         # dict arithmetic over data already in hand, so it does not belong on
@@ -955,33 +1026,89 @@ class Hub(object):
             if channel in self._subscribers:
                 self._subscribers.remove(channel)
 
-    def set_power_limit(self, watts):
-        """Apply a GPU power preset, then resample so the UI reads the truth.
+    def _refresh_power_menus(self, cards):
+        """Re-derive every card's preset menu from this sample, log changes.
+
+        Each card gets its own menu because each card has its own window; a
+        shared menu would offer one card's ceiling on another.  A sample that
+        reports no cards at all -- a transient nvidia-smi failure -- leaves the
+        menus alone rather than blanking the control, and a card that is gone
+        takes its entry with it so the selector cannot point at nothing.
+        """
+        if not cards:
+            return
+        seen = set()
+        for position, card in enumerate(cards):
+            index = gpu_index(card, position)
+            seen.add(index)
+            menu = power.presets_for(card.get("power_min_w"),
+                                     card.get("power_max_w"))
+            state = self._power_state(index, create=True)
+            if state["presets"] == menu:
+                continue
+            state["presets"] = menu
+            log("gpu%d power presets: %s" % (index, ", ".join(
+                "%s %dW" % (preset["id"], preset["watts"]) for preset in menu)
+                or "none -- the card did not report its limits"))
+        for index in list(self.power_by_gpu):
+            if index not in seen:
+                log("gpu%d disappeared -- dropping its power state" % index)
+                del self.power_by_gpu[index]
+
+    def set_power_limit(self, watts, index=0):
+        """Apply one GPU's power preset, then resample so the UI reads the truth.
 
         The response already carries what nvidia-smi read back, but the chart
         series and the other GPU cards come from the sampler -- waking it means
         the whole panel converges on the new state within a frame instead of
         sitting stale for an interval.
 
+        ``index`` is nvidia-smi's own card index: the ceiling belongs to a
+        card, and a write that landed on the wrong one would be worse than a
+        refusal.  Unknown indices are rejected rather than handed to the driver
+        (which would answer for whatever card happens to hold that number).
+
         The menu comes from the hub rather than from a constant, so the values
         accepted here are exactly the buttons the UI was shown.
         """
-        result = power.set_limit(watts, presets=self.power_presets)
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "bad_index", "requested": watts,
+                    "index": None}
+
+        known = set(self.power_by_gpu)
+        snapshot = self.snapshot() or {}
+        for position, card in enumerate(
+                (snapshot.get("gpu") or {}).get("gpus") or []):
+            known.add(gpu_index(card, position))
+        # Only reject against the cards this process actually knows about: a
+        # machine where the collector is off reports none, and there the
+        # driver's own answer is the honest one.
+        if index < 0 or (known and index not in known):
+            log("power limit refused: no such GPU (index %s)" % index)
+            return {"ok": False, "error": "bad_index", "requested": watts,
+                    "index": index}
+
+        state = self._power_state(index, create=True)
+        result = power.set_limit(watts, index=index, presets=state["presets"])
+        result["index"] = index
         if result.get("ok"):
-            self.power_applied_w = result.get("applied")
-            if self.power_applied_w is None:
-                self.power_applied_w = result.get("requested")
-            self.power_settable = True
-            log("power limit -> %s W (was %s W)" % (
-                result.get("applied", "unverified"), result.get("previous")))
+            applied = result.get("applied")
+            state["applied_w"] = (applied if applied is not None
+                                  else result.get("requested"))
+            state["settable"] = True
+            log("gpu%d power limit -> %s W (was %s W)" % (
+                index, result.get("applied", "unverified"),
+                result.get("previous")))
         else:
             if result.get("error") == "unsupported":
                 # The driver told us this card takes no software power limit at
                 # all.  Nothing to retry, so the panel switches to reporting
                 # the live ceiling instead of offering a write that cannot work.
-                self.power_settable = False
-            log("power limit change refused: %s (requested %s W)" % (
-                result.get("error"), watts))
+                state["settable"] = False
+            log("gpu%d power limit change refused: %s (requested %s W)" % (
+                index, result.get("error"), watts))
         with self._wake_cond:
             self._woken_gen += 1
             self._wake_cond.notify()
@@ -1144,7 +1271,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": "bad_body"}, 400)
             return
 
-        result = self.hub.set_power_limit(body.get("watts"))
+        # ``index`` is optional and defaults to the primary card, so an older
+        # page (or a hand-rolled client) keeps working.  A string is accepted
+        # for the same reason a hand-rolled client sends one; anything else
+        # that is not a card number is refused here rather than by the driver,
+        # which would answer for whatever card holds that number.
+        index = body.get("index", 0)
+        if isinstance(index, bool) or not isinstance(index, int):
+            try:
+                index = int(str(index).strip())
+            except (TypeError, ValueError):
+                self.close_connection = True
+                self._send_json({"ok": False, "error": "bad_body"}, 400)
+                return
+
+        result = self.hub.set_power_limit(body.get("watts"), index)
         self._send_json(result, 200 if result.get("ok") else 409)
 
     def _restart(self):
