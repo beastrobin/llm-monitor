@@ -1,6 +1,6 @@
 # LLM 监控工作台
 
-**当前版本 v1.12** —— 查版本：`python monitor.py --version`，或看面板标题旁的小徽章
+**当前版本 v1.16** —— 查版本：`python monitor.py --version`，或看面板标题旁的小徽章
 （它读的是服务端下发的值，不是页面里写死的）。改动历史见[版本记录](#版本记录)。
 
 本地大模型推理 + 硬件的实时监控面板。**零第三方依赖**——只用 Python 标准库，
@@ -612,6 +612,33 @@ HTTP 接口：
 是第三条，所以它显示的一定是**服务端**在跑的版本 —— 浏览器拿了一份旧的 `app.js` 也不会
 报出一个前端自己编的号。**改动要写进版本记录；版本号按发布批次递增 —— 未发布的改动合并进
 同一个版本条目，不逐笔跳号**（页头徽章靠它区分"改过了没有"）。
+
+### v1.16 — 2026-11-05
+
+- **MegaCapybara 引擎卡片**（kind=megacapybara）：常驻引擎从 basalt 换成
+  MegaCapybara（8085），面板从此前的「当前没有已加载的模型」恢复显示当前模型。
+  新采集器 `collectors/megacapybara.py` 不复用任何现有方言——`/props`、`/slots`、
+  `/metrics` 在该引擎上全部 404，遥测只有一份 `GET /stats`（引擎自带启动器
+  Statistics 标签页读的就是它），所以 up/down 判定与卡片内容共用这一份文档；
+  `/v1/models` 是 vLLM 形态（无 `status` 块），单进程只载一个模型，列出的即已加载。
+- 卡片翻译：`conversation_context`（每会话上限 262144，与 `/v1/models` 一致）
+  而非 KV 池总量 `max_context`；`jobs[]` 里**正在工作**的会话（reading/
+  generating）映射到 slot 行——并发槽最多 `max_concurrency`（本机 4），
+  parked 行是引擎的会话缓存（RAM 层、可恢复）不是 slot，不再逐行渲染
+  （它们归启动器自己的 Jobs 面板），空闲时没有 slot 行、上下文卡走
+  「空闲残留」脚注，与 basalt 口径一致；`speculator`（DFlash2）+
+  `accepted_per_round` / `rows_per_round` 映射 MTP 命中率与每步接受数，
+  关闭时不显示 0%。
+- 账本：`tokens_prefilled` / `tokens_generated` 是引擎公布的终身计数，直接映射
+  到 prompt/predicted tokens 供账本记差；秒数、缓存拆分、draft 计数该引擎没有
+  出处，留 `None`（卡片显示 —），不做推导。累计均值卡因无秒数来源同样为 —，
+  瞬时速率取引擎自报 `decode_tps` / `prefill_tps`。
+- config.json 的 basalt 端点换为 `mc`（kind=megacapybara，8085）：basalt 引擎
+  已停，旧账本行保留在历史记录里；Hermes 的 base_url 指向同一地址，hub 的
+  covered_by 照旧把「运行中」归到这张卡，token 只记一次。
+- 单测 +18（`tests/test_megacapybara_collector.py`：kind 注册、probe 读 /stats
+  而非 props/metrics、列表即已加载、终身计数映射、parked 会话不是 slot、
+  混合列表只出工作行、live 状态优先 generating、speculator 关闭不显示接受率）。
 
 ### v1.15 — 2026-11-03
 
