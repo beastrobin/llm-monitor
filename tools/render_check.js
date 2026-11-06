@@ -786,9 +786,19 @@ function readFrames(base, count, timeoutMs) {
   // must not render its own ledger rows silent.
   const comboRows = Array.prototype.slice.call(
     doc.querySelectorAll('#token-combos tbody tr'));
+  // The page names a row's source by the build booked with its tokens (see
+  // sourceEngine in app.js), not by the endpoint id: one card handle can serve
+  // several engines (`mc` was MegaCapybara on 11-05, basalt on 11-06), and
+  // keying a row to the wrong one would book an engine's tokens under another.
+  // The harness has to derive the name the same way or it asserts the bug.
+  const sourceOf = function (row) {
+    const brand = String(row.engine_version || '').split(/[0-9\s]/)[0].trim();
+    return brand.length >= 3 ? brand : (row.endpoint || '');
+  };
   const rowVerMissing = [];
   epsVer.forEach(function (e) {
-    const src = String(e.id).toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+    const src = sourceOf({engine_version: e.engine_version, endpoint: e.id})
+      .toLowerCase().replace(/[^a-z0-9_-]/g, '-');
     comboRows.forEach(function (tr) {
       if (tr.querySelector('.src-' + src) && !tr.querySelector('.row-ver')) {
         rowVerMissing.push(src);
@@ -804,7 +814,7 @@ function readFrames(base, count, timeoutMs) {
   const wantBySrc = {};
   savedCombos.forEach(function (row) {
     if (row.engine_version) {
-      const src = String(row.endpoint || '').toLowerCase();
+      const src = sourceOf(row).toLowerCase();
       wantBySrc[src] = (wantBySrc[src] || 0) + 1;
     }
   });

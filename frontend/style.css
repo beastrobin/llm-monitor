@@ -1312,6 +1312,10 @@ main {
 .src-tag.src-strata { color: var(--chart-a); }
 .src-tag.src-hermes { color: var(--good); }
 .src-tag.src-loader { color: var(--warn); }
+/* The resident engine on 8085 gets named by whichever build booked the row, so
+   both of its brands need a colour (the card handle `mc` has no palette). */
+.src-tag.src-basalt { color: var(--chart-b); }
+.src-tag.src-megacapybara { color: var(--chart-c); }
 
 /* Sixty detail rows would push the rest of the dashboard off screen, so the
    table scrolls and its header stays put. */

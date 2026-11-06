@@ -855,10 +855,23 @@ function rowVerHtml(row) {
   return v ? '<span class="row-ver">' + esc(v) + '</span>' : '';
 }
 
+// Which engine a ledger row's tokens came from: the build BOOKED WITH them,
+// not the endpoint id.  The id is only a card handle and it outlives the engine
+// it was named for -- the card called `mc` served MegaCapybara on 11-05 and
+// basalt on 11-06 -- so printing the id would attribute one engine's tokens to
+// another (and printing the card's CURRENT label would repaint the 11-05
+// MegaCapybara rows as "Basalt").  A build string is "<brand> <version>"; when
+// a row carries no build the id is all there is, and it says so.
+function sourceEngine(row) {
+  const brand = String(row.engine_version || '').split(/[0-9\s]/)[0].trim();
+  return brand.length >= 3 ? brand : (row.endpoint || '');
+}
+
 function sourceName(row) {
   if (!row.endpoint) return esc(shortModelName(row.model));
-  const key = String(row.endpoint).toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-  return '<span class="src-tag src-' + esc(key) + '">' + esc(row.endpoint) + '/</span>' +
+  const source = sourceEngine(row);
+  const key = String(source).toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+  return '<span class="src-tag src-' + esc(key) + '">' + esc(source) + '/</span>' +
     esc(shortModelName(row.model));
 }
 
