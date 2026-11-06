@@ -246,6 +246,10 @@ class LlamaEndpoint(object):
     # A miss on the loaded flag resolves within one TTL, which is fine for a
     # dashboard.
     PROPS_TTL = 60.0
+    # Which telemetry dialect this collector speaks ("llama", "strata", ...).
+    # Set from the endpoint spec by ``monitor.build_endpoint``; the hub reads it
+    # to know which cards are exposed to a resident engine changing dialects.
+    kind = ""
 
     def __init__(self, spec):
         self.id = spec["id"]

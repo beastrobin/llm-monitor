@@ -55,7 +55,7 @@ del _stream_name
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.16"
+VERSION = "1.17"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
@@ -285,7 +285,60 @@ def build_endpoint(spec):
         log("endpoint %s: unknown kind %r, reading it as llama.cpp" % (
             spec.get("id"), spec.get("kind")))
         collector = LlamaEndpoint
-    return collector(spec)
+    endpoint = collector(spec)
+    # What dialect this card assumes, carried on the card: the resident engine
+    # behind a fixed port changes hands more often than the panel is restarted,
+    # and :meth:`Hub._refresh_resident_kind` has to know which cards are
+    # exposed to that and which dialect each currently speaks.
+    endpoint.kind = kind
+    return endpoint
+
+
+# The dialects of "the resident engine on one fixed port" -- basalt and
+# MegaCapybara took turns on 8085 four times in one week, and the two share no
+# telemetry route whatsoever.  A card left built for the other one polls a
+# route that answers 404, so the panel reports a healthy server as offline and
+# blanks the model section without saying why.
+RESIDENT_KINDS = ("basalt", "megacapybara")
+
+# How often a card that is already failing may ask the engine again what it is.
+# A card that answers is never asked, so this only bounds the retry loop for a
+# port holding something else entirely.
+RESIDENT_PROBE_SECONDS = 20.0
+
+
+def resident_kind_at(endpoint):
+    """Which resident-engine dialect answers this card's address, or None.
+
+    Each engine names itself in its own way: basalt answers ``/health`` with
+    ``"service": "basalt"`` and has no ``/stats``, while MegaCapybara answers
+    the ``/stats`` document its own launcher draws its Statistics tab from and
+    has no ``/health``, no ``/props``, no ``/metrics``.  Anything else --
+    llama.cpp, a gateway, a closed port, an HTML page where JSON was expected --
+    answers None: silently re-labelling one engine's tokens as another's in the
+    ledger is a worse failure than a card that admits it is offline.
+    """
+    try:
+        health = _get_json(endpoint._url("/health"), endpoint.api_key,
+                           PROBE_TIMEOUT)
+    except Exception:  # no such route is the common answer, not an error
+        health = None
+    if isinstance(health, dict) and \
+            str(health.get("service", "")).lower() == "basalt":
+        return "basalt"
+    try:
+        stats_doc = _get_json(endpoint._url("/stats"), endpoint.api_key,
+                              PROBE_TIMEOUT)
+    except Exception:
+        stats_doc = None
+    if isinstance(stats_doc, dict):
+        # One shared key would be a coincidence; the launcher document is
+        # recognised by its own vocabulary, not merely by a route answering.
+        vocabulary = {"decode_tps", "prefill_tps", "max_concurrency",
+                      "tokens_generated", "tokens_prefilled"}
+        if len(vocabulary.intersection(stats_doc)) >= 2:
+            return "megacapybara"
+    return None
 
 
 ROOT = Path(__file__).resolve().parent
@@ -638,6 +691,13 @@ class Hub(object):
         # follows its server to a new port says so in run.log once instead of
         # quietly changing what it is measuring.
         self._card_addresses = {}
+        # The endpoint specs by id: rebuilding a card for a different dialect
+        # (:meth:`_refresh_resident_kind`) has to start from what the user
+        # configured, and the specs list is consumed building the cards.
+        self._specs_by_id = {spec.get("id"): spec for spec in specs}
+        # id -> {"up": whether that card answered last cycle,
+        #        "checked": when it was last asked what engine it is talking to}
+        self._resident = {}
         self.system = system.SystemCollector()
         self.collect_gpu = bool(config["gpu"].get("enabled", True))
         self.collect_host = bool(config["system"].get("enabled", True))
@@ -802,6 +862,71 @@ class Hub(object):
             active.append(endpoint)
         return active
 
+    def _note_resident_answers(self, endpoints):
+        """Remember which resident-engine cards answered, for next cycle.
+
+        Read out of the payload rather than off the collector, the way the
+        router's reachability is recorded: a card the dedup dropped is not in
+        this list at all, and a card that was never polled must not be judged
+        (and re-dialect'd) for a failure it did not have.  A card missing from
+        the list keeps its last verdict -- dropping it would read "not polled"
+        as "answered".
+        """
+        for card in endpoints:
+            if self._resident_card(card.get("id")) is None:
+                continue
+            self._resident.setdefault(card["id"], {"checked": 0.0})[
+                "up"] = bool(card.get("up"))
+
+    def _resident_card(self, identity):
+        """The card for ``identity``, when it speaks a resident-engine dialect."""
+        endpoint = next((ep for ep in self.endpoints
+                         if getattr(ep, "id", None) == identity), None)
+        if endpoint is None or getattr(endpoint, "kind", "") not in RESIDENT_KINDS:
+            return None
+        return endpoint
+
+    def _refresh_resident_kind(self):
+        """Rebuild a resident-engine card that stopped answering under the other dialect.
+
+        The dialect is chosen when the panel starts; the engine behind the port
+        does not wait for that.  A card left built for the engine that used to
+        live there polls a route the new one never had, so the whole 模型信息
+        section blanks -- on a server that is answering happily on its own
+        routes -- and nothing on the page says why.
+
+        A card that answers is never touched, so this cannot re-label a working
+        card.  A card that has been failing asks the engine what it is
+        (:func:`resident_kind_at`), and only when the answer names the *other*
+        resident dialect is it replaced by a card of that dialect built from the
+        same spec -- which is exactly what restarting with a corrected
+        ``config.json`` kind did, minus the restart.  The rebuilt card starts
+        its counter series from zero as any new card does, and the ledger
+        rebaselines on a counter regression rather than booking the difference.
+        """
+        now = time.time()
+        for index, endpoint in enumerate(self.endpoints):
+            if getattr(endpoint, "kind", "") not in RESIDENT_KINDS:
+                continue
+            state = self._resident.setdefault(endpoint.id, {"checked": 0.0})
+            if state.get("up", True):
+                continue
+            if now - state["checked"] < RESIDENT_PROBE_SECONDS:
+                continue
+            state["checked"] = now
+            found = resident_kind_at(endpoint)
+            spec = self._specs_by_id.get(endpoint.id)
+            if found is None or found == endpoint.kind or spec is None:
+                continue
+            self.endpoints[index] = build_endpoint(dict(spec, kind=found))
+            # Assume the new card answers until it says otherwise: without this
+            # the next cycle would probe and log again before it had been polled.
+            state["up"] = True
+            log("%s: the engine on %s is %s, not %s -- card re-read as kind=%s "
+                "(config.json still says %s)" % (
+                    endpoint.id, endpoint.base_url, found, endpoint.kind, found,
+                    (spec.get("kind") or "llama")))
+
     def _log_moved(self, endpoints):
         """One run.log line per card that started watching a different server.
 
@@ -907,6 +1032,10 @@ class Hub(object):
         # shows the old one as unreachable.  A router that failed last time
         # skips the interval so a restart costs one frame, not fifteen seconds.
         self._refresh_router(force=self._router_unreachable)
+        # Same reasoning for the resident engine: its dialect is decided before
+        # the cards are polled, so a cycle that finds the right one never shows
+        # the wrong one.
+        self._refresh_resident_kind()
         # Which endpoints to poll this cycle.  Read after the refresh: whether
         # Hermes' address is a duplicate of another endpoint's is the very thing
         # the refresh can change.
@@ -958,6 +1087,7 @@ class Hub(object):
                     and (same_address(ep.get("base_url"), self.router_url)
                          or same_address(ep.get("proxied_url"), self.router_url))]
         self._router_unreachable = followed is not None and not any(answered)
+        self._note_resident_answers(endpoints)
         self._log_moved(endpoints)
 
         # The tier this sample gets booked under, computed once: the ledger
