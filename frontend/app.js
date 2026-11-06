@@ -846,12 +846,25 @@ function shortModelName(id) {
 // (2026-10-19 request).  renderEndpoints refreshes this map from every online
 // endpoint's /props banner; names stay clean when a source reports nothing.
 var S_VERSIONS = {};
+function engineBrand(build) {
+  return String(build || '').split(/[0-9\s]/)[0].trim();
+}
 function rowVerHtml(row) {
   const key = String(row.endpoint || '').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-  // Prefer the build the ledger booked WITH the row's tokens: it survives the
-  // engine going offline (the strata->basalt swap), while the live map only
-  // covers sources that report a version right now.
-  const v = row.engine_version || S_VERSIONS[key];
+  // Rank rows carry a build -> output-tokens weight map: the footnote lists
+  // EVERY build that booked the row (busiest first), because a lifetime
+  // total spanning two engines belongs to neither alone.
+  const weights = row.engine_versions;
+  const builds = (weights && typeof weights === 'object')
+    ? Object.keys(weights).sort(function (a, b) {
+        return Number(weights[b] || 0) - Number(weights[a] || 0);
+      })
+    : [];
+  // Prefer the build(s) the ledger booked WITH the row's tokens: they survive
+  // the engine going offline (the strata->basalt swap), while the live map
+  // only covers sources that report a version right now.
+  const v = builds.length ? builds.join(' + ')
+    : (row.engine_version || S_VERSIONS[key]);
   return v ? '<span class="row-ver">' + esc(v) + '</span>' : '';
 }
 
@@ -860,10 +873,28 @@ function rowVerHtml(row) {
 // it was named for -- the card called `mc` served MegaCapybara on 11-05 and
 // basalt on 11-06 -- so printing the id would attribute one engine's tokens to
 // another (and printing the card's CURRENT label would repaint the 11-05
-// MegaCapybara rows as "Basalt").  A build string is "<brand> <version>"; when
-// a row carries no build the id is all there is, and it says so.
+// MegaCapybara rows as "Basalt").  A build string is "<brand> <version>".
+// Lifetime rows (the TOP-3 rankings) carry a build -> output-tokens weight
+// map, so a bucket that spans two engines prints BOTH brands instead of
+// letting the newest owner silently claim the older engine's work.  A combo
+// row carries one stamp; when a row carries no build the id is all there is,
+// and it says so.
 function sourceEngine(row) {
-  const brand = String(row.engine_version || '').split(/[0-9\s]/)[0].trim();
+  const weights = row.engine_versions;
+  if (weights && typeof weights === 'object') {
+    const byBrand = {};
+    Object.keys(weights).forEach(function (build) {
+      const brand = engineBrand(build);
+      if (brand.length >= 3) {
+        byBrand[brand] = (byBrand[brand] || 0) + Number(weights[build] || 0);
+      }
+    });
+    const brands = Object.keys(byBrand).sort(function (a, b) {
+      return byBrand[b] - byBrand[a] || (a < b ? -1 : 1);
+    });
+    if (brands.length) return brands.join('+');
+  }
+  const brand = engineBrand(row.engine_version);
   return brand.length >= 3 ? brand : (row.endpoint || '');
 }
 

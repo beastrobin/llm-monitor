@@ -792,6 +792,20 @@ function readFrames(base, count, timeoutMs) {
   // keying a row to the wrong one would book an engine's tokens under another.
   // The harness has to derive the name the same way or it asserts the bug.
   const sourceOf = function (row) {
+    const weights = row.engine_versions;
+    if (weights && typeof weights === 'object') {
+      const byBrand = {};
+      Object.keys(weights).forEach(function (build) {
+        const brand = String(build || '').split(/[0-9\s]/)[0].trim();
+        if (brand.length >= 3) {
+          byBrand[brand] = (byBrand[brand] || 0) + Number(weights[build] || 0);
+        }
+      });
+      const brands = Object.keys(byBrand).sort(function (a, b) {
+        return byBrand[b] - byBrand[a] || (a < b ? -1 : 1);
+      });
+      if (brands.length) return brands.join('+');
+    }
     const brand = String(row.engine_version || '').split(/[0-9\s]/)[0].trim();
     return brand.length >= 3 ? brand : (row.endpoint || '');
   };
@@ -835,6 +849,53 @@ function readFrames(base, count, timeoutMs) {
     ' | 在线缺标源 ' + (rowVerMissing.join(', ') || '无') +
     ' | 存档缺标 ' + (savedMissing.join(', ') || '无') +
     ' | 带小字 ' + doc.querySelectorAll('#token-combos tbody .row-ver').length);
+  // The TOP-3 rankings name a row by the builds BOOKED into its bucket.
+  // v1.18 fixed the detail table but the model rows carried no build at all,
+  // so the ranking printed the endpoint id `mc/` while the resident engine
+  // behind that handle was basalt (user report 11-06: 「榜单清空后还是显示
+  // mc」).  Pinned here: every rendered rank row whose saved ledger bucket
+  // carries booked builds wears a chip equal to sourceOf -- never the bare
+  // id.  Rows outside the TOP-3 cut simply do not render and are not held
+  // to anything.
+  const shortOf = function (id) {
+    return String(id || 'model').split(/[\\/]/).pop().replace(/\.gguf$/i, '');
+  };
+  const rankSaved = ((((payload.snapshot.stats || {}).model_rows) || [])
+    .filter(function (row) {
+      return row.engine_versions && Object.keys(row.engine_versions).length;
+    }));
+  const rankBad = [];
+  if (rankSaved.length) {
+    const rankCells = [];
+    ['#token-rank-output', '#token-rank-speed'].forEach(function (sel) {
+      const box = doc.querySelector(sel);
+      if (!box) return;
+      box.querySelectorAll('tbody tr').forEach(function (tr) {
+        const td = tr.querySelector('td:nth-child(2)');
+        const chip = tr.querySelector('.src-tag');
+        if (!td || !chip) return;
+        const ver = td.querySelector('.row-ver');
+        const name = text(td)
+          .replace(text(chip), '')
+          .replace(ver ? text(ver) : '', '').trim();
+        rankCells.push({chip: text(chip).replace(/\/+$/, ''), name: name});
+      });
+    });
+    rankSaved.forEach(function (row) {
+      rankCells.filter(function (c) {
+        return c.name === shortOf(row.model);
+      }).forEach(function (c) {
+        if (c.chip.toLowerCase() !== sourceOf(row).toLowerCase()) {
+          rankBad.push(shortOf(row.model) + ' 署名「' + c.chip +
+            '」应为「' + sourceOf(row) + '」');
+        }
+      });
+    });
+  }
+  const rankOk = !rankBad.length;
+  say('排行来源署名: ' + (rankOk ? '通过' : '失败') +
+    ' | 带构建存档模型行 ' + rankSaved.length +
+    (rankBad.length ? ' | ' + rankBad.join('; ') : ''));
   doc.querySelectorAll('.model').forEach(function (model) {
     const id = model.querySelector('.id');
     if (!id) return; // the hero model renders without a repeated title row
@@ -1297,7 +1358,7 @@ function readFrames(base, count, timeoutMs) {
   const code = (errors.length || !routingOk || !silentOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
     !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk ||
-    !verOk || !rowVerOk || !langOk || !langLeaksOk || !ttftOk || !tabOk ||
+    !verOk || !rowVerOk || !rankOk || !langOk || !langLeaksOk || !ttftOk || !tabOk ||
     !energyOk || !gpuPickOk || !readOnly.ok) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the

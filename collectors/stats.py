@@ -257,6 +257,15 @@ class TokenLedger(object):
         # row keeps the version that achieved its numbers after that engine
         # is gone (the strata->basalt swap took the live lookup's data).
         self._combo_ver = {}
+        # model key -> {engine build: output tokens booked under that build}.
+        # Combo rows are day-scoped so a last-build-wins stamp is honest for
+        # them; a model bucket is a LIFETIME sum, so "the newest build owns
+        # the row" would repaint every earlier engine's tokens under whoever
+        # served last (the exact history-rewrite v1.18 refused in print).
+        # The UI therefore names a rank row by the weighted builds, not the
+        # endpoint id -- v1.19 closed the hole v1.18 left where 模型排行 kept
+        # printing "mc/" because only combo rows carried a build.
+        self._model_ver = {}
         self._energy = {}        # "YYYY-MM-DD" -> energy bucket (floats)
         self._power_ts = None    # last observe_power() timestamp
         self._tier_since = ""    # when tier attribution first booked anything
@@ -325,6 +334,31 @@ class TokenLedger(object):
         for key, ver in (data.get("combo_versions") or {}).items():
             if isinstance(ver, str) and key in self._combos:
                 self._combo_ver[key] = ver
+        for key, ver_map in (data.get("model_versions") or {}).items():
+            if key not in self._models or not isinstance(ver_map, dict):
+                continue
+            clean = dict((ver, int(tok)) for ver, tok in ver_map.items()
+                         if isinstance(ver, str) and ver
+                         and isinstance(tok, (int, float))
+                         and not isinstance(tok, bool) and tok > 0)
+            if clean:
+                self._model_ver[key] = clean
+        # A bucket booked before this dimension existed gets its attribution
+        # back from the combo stamps the same bucket already carries (combos
+        # have been booked with a build since v1.13) -- otherwise an old row
+        # would print the endpoint id forever even though the ledger knows
+        # which engine actually earned it.  Buckets that already carry their
+        # own persisted stamps are skipped so their weights are never
+        # double-counted; a legacy bucket accumulates every combo under it.
+        persisted = set(self._model_ver)
+        for combo_key, ver in self._combo_ver.items():
+            model_key = combo_key.split("|", 2)[-1]
+            if model_key not in self._models or model_key in persisted:
+                continue
+            tok = (self._combos.get(combo_key) or {}).get("predicted_tokens", 0)
+            if tok > 0:
+                seed = self._model_ver.setdefault(model_key, {})
+                seed[ver] = seed.get(ver, 0) + tok
         for day, fields in (data.get("energy") or {}).items():
             if isinstance(fields, dict):
                 self._energy[day] = _energy_fields(fields)
@@ -361,6 +395,7 @@ class TokenLedger(object):
             "tiers": self._tiers,
             "combos": self._combos,
             "combo_versions": self._combo_ver,
+            "model_versions": self._model_ver,
             "energy": self._energy,
             "seen": self._seen,
         }
@@ -413,6 +448,7 @@ class TokenLedger(object):
         self._tiers = {}
         self._combos = {}
         self._combo_ver = {}
+        self._model_ver = {}
         self._energy = {}
         self._tier_since = ""
         self._resets = 0
@@ -513,6 +549,14 @@ class TokenLedger(object):
                 # that goes blank when the engine leaves.
                 if self._combo_ver.get(combo_key) != version:
                     self._combo_ver[combo_key] = version
+                # The lifetime model bucket instead accumulates a weight per
+                # build.  The weight is output tokens because both ranking
+                # tables filter (and derive tps) on them: a build that books
+                # no output gets no say in the row's name.
+                if added["predicted_tokens"] > 0:
+                    mver = self._model_ver.setdefault(key, {})
+                    mver[version] = mver.get(version, 0) + \
+                        added["predicted_tokens"]
             self._dirty = True
             self._gen += 1
             if reset:
@@ -638,6 +682,11 @@ class TokenLedger(object):
         # dropped the combo (day expiry or cap), the stamp goes with it.
         for key in [k for k in self._combo_ver if k not in self._combos]:
             del self._combo_ver[key]
+        # Model buckets are lifetime so this only ever fires for a hand-edited
+        # stats.json; the guard keeps the attribution map a strict subset of
+        # the books it describes.
+        for key in [k for k in self._model_ver if k not in self._models]:
+            del self._model_ver[key]
 
     # -- reporting --------------------------------------------------------
 
@@ -774,14 +823,23 @@ class TokenLedger(object):
 
         The UI's TOP-3 tables read this: one row per (endpoint, model) with the
         same flat fields as the combo rows, so the front end can render both
-        rankings from a single list without doing its own aggregation.
+        rankings from a single list without doing its own aggregation.  Rows
+        also carry ``engine_versions`` -- output tokens booked per build -- so
+        the table can name the engines that actually earned the row instead of
+        the endpoint id that merely hosts it.
         """
         rows = []
         for key, bucket in self._models.items():
             endpoint, _, model = key.partition("/")
-            row = self._detail(bucket)
+            # ``dict(...)`` copy for the same reason _combo_rows makes one:
+            # _detail's inferred key set ends at the derived rates, and these
+            # rows gain identity/attribution fields on top.
+            row = dict(self._detail(bucket))
             row["endpoint"] = endpoint
             row["model"] = model or key
+            vers = self._model_ver.get(key)
+            if vers:
+                row["engine_versions"] = dict(vers)
             rows.append(row)
         rows.sort(key=lambda row: (row["predicted_tokens"], row["model"]),
                   reverse=True)
