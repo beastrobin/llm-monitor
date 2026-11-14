@@ -654,8 +654,11 @@ HTTP 接口：
     已加载模型/处理中与 hero 状态灯重复，显存余量看硬件区的显存卡）；宽屏保留摘要条。
   - token 统计 4 列一行（`display:contents` 让 head-extra 两个子节点直接成 block-head
     的 flex 成员）；hero 名字收到 16px 与状态灯同排。
-  - MTP/KV/上下文环形仪表在窄屏改**全宽线性横条**（conic→linear，值钉在轨道右端带
-    panel 色 text-shadow 保可读）；TTFT 全宽收起曲线。
+  - MTP/KV/上下文环形仪表在窄屏改「标签 | 全宽线性横条 | 数值」单行（conic→linear；值钉
+    在轨道右端，垫 panel 色胶囊底，压在填充条上也清晰）；TTFT 单行收起曲线；六卡网格
+    行式密排：标签+ⓘ+数值同一行（盖掉宽屏三行头）、脚注收回 ⓘ 悬停（foot 仍写 DOM，
+    display_check 断言不受影响）。注意 base `.card-body` 是 column flex，改行式必须显式
+    `flex-direction: row`，否则横条被 shrink-wrap 成 0 宽。指标区 560px→268px。
   - 默认展开反转：窄屏下模型详细指标 / 整机 host 行 / 历史详情默认展开（`initNarrowMode`），
     用户手动收起持久化在 localStorage `llm-monitor-narrow-collapsed`（`|` 分隔 key 列表）；
     宽屏版式零改动（所有规则在 ≤640 媒体查询内）。
