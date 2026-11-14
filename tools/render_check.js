@@ -750,6 +750,50 @@ function readFrames(base, count, timeoutMs) {
     });
   });
 
+  // 双卡标尺 (2026-11-14): the two GPU rows must draw against ONE y-window per
+  // metric.  A card that picks its own window leaves no trace in the DOM -- and
+  // that is exactly the problem: the rows still look stacked and comparable
+  // while 80 W and 110 W both fill their box top to bottom, so nothing but an
+  // assertion on the drawn window can catch this coming back.  Skipped on a
+  // one-card machine, where there is nothing to align against.
+  const ruler = { rows: 0, bad: [], lines: [] };
+  const gpuRows = Array.prototype.slice.call(
+    doc.querySelectorAll('#sys .sys-row[data-row^="gpu"]'));
+  ruler.rows = gpuRows.length;
+  if (gpuRows.length > 1) {
+    ['util', 'mem', 'temp', 'power'].forEach(function (key) {
+      const windows = gpuRows.map(function (row) {
+        const canvas = row.querySelector('[data-card="' + key + '"] canvas.spark');
+        return (canvas && canvas._window) || null;
+      });
+      const round = function (v) { return Math.round(v * 100) / 100; };
+      const known = windows.filter(Boolean);
+      // Nothing to compare until every row painted a window: a canvas that
+      // never drew (or a history shorter than the shared-ruler minimum) is
+      // reported, not failed -- the 卡片 dump above already shows the columns.
+      const comparable = known.length === windows.length && windows.length > 1;
+      const same = comparable && known.every(function (w) {
+        return Math.abs(w.min - known[0].min) < 1e-6 &&
+          Math.abs(w.max - known[0].max) < 1e-6;
+      });
+      ruler.lines.push(key + ' 标尺: ' + windows.map(function (w) {
+        return w ? round(w.min) + '~' + round(w.max) : '无';
+      }).join(' / ') + (!comparable ? ' 跳过' : (same ? ' 一致 ✓' : ' ✗ 不一致')));
+      if (comparable && !same) ruler.bad.push(key);
+    });
+  }
+
+  say('');
+  say('—— 双卡标尺 ——');
+  if (ruler.rows > 1) {
+    ruler.lines.forEach(function (line) { say('  ' + line); });
+    say('  结论: ' + (ruler.bad.length
+      ? '✗ 上下两行各画各的（' + ruler.bad.join(', ') + '）'
+      : '✓ 两张卡共用一把标尺'));
+  } else {
+    say('  ' + ruler.rows + ' 行显卡卡，单卡不需要对齐');
+  }
+
   say('');
   say('—— 模型 ——');
   // The live model's name/port/tags now lead the section as a single hero line,
@@ -1355,11 +1399,14 @@ function readFrames(base, count, timeoutMs) {
   const gpuPickOk = !gpuPick.multi || !!gpuPick.ok;
   // An unexplained blank where the per-slot breakdown should be is the report
   // this harness was asked to chase down, so it fails the run like anything else.
+  // A stacked pair of rows drawn against two different rulers is the failure
+  // the 2026-11-14 change exists for, so it fails the run like the rest.
+  const rulerOk = ruler.rows < 2 || ruler.bad.length === 0;
   const code = (errors.length || !routingOk || !silentOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
     !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk ||
     !verOk || !rowVerOk || !rankOk || !langOk || !langLeaksOk || !ttftOk || !tabOk ||
-    !energyOk || !gpuPickOk || !readOnly.ok) ? 1 : 0;
+    !energyOk || !gpuPickOk || !readOnly.ok || !rulerOk) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own

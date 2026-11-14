@@ -192,43 +192,29 @@ function roundRect(g, x, y, w, h, r) {
   g.closePath();
 }
 
-function drawSpark(canvas, data, options) {
-  const opts = options || {};
-  const values = data || [];
-  // Keep the payload on the element so the hover handler can repaint without
-  // waiting for the next sample to arrive.
-  canvas._spark = { values: values, opts: opts };
-  if (canvas._hover === undefined) canvas._hover = null;
-
-  const mono = cssVar('--font-mono') || FALLBACK_MONO;
-  const dpr = window.devicePixelRatio || 1;
-  const width = Math.max(64, canvas.clientWidth || 160);
-  const height = Math.max(30, canvas.clientHeight || 46);
-  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
-    canvas.width = Math.round(width * dpr);
-    canvas.height = Math.round(height * dpr);
-  }
-  const g = canvas.getContext('2d');
-  g.setTransform(dpr, 0, 0, dpr, 0, 0);
-  g.clearRect(0, 0, width, height);
-
-  const color = opts.color || cssVar('--chart-a');
-  const gridColor = cssVar('--grid');
-  const trackColor = cssVar('--track');
-  const axisColor = cssVar('--axis');
-  const surface = cssVar('--panel');
-  const edge = cssVar('--border');
-  const ink = cssVar('--text');
-  const fmt = opts.format || function (v) { return defaultFormat(v, opts.decimals); };
-
-  const clean = cleanSeries(values);
-  let min = (opts.min === undefined || opts.min === null) ? null : opts.min;
-  let max = (opts.max === undefined || opts.max === null) ? null : opts.max;
+// The y-window a chart draws into, lifted out of drawSpark so more than one
+// card can share it.
+//
+// One series picking its own window is fine while there is one card.  With two
+// identical cards stacked on the same page it is actively misleading: 80 W and
+// 110 W both fill their box top to bottom, and 64 GB against 5 GB of VRAM draw
+// two curves of the same height.  ``shareDualRulers`` therefore computes one
+// window from every card's series and hands it to each of them as ``shared`` --
+// "尽量对齐" without dropping to the fixed 0-100% range, which would flatten an
+// idle card's shape into a one-pixel sliver.
+//
+// ``holder`` is anything that can carry the ``_ceiling`` the smoothing keeps:
+// a canvas for a lone chart, a plain ``{}`` for a window several share.
+function sparkWindow(holder, clean, opts) {
+  const baseMin = (opts.min === undefined || opts.min === null) ? null : opts.min;
+  const baseMax = (opts.max === undefined || opts.max === null) ? null : opts.max;
+  let min = baseMin;
+  let max = baseMax;
 
   if (max === null) {
-    max = stableCeiling(canvas, clean.length ? Math.max.apply(null, clean) : 0);
+    max = stableCeiling(holder, clean.length ? Math.max.apply(null, clean) : 0);
   } else {
-    canvas._ceiling = max;
+    holder._ceiling = max;
   }
   if (min === null) {
     const floor = clean.length ? Math.min.apply(null, clean) : 0;
@@ -272,8 +258,57 @@ function drawSpark(canvas, data, options) {
     const pad = span * 0.1;
     min = Math.max(0, lo - pad);
     max = hi + pad;
+    // The window is allowed to zoom but never to leave the metric's own range:
+    // a percentage that reads 104% or a temperature below absolute zero would
+    // be a chart claiming units the card never reported.
+    if (baseMin !== null) min = Math.max(baseMin, min);
+    if (baseMax !== null) max = Math.min(baseMax, max);
   }
   if (max - min < 1e-9) max = min + 1;
+  return { min: min, max: max };
+}
+
+function drawSpark(canvas, data, options) {
+  const opts = options || {};
+  const values = data || [];
+  // Keep the payload on the element so the hover handler can repaint without
+  // waiting for the next sample to arrive.
+  canvas._spark = { values: values, opts: opts };
+  if (canvas._hover === undefined) canvas._hover = null;
+
+  const mono = cssVar('--font-mono') || FALLBACK_MONO;
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(64, canvas.clientWidth || 160);
+  const height = Math.max(30, canvas.clientHeight || 46);
+  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+  }
+  const g = canvas.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, width, height);
+
+  const color = opts.color || cssVar('--chart-a');
+  const gridColor = cssVar('--grid');
+  const trackColor = cssVar('--track');
+  const axisColor = cssVar('--axis');
+  const surface = cssVar('--panel');
+  const edge = cssVar('--border');
+  const ink = cssVar('--text');
+  const fmt = opts.format || function (v) { return defaultFormat(v, opts.decimals); };
+
+  const clean = cleanSeries(values);
+  // A window several cards share is already computed when the row was built;
+  // otherwise this chart picks its own (the single-card case, unchanged).
+  const shared = opts.shared;
+  const box = (shared && isFinite(shared.min) && isFinite(shared.max))
+    ? shared
+    : sparkWindow(canvas, clean, opts);
+  const min = box.min;
+  const max = box.max;
+  // Parked on the element like _spark/_geom: the render harness reads it to
+  // prove the twin rows really are drawing against one ruler.
+  canvas._window = { min: min, max: max };
 
   const showAxis = opts.axis !== false;
   const x0 = showAxis ? 32 : 2;
@@ -1919,14 +1954,14 @@ function renderSystem(snapshot) {
     container.innerHTML = rows.map(sysRowMarkup).join('');
   }
 
-  rows.forEach(function (row) {
+  // Values are built before anything is painted, because the per-card metrics
+  // need one window computed from EVERY card before the first curve is drawn.
+  const drawn = rows.map(function (row) {
     const node = container.querySelector('[data-row="' + row.key + '"]');
-    if (!node) return;
     // ensureCards keys its refs off the container it is handed, so each row
     // owns its own refs map and two rows may both hold a card called "power".
-    const refs = ensureCards(node.querySelector('.grid') || node, row.specs);
-    if (!refs) return;
-    let values;
+    const refs = node ? ensureCards(node.querySelector('.grid') || node, row.specs) : null;
+    let values = null;
     if (row.kind === 'gpu') {
       values = gpuCardValues(row.card, row.index);
     } else if (row.kind === 'host') {
@@ -1934,7 +1969,61 @@ function renderSystem(snapshot) {
     } else {
       values = Object.assign(gpuCardValues(row.card, row.index), hostCardValues(host));
     }
-    paintCards(refs, values);
+    return { row: row, refs: refs, values: values };
+  });
+  shareDualRulers(drawn);
+  drawn.forEach(function (entry) {
+    if (entry.refs) paintCards(entry.refs, entry.values);
+  });
+}
+
+// One ruler for the cards that sit on the same page, side by side.
+//
+// Stacking the GPU rows into one column grid lines them up left to right, but
+// each curve still picked its OWN y-window: 80 W on GPU0 and 110 W on GPU1 both
+// filled their box top to bottom, and 64 GB against 5 GB of VRAM drew two
+// curves of the same height.  With twin cards that is the one comparison the
+// block exists for, so every per-card metric now takes a single window computed
+// from all cards' series ("尽量对齐" -- zoomed to the data, but zoomed TOGETHER).
+// Axis labels print that window, so both rows show the same two numbers and the
+// curves can be read across.
+//
+// The ledger / host cards are untouched: there is exactly one of each, and
+// their series are not comparable to a GPU's.
+const DUAL_RULER_METRICS = ['util', 'mem', 'temp', 'power'];
+// The window's own smoothing state (``_ceiling``) lives here rather than on a
+// canvas, so it survives the per-frame repaint the way a lone chart's does.
+const dualRulers = {};
+
+function shareDualRulers(entries) {
+  const cards = entries.filter(function (entry) { return entry.row.kind === 'gpu'; });
+  if (cards.length < 2) return;
+  DUAL_RULER_METRICS.forEach(function (key) {
+    const members = [];
+    cards.forEach(function (entry) {
+      const value = entry.values[key];
+      if (value && value.series) members.push(value);
+    });
+    if (members.length < 2) return;
+    const all = [];
+    members.forEach(function (value) {
+      const clean = cleanSeries(value.series);
+      for (let i = 0; i < clean.length; i++) all.push(clean[i]);
+    });
+    // No readings at all: nothing to align and nothing drawn.  Below the 8
+    // samples a zoom wants, sparkWindow() hands back the metric's own fixed
+    // range -- the same pair for every card, so the rows are aligned from the
+    // first sample and only start zooming (together) once there is history.
+    if (all.length < 2) return;
+    const base = members[0].sparkOptions || {};
+    if (!dualRulers[key]) dualRulers[key] = {};
+    const window = sparkWindow(dualRulers[key], all, base);
+    members.forEach(function (value) {
+      // Only the window is shared -- each card keeps its own colour (a hot card
+      // draws red on its own, and sharing the options object would repaint the
+      // cool one red too).
+      value.sparkOptions = Object.assign({}, value.sparkOptions, { shared: window });
+    });
   });
 }
 
