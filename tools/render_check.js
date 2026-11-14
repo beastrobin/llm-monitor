@@ -971,21 +971,17 @@ function readFrames(base, count, timeoutMs) {
   if (errBox) say('  端点提示: [' + (errBox.className) + '] ' + text(errBox));
 
   say('');
-  say('—— 档位开关位置（topbar）——');
-  // 2026-10-19 swap: the tier SWITCH lives in the top bar left of the update
-  // time, while the 功耗 CARD (the watts) stayed in the system grid.  Both
-  // halves are asserted -- a silent half-move is exactly the regression here.
+  say('—— 档位开关位置（硬件遥测）——');
+  // The control belongs next to the GPU readings it changes. Keep its location
+  // and the wattage card explicit so a visual rearrangement cannot hide either.
   const tierBox = doc.getElementById('power-control');
-  const metaEl = doc.getElementById('meta');
-  const tierInBar = !!(tierBox && metaEl &&
-    tierBox.parentElement === metaEl.parentElement &&
-    tierBox.compareDocumentPosition(metaEl) & 4);
+  const tierInHardware = !!(tierBox && tierBox.closest('#resource-info .block-head'));
   const tierBtns = tierBox ? tierBox.querySelectorAll('button[data-watts]').length : 0;
   const wattsCard = doc.querySelector('#sys .card[data-card="power"] .card-value');
   const wattsText = wattsCard ? text(wattsCard) : '';
-  const hdrOk = tierInBar && tierBtns > 0 && /\d+W$/.test(wattsText);
+  const hdrOk = tierInHardware && tierBtns > 0 && /\d+W$/.test(wattsText);
   say('  ' + (hdrOk ? '通过' : '失败') + ' | 开关' +
-    (tierInBar ? '在顶栏更新时间左侧 · ' + tierBtns + ' 个档位' : '不在顶栏') +
+    (tierInHardware ? '在硬件区标题旁 · ' + tierBtns + ' 个档位' : '不在硬件区') +
     ' | 功耗卡' + (/\d+W$/.test(wattsText) ? '在系统区 · ' + wattsText : '缺失或无数值[' + wattsText + ']'));
 
   say('');

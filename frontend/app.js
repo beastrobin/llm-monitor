@@ -27,6 +27,7 @@ const S = {
   snapshot: null,
   history: { timestamps: [], series: {} },
   config: null,
+  openModels: new Set(),
 };
 
 // ---------------------------------------------------------------- formatting
@@ -34,6 +35,17 @@ const S = {
 function num(v, digits) {
   if (v === null || v === undefined || Number.isNaN(v)) return '—';
   return Number(v).toFixed(digits === undefined ? 1 : digits);
+}
+
+// Zero is a measured rate; missing telemetry must never look like an estimate.
+function rateReading(instant, average, digits) {
+  if (typeof instant === 'number' && Number.isFinite(instant) && instant >= 0) {
+    return { text: num(instant, digits), note: '本轮采样', unit: 't/s' };
+  }
+  if (typeof average === 'number' && Number.isFinite(average) && average >= 0) {
+    return { text: '≈' + num(average, digits), note: '累计均值 · 非实时', unit: 't/s' };
+  }
+  return { text: '—', note: '引擎未上报速率', unit: '' };
 }
 
 // First argument that is actually a number.  The driver reports several power
@@ -611,7 +623,8 @@ function cardSpec(key, label, options) {
     // Rail orientation: 'v' = the classic left-edge rail filling bottom-up,
     // 'h' = a full-width track under the value filling left-to-right.
     barDir: opts.barDir === 'h' ? 'h' : 'v',
-    spark: opts.spark !== false,
+    view: opts.view === 'gauge' ? 'gauge' : 'trend',
+    spark: opts.view !== 'gauge' && opts.spark !== false,
     // A card that carries a per-slot identity tag (slot id + engine state)
     // INLINE in its label row — used by the 已生成 card so a slot row needs
     // no separate title line and no reserved placeholder (2026-10-19).
@@ -667,6 +680,19 @@ function buildCards(container, specs) {
         '<div class="card-foot" data-role="foot"></div>' +
         '</div></div>';
     }
+    if (spec.view === 'gauge') {
+      return '<div class="card gauge-card" data-card="' + esc(spec.key) + '">' +
+        '<div class="card-body">' +
+          '<div class="gauge-head"><span class="card-label">' + esc(spec.label) + '</span>' +
+          (spec.tip ? '<span class="tip" tabindex="0" data-tip="' + esc(spec.tip) + '">i</span>' : '') +
+          '</div>' +
+          '<div class="card-visual gauge-visual"><div class="gauge" data-role="gauge"' +
+            ' role="img" aria-label="' + esc(spec.label) + '：暂无数据">' +
+            '<div class="gauge-inner"><span class="card-value" data-role="value">—</span></div>' +
+          '</div><div class="gauge-endpoints"><span>0%</span><span>100%</span></div></div>' +
+          '<div class="card-foot" data-role="foot"></div>' +
+        '</div></div>';
+    }
     return '<div class="card' + (spec.bar ? '' : ' no-bar') + '" data-card="' + esc(spec.key) + '">' +
       '<div class="bar" data-role="bar"><i data-role="fill"></i></div>' +
       '<div class="card-body">' +
@@ -693,13 +719,15 @@ function buildCards(container, specs) {
       spark: root.querySelector('[data-role="spark"]'),
       bar: root.querySelector('[data-role="bar"]'),
       fill: root.querySelector('[data-role="fill"]'),
+      gauge: root.querySelector('[data-role="gauge"]'),
+      label: spec.label,
       horizontal: spec.barDir === 'h',
       tag: root.querySelector('[data-role="tag"]'),
       foot: root.querySelector('[data-role="foot"]'),
       // The info icon next to the label; its tooltip now also carries the live
       // foot text, so hovering one icon explains the metric AND shows the
       // current breakdown instead of a permanent line under the spark.
-      tip: root.querySelector('.card-head .tip'),
+      tip: root.querySelector('.tip'),
       tipBase: spec.tip || '',
     });
   });
@@ -718,6 +746,7 @@ function ensureCards(container, specs) {
 function paintCards(refs, values) {
   refs.forEach(function (ref, key) {
     const value = values[key] || {};
+    if (ref.foot) ref.foot.textContent = value.foot || '';
     if (ref.value) {
       ref.value.innerHTML = esc(value.text) +
         (value.unit ? '<span class="card-unit">' + esc(value.unit) + '</span>' : '');
@@ -739,6 +768,24 @@ function paintCards(refs, values) {
       if (ref.horizontal) ref.fill.style.width = railHeight(ratio);
       else ref.fill.style.height = railHeight(ratio);
       ref.bar.className = 'bar' + (value.barClass ? ' ' + value.barClass : '');
+    }
+    if (ref.gauge) {
+      const ratio = typeof value.bar === 'number' && Number.isFinite(value.bar)
+        ? Math.max(0, Math.min(1, value.bar)) : null;
+      ref.gauge.className = 'gauge' + (ratio === null ? ' empty' : '') +
+        (value.barClass ? ' ' + value.barClass : '');
+      ref.gauge.style.setProperty('--gauge-pct', ratio === null ? '0%' : (ratio * 100) + '%');
+      if (ratio === null) {
+        ref.gauge.setAttribute('role', 'img');
+        ref.gauge.removeAttribute('aria-valuenow');
+        ref.gauge.setAttribute('aria-label', ref.label + '：暂无数据');
+      } else {
+        ref.gauge.setAttribute('role', 'meter');
+        ref.gauge.setAttribute('aria-valuemin', '0');
+        ref.gauge.setAttribute('aria-valuemax', '100');
+        ref.gauge.setAttribute('aria-valuenow', String(Math.round(ratio * 1000) / 10));
+        ref.gauge.setAttribute('aria-label', ref.label);
+      }
     }
     if (ref.spark && value.series) {
       drawSpark(ref.spark, value.series, value.sparkOptions || {});
@@ -958,10 +1005,11 @@ function portOf(url) {
 // preset inventory used to live here; the user only needs "which server,
 // which model", so the rest of this section is a status line.
 function endpointChip(endpoint) {
-  const label = endpoint.live ? 'spawn 子 server' : endpoint.label;
+  const label = endpoint.live ? 'spawn 子 server' :
+    (engineBrand(endpoint.engine_version) || endpoint.label);
   const port = portOf(endpoint.base_url);
   return '<span class="src-chip' + (endpoint.up ? '' : ' down') + '">' +
-    '<span class="src-name">' + esc(label) + '</span>' +
+    '<span class="src-name" title="' + esc(endpoint.label || label) + '">' + esc(label) + '</span>' +
     (port ? '<span class="src-port">:' + esc(port) + '</span>' : '') +
     '<span class="src-state">' + (endpoint.up ? '在线' : '离线') + '</span>' +
     '</span>';
@@ -1009,7 +1057,7 @@ const MODEL_SPECS = [
     bar: true,
     tip: 'Δ已生成 token ÷ Δ解码耗时，分母取引擎自己计时的耗时而不是墙钟，' +
       '否则空闲秒数会被摊进窗口、读数偏低。引擎空闲时不产生新耗时，' +
-      '所以数字会退回累计均值并带 ≈ 前缀。' +
+      '零值显示为 0；未上报本轮速率时才退回累计均值并带 ≈ 前缀。' +
       '血条是当前速度 ÷ 本会话峰值速度；空闲时为 0。',
   }),
   cardSpec('prefill', 'Prefill 速度', {
@@ -1019,19 +1067,19 @@ const MODEL_SPECS = [
       '血条是当前速度 ÷ 本会话峰值速度。',
   }),
   cardSpec('mtp', 'MTP 命中率', {
-    bar: true,
+    view: 'gauge',
     tip: '投机解码接受率 = 被接受的草稿 token ÷ 草稿 token 总数。' +
       '越高说明 MTP 猜得越准、加速越明显。低于 50% 进度条转黄。' +
       '注意：是否启用 MTP 看的是启动参数里的 --spec-type，' +
       '因为 /props 的 speculative.types 在 MTP 实际运行时也可能报 none。',
   }),
   cardSpec('kv', 'KV 缓存命中', {
-    bar: true,
+    view: 'gauge',
     tip: '前缀缓存命中率 = 命中缓存的 token ÷ 全部提示 token。' +
       '多轮对话里重复前缀越多这个值越高，命中的部分不需要重新 prefill。',
   }),
   cardSpec('ctx', '上下文占比', {
-    bar: true,
+    view: 'gauge',
     tip: '各 slot 里已用上下文的最大值（提示词 + 已生成）÷ 模型上下文上限。' +
       '超过 85% 变红，再涨就该清理对话了。' +
       'slot 空闲时服务端会清掉提示词计数，此时数字只剩上次请求的已生成残留，' +
@@ -1060,16 +1108,8 @@ function applyModel(root, endpoint, model) {
   const prefillSeries = seriesOf(base + '.prefill');
   const ctxSeries = seriesOf(base + '.ctx');
 
-  // An idle engine reports no new tokens, so the instantaneous rate is 0.
-  // Showing that as the headline reads like a stall; fall back to the
-  // cumulative average and mark it with "≈" so the number is not taken for a
-  // live reading.
-  const decodeNow = metrics.decode_tps_inst
-    ? num(metrics.decode_tps_inst, 1)
-    : '≈' + num(metrics.decode_tps_avg, 1);
-  const prefillNow = metrics.prefill_tps_inst
-    ? num(metrics.prefill_tps_inst, 0)
-    : '≈' + num(metrics.prefill_tps_avg, 0);
+  const decodeNow = rateReading(metrics.decode_tps_inst, metrics.decode_tps_avg, 1);
+  const prefillNow = rateReading(metrics.prefill_tps_inst, metrics.prefill_tps_avg, 0);
 
   const ctxRatio = maxOf(slots, 'ctx_ratio');
   const mtpRatio = metrics.mtp_accept_ratio;
@@ -1082,9 +1122,10 @@ function applyModel(root, endpoint, model) {
   // The slot drops its prompt counters once a request finishes, so an idle
   // engine reports a partially cleared context.  Say so rather than passing the
   // residue off as a live watermark.
-  const firstSlot = slots[0] || {};
-  const slotLive = !!firstSlot.is_processing ||
-    (firstSlot.n_prompt_tokens !== null && firstSlot.n_prompt_tokens !== undefined);
+  const slotLive = slots.some(function (slot) {
+    return !!slot.is_processing ||
+      (slot.n_prompt_tokens !== null && slot.n_prompt_tokens !== undefined);
+  });
   const decodePeak = rollingPeakOf(decodeSeries, S.history.timestamps);
   const prefillPeak = rollingPeakOf(prefillSeries, S.history.timestamps);
   const ttftLast = metrics.ttft_s_last;
@@ -1101,15 +1142,17 @@ function applyModel(root, endpoint, model) {
     ? null : Math.max(0, Math.min(1, metrics.prefill_tps_inst / prefillPeak));
 
   const rateFoot = function (average, peak, digits) {
-    return '均值 ' + num(average, digits) + ' t/s' +
-      (peak === null ? ' · 暂无曲线' : ' · 峰值 ' + num(peak, digits));
+    const parts = [];
+    if (Number.isFinite(average)) parts.push('均值 ' + num(average, digits) + ' t/s');
+    if (Number.isFinite(peak) && peak > 0) parts.push('峰值 ' + num(peak, digits));
+    return parts.length ? ' · ' + parts.join(' · ') : '';
   };
 
   paintCards(refs, {
     decode: {
-      text: decodeNow, unit: 't/s', bar: decodeBar,
+      text: decodeNow.text, unit: decodeNow.unit, bar: decodeBar,
       barClass: 't-a',
-      foot: rateFoot(metrics.decode_tps_avg, decodePeak, 1),
+      foot: decodeNow.note + rateFoot(metrics.decode_tps_avg, decodePeak, 1),
       series: decodeSeries,
       sparkOptions: {
         min: 0, color: cssVar('--chart-a'), autoscale: true,
@@ -1117,9 +1160,9 @@ function applyModel(root, endpoint, model) {
       },
     },
     prefill: {
-      text: prefillNow, unit: 't/s', bar: prefillBar,
+      text: prefillNow.text, unit: prefillNow.unit, bar: prefillBar,
       barClass: 't-b',
-      foot: rateFoot(metrics.prefill_tps_avg, prefillPeak, 0),
+      foot: prefillNow.note + rateFoot(metrics.prefill_tps_avg, prefillPeak, 0),
       series: prefillSeries,
       sparkOptions: {
         min: 0, color: cssVar('--chart-b'), autoscale: true,
@@ -1151,7 +1194,8 @@ function applyModel(root, endpoint, model) {
       text: pct(ctxRatio), bar: ctxRatio,
       barClass: ctxTight ? 'bad' : 't-g',
       foot: '上限 ' + countText(model.n_ctx) + ' tok' +
-        (ctxTight ? ' · 接近溢出' : '') + (slotLive ? '' : ' · 空闲残留'),
+        (ctxTight ? ' · 接近溢出' : '') +
+        (ctxRatio === null ? ' · 未上报上下文' : (slotLive ? '' : ' · 空闲残留')),
       series: ctxSeries,
       sparkOptions: {
         min: 0, max: 1, color: ctxTight ? cssVar('--bad') : cssVar('--chart-g'), autoscale: true,
@@ -1515,9 +1559,11 @@ function renderEndpointModels(container, endpoint) {
     const title = model.id === heroId
       ? ''
       : '<div class="model-title"><span class="id">' + esc(shortModelName(model.id)) + '</span>' + modelTags(model) + '</div>';
-    return '<div class="model" data-model="' + esc(model.id || 'model') + '" data-fade>' +
+    const expanded = S.openModels.has(endpoint.id + '/' + (model.id || 'model'));
+    return '<div class="model' + (expanded ? ' details-open' : '') + '" data-model="' + esc(model.id || 'model') + '" data-fade>' +
       title +
       '<div class="grid" data-role="cards"></div>' +
+      '<button class="compact-toggle model-toggle" data-role="model-toggle" type="button" aria-expanded="' + expanded + '">详细指标：MTP · KV · 上下文 · TTFT<span aria-hidden="true">⌄</span></button>' +
       '<div class="kv" data-role="detail"></div>' +
       '<div data-role="slots"></div>' +
       '</div>';
@@ -1606,6 +1652,7 @@ function renderEndpoints(snapshot) {
     });
     return out;
   });
+  renderDeploymentBrief(snapshot, deduped);
   // Every server with a loaded model gets its own card.  Taking only the
   // first one dropped the others entirely: with hermes and strata both up,
   // strata's chip said 在线 while its model, rates and context sat on no
@@ -1622,7 +1669,8 @@ function renderEndpoints(snapshot) {
   // nothing else on screen, so without it the card would keep its first
   // explanation for the rest of the run.
   const signature = deduped.map(function (e) {
-    return e.id + '@' + e.up + '#' + modelSignature(e) + '!' + (e.error || '');
+    return e.id + '@' + e.up + '#' + modelSignature(e) + '!' + (e.error || '') +
+      '|' + (e.engine_version || '') + '|' + (e.base_url || '') + '|' + (e.label || '');
   }).join('|') + '|current=' + (current ? current.id : '');
 
   // The source chips live in the section head (right-aligned), so they are
@@ -1641,7 +1689,9 @@ function renderEndpoints(snapshot) {
   const sourcesBox = document.getElementById('endpoint-sources');
   if (sourcesBox) {
     const online = deduped.filter(function (e) { return e.up; });
-    const srcSig = online.map(function (e) { return e.id + '@' + e.up; }).join('|');
+    const srcSig = online.map(function (e) {
+      return [e.id, e.engine_version || '', e.base_url || '', e.label || ''].join('@');
+    }).join('|');
     if (sourcesBox.dataset.sig !== srcSig) {
       sourcesBox.dataset.sig = srcSig;
       sourcesBox.innerHTML = online.map(endpointChip).join('');
@@ -1650,22 +1700,20 @@ function renderEndpoints(snapshot) {
 
   if (container.dataset.signature !== signature) {
     container.dataset.signature = signature;
-    // The hero line carries the identity only: label + name + port + state.
-    // The spec tags moved down to the detail row (see modelTags), so the state
-    // pill sits right next to the name instead of being pushed off the row.
+    // The hero gives the active model a clear identity above its telemetry.
     const note = liveNote(live);
     const blocks = serving.map(function (e) {
       const heroModel = (e.models || [])[0] || null;
       const hero = heroModel
         ? '<div class="hero" data-role="hero">' +
-          '<span class="hero-label">' + esc(e === current ? 'running' : e.label) + '</span>' +
-          '<span class="hero-name">' + esc(shortModelName(heroModel.id)) + '</span>' +
-          '<span class="hero-port">' + esc(portOf(e.base_url) || '?') + '</span>' +
-          modelTags(heroModel) +
-          (e.engine_version
-            ? '<span class="engine-ver" title="当前服务这个模型的引擎构建版本">' + esc(e.engine_version) + '</span>'
-            : '') +
-          '<span data-role="hero-lamps"></span>' +
+          '<div class="hero-top"><span class="hero-label">' + esc(e === current ? 'running' : e.label) + '</span>' +
+            '<span class="hero-port">' + esc(portOf(e.base_url) || '?') + '</span>' +
+            (e.engine_version
+              ? '<span class="engine-ver" title="当前服务这个模型的引擎构建版本">' + esc(e.engine_version) + '</span>'
+              : '') + '</div>' +
+          '<div class="hero-core"><span class="hero-name">' + esc(shortModelName(heroModel.id)) + '</span>' +
+            '<span data-role="hero-lamps"></span></div>' +
+          '<div class="hero-tags">' + modelTags(heroModel) + '</div>' +
           '</div>'
         : '';
       // The live tracker's failure note belongs on its own source's card:
@@ -1720,6 +1768,64 @@ function renderEndpoints(snapshot) {
       }
     }
   });
+}
+
+function renderDeploymentBrief(snapshot, endpoints) {
+  const host = document.getElementById('deployment-brief');
+  if (!host) return;
+  const online = endpoints.filter(function (e) { return e.up; }).length;
+  const models = [];
+  const seen = new Set();
+  endpoints.forEach(function (e) {
+    (e.models || []).forEach(function (model) {
+      if (model.loaded === false) return;
+      const key = e.id + '/' + model.id;
+      if (seen.has(key)) return;
+      seen.add(key);
+      models.push(model);
+    });
+  });
+  const requestTotals = function (key) {
+    const values = models.map(function (m) { return m.metrics && m.metrics[key]; })
+      .filter(function (v) { return typeof v === 'number' && Number.isFinite(v); });
+    return values.length ? values.reduce(function (sum, v) { return sum + v; }, 0) : null;
+  };
+  const processing = requestTotals('requests_processing');
+  const queued = requestTotals('requests_deferred');
+  const gpus = snapshot.gpu && snapshot.gpu.available ? (snapshot.gpu.gpus || []) : [];
+  const measured = gpus.filter(function (g) {
+    return typeof g.mem_total_mb === 'number' && typeof g.mem_used_mb === 'number' &&
+      Number.isFinite(g.mem_total_mb) && Number.isFinite(g.mem_used_mb) && g.mem_total_mb > 0;
+  });
+  const totalMb = measured.reduce(function (sum, g) { return sum + g.mem_total_mb; }, 0);
+  const freeMb = measured.reduce(function (sum, g) {
+    return sum + Math.max(0, g.mem_total_mb - g.mem_used_mb);
+  }, 0);
+  const roomiest = measured.reduce(function (best, g, position) {
+    const free = Math.max(0, g.mem_total_mb - g.mem_used_mb);
+    return !best || free > best.free ? { free: free, index: g.index === undefined ? position : g.index } : best;
+  }, null);
+  const cards = [
+    { label: '服务可达', value: online + ' / ' + endpoints.length,
+      foot: '已配置端点 · 按来源去重', tone: online ? 'good' : 'quiet' },
+    { label: '已加载模型', value: String(models.length),
+      foot: models.length === 1 ? shortModelName(models[0].id) :
+        (models.length ? models.length + ' 个可服务模型' : '等待模型加载'),
+      tone: models.length ? 'accent' : 'quiet' },
+    { label: '处理中', value: processing === null ? '—' : String(processing),
+      foot: queued === null ? '排队数据未上报' : '排队 ' + queued + ' 个请求',
+      tone: queued > 0 ? 'warn' : 'accent' },
+    { label: '单卡最大余量', value: roomiest ? gb(roomiest.free, 1) : '—',
+      unit: measured.length ? 'GB' : '',
+      foot: roomiest ? 'GPU' + roomiest.index + ' · 全部空闲合计 ' + gb(freeMb, 1) + ' GB' : '显卡未上报容量',
+      tone: measured.length && freeMb / totalMb < 0.1 ? 'warn' : 'accent' },
+  ];
+  host.innerHTML = cards.map(function (c) {
+    return '<div class="brief-card ' + c.tone + '"><div class="brief-label">' + esc(c.label) +
+      '</div><div class="brief-value">' + esc(c.value) +
+      (c.unit ? '<span>' + esc(c.unit) + '</span>' : '') +
+      '</div><div class="brief-foot">' + esc(c.foot) + '</div></div>';
+  }).join('');
 }
 
 // ---------------------------------------------------------------- system cards
@@ -3217,9 +3323,29 @@ function renderVersion() {
   badge.title = version ? 'llm-monitor v' + version : '';
 }
 
+function renderFreshness() {
+  const status = document.getElementById('freshness');
+  const notice = document.getElementById('stale-notice');
+  if (!status || !notice) return;
+  const ts = S.snapshot && S.snapshot.ts;
+  const age = typeof ts === 'number' ? Math.max(0, Date.now() / 1000 - ts) : null;
+  // ts is the start of collection; slow engine probes can outlast the nominal interval.
+  const cycle = S.snapshot ? Math.max(Number(S.snapshot.interval) || 2,
+    (Number(S.snapshot.sample_ms) || 0) / 1000) : 2;
+  const stale = age === null || age > Math.max(15, cycle * 3);
+  status.classList.toggle('stale', stale);
+  const label = age === null ? '等待首个采样' : (stale ? '数据已过期' : '采样正常');
+  if (status.dataset.label !== label) {
+    status.dataset.label = label;
+    status.textContent = label;
+  }
+  notice.hidden = !stale || age === null;
+}
+
 function render() {
   const snapshot = S.snapshot;
   if (!snapshot) return;
+  renderFreshness();
   renderVersion();
   renderEndpoints(snapshot);
   renderSystem(snapshot);
@@ -3380,6 +3506,7 @@ function initHistTabs() {
       const on = b.dataset.pane === name;
       b.classList.toggle('on', on);
       b.setAttribute('aria-selected', on ? 'true' : 'false');
+      b.tabIndex = on ? 0 : -1;
     });
     panes.forEach(function (p) { p.hidden = p.dataset.pane !== name; });
     try { localStorage.setItem(HIST_TAB_KEY, name); } catch (e) {}
@@ -3390,7 +3517,25 @@ function initHistTabs() {
     if (typeof render === 'function') render();
   };
   tabs.forEach(function (b) {
+    b.setAttribute('role', 'tab');
+    b.id = 'hist-tab-' + b.dataset.pane;
+    b.setAttribute('aria-controls', 'hist-panel-' + b.dataset.pane);
     b.addEventListener('click', function () { show(b.dataset.pane); });
+    b.addEventListener('keydown', function (event) {
+      const index = tabs.indexOf(b);
+      const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length :
+        event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length :
+        event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1;
+      if (next < 0) return;
+      event.preventDefault();
+      show(tabs[next].dataset.pane);
+      tabs[next].focus();
+    });
+  });
+  panes.forEach(function (p) {
+    p.id = 'hist-panel-' + p.dataset.pane;
+    p.setAttribute('role', 'tabpanel');
+    p.setAttribute('aria-labelledby', 'hist-tab-' + p.dataset.pane);
   });
   let saved = '';
   try { saved = localStorage.getItem(HIST_TAB_KEY) || ''; } catch (e) {}
@@ -3398,10 +3543,59 @@ function initHistTabs() {
   show(known ? saved : tabs[0].dataset.pane);
 }
 
+function initSectionNav() {
+  const links = Array.prototype.slice.call(document.querySelectorAll('.section-nav a[href^="#"]'));
+  const sections = links.map(function (a) { return document.querySelector(a.getAttribute('href')); });
+  const update = function () {
+    let active = 0;
+    sections.forEach(function (section, index) {
+      if (section && section.getBoundingClientRect().top <= 140) active = index;
+    });
+    links.forEach(function (link, index) {
+      if (index === active) link.setAttribute('aria-current', 'location');
+      else link.removeAttribute('aria-current');
+    });
+  };
+  window.addEventListener('scroll', update, { passive: true });
+  window.addEventListener('resize', update, { passive: true });
+  update();
+}
+
+function initCompactFolds() {
+  const modelBox = document.getElementById('endpoints');
+  if (modelBox) modelBox.addEventListener('click', function (event) {
+    const button = event.target.closest('[data-role="model-toggle"]');
+    if (!button) return;
+    const model = button.closest('.model');
+    const endpoint = button.closest('.endpoint');
+    if (!model || !endpoint) return;
+    const key = endpoint.dataset.endpoint + '/' + model.dataset.model;
+    const expanded = model.classList.toggle('details-open');
+    button.setAttribute('aria-expanded', String(expanded));
+    if (expanded) S.openModels.add(key);
+    else S.openModels.delete(key);
+  });
+  [
+    ['resource-toggle', 'resource-info'],
+    ['history-toggle', 'history-info'],
+  ].forEach(function (ids) {
+    const button = document.getElementById(ids[0]);
+    const section = document.getElementById(ids[1]);
+    if (!button || !section) return;
+    button.addEventListener('click', function () {
+      const expanded = section.classList.toggle('details-open');
+      button.setAttribute('aria-expanded', String(expanded));
+    });
+  });
+}
+
 async function boot() {
+  window.setInterval(renderFreshness, 1000);
   initTheme();
   initLanguage();
   initHistTabs();
+  initSectionNav();
+  initCompactFolds();
   initRestart();
   initStatsReset();
   document.addEventListener('pointermove', onPointerMove, { passive: true });

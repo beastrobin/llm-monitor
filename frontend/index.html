@@ -26,9 +26,9 @@
     <span class="tip" tabindex="0" data-tip="推理指标来自 llama-server 的 /metrics、/slots、/props（router 模式会逐个 loaded 模型拉取）；显卡指标来自 nvidia-smi；系统指标来自 Win32 API。曲线可以悬停取值，每张卡片右侧的 i 是该项口径说明，鼠标停在采样时间上可以看各阶段耗时。">i</span>
   </div>
   <div class="topbar-right">
-    <!-- 功耗档位切换（2026-10-19 从系统区块上移到顶栏，更新时间左边）：
-         读瓦数看功耗卡，换档在这里；读不到显卡时整行不渲染，顶栏自动收起。 -->
-    <div id="power-control" class="power-control top"></div>
+    <nav class="section-nav" aria-label="面板导航">
+      <a href="#model-info">推理</a><a href="#resource-info">硬件</a><a href="#history-info">历史</a>
+    </nav>
     <span class="muted" id="meta">正在连接…</span>
     <button id="theme-btn" type="button">深色</button>
     <!-- 中英文切换（2026-10-19）：词典翻译层在 /i18n.js，选择存 localStorage -->
@@ -38,17 +38,15 @@
 </header>
 
 <main>
-  <section class="block" data-accent="d">
-    <!-- 系统信息标题取消（2026-10-19）；档位开关同日挪去顶栏后，
-         这个 block-head 已经没有住户，整行删除。
-         2026-11-03 双卡：容器从「一个 6 列网格」改为「若干行」——单卡仍是
-         一行 6 张（结构由 app.js 的 sysRows 决定，这里只管容器）。 -->
-    <div id="sys" class="sys-stack"></div>
-  </section>
-
+  <div class="workspace-head">
+    <div><div class="eyebrow">LOCAL INFERENCE / TELEMETRY</div><h2>运行概览</h2></div>
+    <div id="freshness" class="freshness" role="status">等待首个采样</div>
+  </div>
+  <div id="stale-notice" class="stale-notice" role="status" hidden>数据已过期，当前保留最后一次采样，请勿作为实时读数。</div>
+  <div class="deployment-brief" id="deployment-brief" aria-label="部署摘要"></div>
   <section class="block" data-accent="a" id="model-info">
     <div class="block-head">
-      <h2>模型信息</h2>
+      <h2>推理服务</h2>
       <div class="head-extra">
         <div id="token-stats" class="head-stats"></div>
         <div id="endpoint-sources" class="src-row head"></div>
@@ -57,9 +55,22 @@
     <div id="endpoints" class="endpoint-list"></div>
   </section>
 
-  <section class="block" data-accent="t">
+  <section class="block" data-accent="d" id="resource-info">
+    <div class="block-head"><h2>硬件遥测</h2><span class="section-context">GPU / HOST · 实时采样</span>
+      <button id="resource-toggle" class="compact-toggle" type="button" aria-expanded="false" aria-controls="sys">展开整机详情<span aria-hidden="true">⌄</span></button>
+      <div id="power-control" class="power-control top"></div>
+    </div>
+    <!-- 系统信息标题取消（2026-10-19）；档位开关同日挪去顶栏后，
+         这个 block-head 已经没有住户，整行删除。
+         2026-11-03 双卡：容器从「一个 6 列网格」改为「若干行」——单卡仍是
+         一行 6 张（结构由 app.js 的 sysRows 决定，这里只管容器）。 -->
+    <div id="sys" class="sys-stack"></div>
+  </section>
+
+  <section class="block" data-accent="t" id="history-info">
     <div class="block-head">
       <h2>历史信息 <span class="tip" tabindex="0" data-tip="llama-server 只把 token 数报成进程生命周期内的累计值，server 重启或 router 卸载模型都会归零。工作台每轮采样把增量折进 stats.json，并连上一次读到的原始计数值一起保存，所以面板自己重启也能接着往下算；面板第一次见到某个模型时，会把它当时已有的累计值整体计入，否则那部分就永远丢了。『今日』按本机日期切分；预填充只统计实际参与计算的 token，走 KV 缓存复用的单独计；数值悬停可看精确值。">i</span></h2>
+      <button id="history-toggle" class="compact-toggle" type="button" aria-expanded="false" aria-controls="hist-tabs">展开历史详情<span aria-hidden="true">⌄</span></button>
       <!-- 四个账本视图改为标题右侧的选项卡（2026-10-23）：一次只看一个，
            整行宽度都归当前视图；选中的卡存 localStorage，和主题/语言同一套习惯。 -->
       <div class="hist-tabs" id="hist-tabs" role="tablist">
