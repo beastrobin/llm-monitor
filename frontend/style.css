@@ -2146,16 +2146,12 @@ body {
   #meta { min-width: 0; font-size: 10px; }
   .topbar-right #freshness { padding: 3px 8px; font-size: 10px; }
 
-  /* 页首标题行整行让位（新鲜度灯已被 JS 搬进顶栏，节点不会消失） */
+  /* 页首标题行整行让位（新鲜度灯已被 JS 搬进顶栏，节点不会消失）；
+     概览 4 KPI 卡整体隐藏——服务可达有歧义（被并卡的 hermes 记离线）、
+     已加载模型/处理中在 hero 状态灯与 slot 条里本来就有，显存余量看
+     硬件遥测的显存卡。宽屏保留这条摘要。 */
   .workspace-head { display: none; }
-
-  /* 概览 4 KPI 一行四列，压到三小行 */
-  .deployment-brief { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 0; }
-  .brief-card { min-height: 0; padding: 5px 8px; border-radius: 8px; }
-  .brief-label { font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .brief-value { margin-top: 1px; font-size: 15px; }
-  .brief-value span { margin-left: 3px; font-size: 9px; }
-  .brief-foot { margin-top: 1px; font-size: 9px; }
+  .deployment-brief { display: none; }
 
   /* 推理服务标题行：h2+来源 chip 一行，token 统计四列一行（head-extra 让位成
       contents，两个子节点直接成为 block-head 的 flex 成员） */

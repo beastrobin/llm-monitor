@@ -650,8 +650,10 @@ HTTP 接口：
   - 顶栏收成一整行（right 列在 ≤1180 的 `flex:1 1 100%` 独占行在窄屏放回，meta 取消
     210px 预留——档位早已搬去硬件区，防抖动预留不再需要）；「运行概览」标题行整行隐藏，
     新鲜度灯由 `initNarrowMode()` 搬进顶栏（节点搬家不是隐藏，boot 挂了也不会双份/失踪）。
-  - 概览 4 KPI 一行四列小卡；token 统计 4 列一行（`display:contents` 让 head-extra 两个
-    子节点直接成 block-head 的 flex 成员）；hero 名字收到 16px 与状态灯同排。
+  - 概览 4 KPI 卡窄屏整体隐藏（用户：「这 4 个小卡片没什么用」——服务可达有歧义、
+    已加载模型/处理中与 hero 状态灯重复，显存余量看硬件区的显存卡）；宽屏保留摘要条。
+  - token 统计 4 列一行（`display:contents` 让 head-extra 两个子节点直接成 block-head
+    的 flex 成员）；hero 名字收到 16px 与状态灯同排。
   - MTP/KV/上下文环形仪表在窄屏改**全宽线性横条**（conic→linear，值钉在轨道右端带
     panel 色 text-shadow 保可读）；TTFT 全宽收起曲线。
   - 默认展开反转：窄屏下模型详细指标 / 整机 host 行 / 历史详情默认展开（`initNarrowMode`），
