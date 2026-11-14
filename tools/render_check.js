@@ -761,11 +761,26 @@ function readFrames(base, count, timeoutMs) {
     doc.querySelectorAll('#sys .sys-row[data-row^="gpu"]'));
   ruler.rows = gpuRows.length;
   if (gpuRows.length > 1) {
+    // The 整机 row carries the same measurement for two of its four cards, and
+    // those two must sit on the GPU rows' ruler as well: 显存合计 is the same
+    // ratio, 显卡总功耗 is the sum of the very curves above it.  Asserting only
+    // the GPU rows let the third row keep its own window for a whole release
+    // (user, 11-14: "第三行小卡片总功耗和总显存占用还是没对齐").
+    const hostRow = doc.querySelector('#sys .sys-row[data-row="host"]');
+    const fleetOf = { mem: 'fleetmem', power: 'fleetpower' };
     ['util', 'mem', 'temp', 'power'].forEach(function (key) {
       const windows = gpuRows.map(function (row) {
         const canvas = row.querySelector('[data-card="' + key + '"] canvas.spark');
         return (canvas && canvas._window) || null;
       });
+      let fleetNote = '';
+      if (fleetOf[key] && hostRow) {
+        const canvas = hostRow.querySelector(
+          '[data-card="' + fleetOf[key] + '"] canvas.spark');
+        windows.push((canvas && canvas._window) || null);
+        fleetNote = '（含整机·' + text(hostRow.querySelector(
+          '[data-card="' + fleetOf[key] + '"] .card-label')) + '）';
+      }
       const round = function (v) { return Math.round(v * 100) / 100; };
       const known = windows.filter(Boolean);
       // Nothing to compare until every row painted a window: a canvas that
@@ -778,7 +793,8 @@ function readFrames(base, count, timeoutMs) {
       });
       ruler.lines.push(key + ' 标尺: ' + windows.map(function (w) {
         return w ? round(w.min) + '~' + round(w.max) : '无';
-      }).join(' / ') + (!comparable ? ' 跳过' : (same ? ' 一致 ✓' : ' ✗ 不一致')));
+      }).join(' / ') + (!comparable ? ' 跳过' : (same ? ' 一致 ✓' : ' ✗ 不一致')) +
+        fleetNote);
       if (comparable && !same) ruler.bad.push(key);
     });
   }
@@ -788,8 +804,8 @@ function readFrames(base, count, timeoutMs) {
   if (ruler.rows > 1) {
     ruler.lines.forEach(function (line) { say('  ' + line); });
     say('  结论: ' + (ruler.bad.length
-      ? '✗ 上下两行各画各的（' + ruler.bad.join(', ') + '）'
-      : '✓ 两张卡共用一把标尺'));
+      ? '✗ 有行各画各的（' + ruler.bad.join(', ') + '）'
+      : '✓ 三行共用一把标尺（整机行的总功耗/显存合计也在其中）'));
   } else {
     say('  ' + ruler.rows + ' 行显卡卡，单卡不需要对齐');
   }

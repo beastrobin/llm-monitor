@@ -1788,6 +1788,16 @@ const FLEET_SYS_SPECS = [
 // The single-card layout stays one row of six, exactly as it was before the
 // second card arrived -- a one-GPU machine should not pay for the grouping.
 const SYS_SPECS = GPU_SYS_SPECS.concat(HOST_SYS_SPECS);
+
+// Column order on the machine-wide row.  The two totals sit UNDER the column
+// they summarize -- 显卡总功耗 in the 功耗 column, 显存合计 in the 显存占用 column
+// -- so a column can be read straight down through all three rows as one
+// metric.  Two host cards then take the leftover slots: CPU 负载 under 利用率
+// (the same question asked of the CPU) and 提交内存 under 核心温度 (which has no
+// machine-wide twin at all, so the slot is decoration there).
+const HOST_ROW_SPECS = [
+  HOST_SYS_SPECS[0], FLEET_SYS_SPECS[1], HOST_SYS_SPECS[1], FLEET_SYS_SPECS[0],
+];
 // ------------------------------------------------------------- system layout
 
 // nvidia-smi's index for one card, as a number.  The collector reads that
@@ -1877,7 +1887,7 @@ function sysRows(gpus, host) {
   });
   rows.push({
     key: 'host', kind: 'host', index: null, card: null,
-    specs: HOST_SYS_SPECS.concat(FLEET_SYS_SPECS),
+    specs: HOST_ROW_SPECS,
     head: sysRowHead('host', null, null, host),
   });
   return rows;
@@ -1989,8 +1999,18 @@ function renderSystem(snapshot) {
 // curves can be read across.
 //
 // The ledger / host cards are untouched: there is exactly one of each, and
-// their series are not comparable to a GPU's.
+// their series are not comparable to a GPU's.  The machine-wide row is the
+// exception, because two of its four cards ARE the same measurement: 显存合计 is
+// a capacity-weighted ratio (0-1, the unit a card's own 显存占用 reports), so it
+// shares the window outright.  显卡总功耗 is a SUM --
+// two cards at 300 W read 600 W, twice the tallest single-card curve -- so it
+// joins the union rather than being squeezed into the per-card window (which
+// would clip it flat against the top edge).  All three rows then print the same
+// pair of numbers, with the totals riding above the halves: that IS what a sum
+// looks like next to its parts.  利用率 and 核心温度 have no machine-wide twin,
+// so their windows stay per-card.
 const DUAL_RULER_METRICS = ['util', 'mem', 'temp', 'power'];
+const FLEET_RULER_CARDS = { mem: 'fleetmem', power: 'fleetpower' };
 // The window's own smoothing state (``_ceiling``) lives here rather than on a
 // canvas, so it survives the per-frame repaint the way a lone chart's does.
 const dualRulers = {};
@@ -1998,12 +2018,19 @@ const dualRulers = {};
 function shareDualRulers(entries) {
   const cards = entries.filter(function (entry) { return entry.row.kind === 'gpu'; });
   if (cards.length < 2) return;
+  // The 整机 row, when it exists (it is there exactly when there are 2+ cards).
+  const fleet = entries.filter(function (entry) {
+    return entry.row.kind === 'host' && entry.values;
+  })[0];
   DUAL_RULER_METRICS.forEach(function (key) {
     const members = [];
     cards.forEach(function (entry) {
       const value = entry.values[key];
       if (value && value.series) members.push(value);
     });
+    const fleetKey = FLEET_RULER_CARDS[key];
+    const fleetValue = fleet && fleetKey ? fleet.values[fleetKey] : null;
+    if (fleetValue && fleetValue.series) members.push(fleetValue);
     if (members.length < 2) return;
     const all = [];
     members.forEach(function (value) {
