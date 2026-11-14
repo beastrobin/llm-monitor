@@ -645,7 +645,20 @@ HTTP 接口：
     来源 chip 改印引擎品牌（title 保留 label）；页头 eyebrow、stale 横幅等新文案进 i18n 词典。
   - 配色整体从暖 Nord 换为冷色海军蓝，浅色主题成为 :root 默认、深色走 data-theme。
   - 新增 `tools/display_check.js`（jsdom：速率读数 / 引擎署名 / 上下文残留 / 过期新鲜度 /
-    键盘选项卡 / 折叠态跨帧持久），`npm run display-check`。
+    键盘选项卡 / 折叠态跨帧持久 / 窄屏折叠持久化 roundtrip），`npm run display-check`。
+- **窄屏（≤640px）密度专项（念念）**：600 宽侧窗是常驻监看场景，首屏数据点从 2 个提到 15 个。
+  - 顶栏收成一整行（right 列在 ≤1180 的 `flex:1 1 100%` 独占行在窄屏放回，meta 取消
+    210px 预留——档位早已搬去硬件区，防抖动预留不再需要）；「运行概览」标题行整行隐藏，
+    新鲜度灯由 `initNarrowMode()` 搬进顶栏（节点搬家不是隐藏，boot 挂了也不会双份/失踪）。
+  - 概览 4 KPI 一行四列小卡；token 统计 4 列一行（`display:contents` 让 head-extra 两个
+    子节点直接成 block-head 的 flex 成员）；hero 名字收到 16px 与状态灯同排。
+  - MTP/KV/上下文环形仪表在窄屏改**全宽线性横条**（conic→linear，值钉在轨道右端带
+    panel 色 text-shadow 保可读）；TTFT 全宽收起曲线。
+  - 默认展开反转：窄屏下模型详细指标 / 整机 host 行 / 历史详情默认展开（`initNarrowMode`），
+    用户手动收起持久化在 localStorage `llm-monitor-narrow-collapsed`（`|` 分隔 key 列表）；
+    宽屏版式零改动（所有规则在 ≤640 媒体查询内）。
+  - CDP 600px 实测：顶栏 42px、无横向溢出、整页无重叠截断；EN 扫描仅命中语言按钮自标签
+    「中文」（设计如此，非泄漏）。
 
 ### v1.21 — 2026-11-14
 

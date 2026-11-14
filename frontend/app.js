@@ -1559,7 +1559,7 @@ function renderEndpointModels(container, endpoint) {
     const title = model.id === heroId
       ? ''
       : '<div class="model-title"><span class="id">' + esc(shortModelName(model.id)) + '</span>' + modelTags(model) + '</div>';
-    const expanded = S.openModels.has(endpoint.id + '/' + (model.id || 'model'));
+    const expanded = modelExpanded(endpoint.id, model.id);
     return '<div class="model' + (expanded ? ' details-open' : '') + '" data-model="' + esc(model.id || 'model') + '" data-fade>' +
       title +
       '<div class="grid" data-role="cards"></div>' +
@@ -3561,6 +3561,62 @@ function initSectionNav() {
   update();
 }
 
+// ── 窄屏（≤640px）密度模式 ──────────────────────────────────────────
+// 600 宽的侧窗是常驻监看用的：折叠是宽屏逻辑，窄屏恰恰相反——
+// 详细指标 / 整机行 / 历史默认展开，用户手动收起的选择持久化；
+// 页首「运行概览」标题行整行让位给数据，新鲜度灯搬进顶栏。
+var NARROW_QUERY = '(max-width: 640px)';
+var NARROW = window.matchMedia
+  ? window.matchMedia(NARROW_QUERY)
+  : { matches: false, addEventListener: function () {} };
+var NARROW_COLLAPSE_KEY = 'llm-monitor-narrow-collapsed';
+function narrowCollapsed(key) {
+  try { return (localStorage.getItem(NARROW_COLLAPSE_KEY) || '').split('|').indexOf(key) >= 0; } catch (e) { return false; }
+}
+function setNarrowCollapsed(key, collapsed) {
+  var list = [];
+  try { list = (localStorage.getItem(NARROW_COLLAPSE_KEY) || '').split('|').filter(Boolean); } catch (e) {}
+  var index = list.indexOf(key);
+  if (collapsed && index < 0) list.push(key);
+  if (!collapsed && index >= 0) list.splice(index, 1);
+  try { localStorage.setItem(NARROW_COLLAPSE_KEY, list.join('|')); } catch (e) {}
+}
+function modelExpanded(endpointId, modelId) {
+  const key = endpointId + '/' + (modelId || 'model');
+  if (NARROW.matches) return !narrowCollapsed(key);
+  return S.openModels.has(key);
+}
+function initNarrowMode() {
+  const head = document.querySelector('.workspace-head');
+  const fresh = document.getElementById('freshness');
+  const navHost = document.querySelector('.topbar-right');
+  const meta = document.getElementById('meta');
+  const SECTIONS = [['resource-toggle', 'resource-info'], ['history-toggle', 'history-info']];
+  function placeFreshness() {
+    if (!head || !fresh || !navHost || !meta) return;
+    if (NARROW.matches) {
+      if (fresh.parentNode !== navHost) navHost.insertBefore(fresh, meta);
+    } else if (fresh.parentNode !== head) {
+      head.appendChild(fresh);
+    }
+  }
+  function applySectionDefaults() {
+    // 宽屏永远展开（折叠样式只活在窄屏媒体查询里），窄屏默认展开、
+    // 尊重持久化的手动收起。
+    SECTIONS.forEach(function (ids) {
+      const button = document.getElementById(ids[0]);
+      const section = document.getElementById(ids[1]);
+      if (!button || !section) return;
+      const open = !NARROW.matches || !narrowCollapsed(ids[1]);
+      section.classList.toggle('details-open', open);
+      button.setAttribute('aria-expanded', String(open));
+    });
+  }
+  function apply() { placeFreshness(); applySectionDefaults(); }
+  apply();
+  NARROW.addEventListener('change', apply);
+}
+
 function initCompactFolds() {
   const modelBox = document.getElementById('endpoints');
   if (modelBox) modelBox.addEventListener('click', function (event) {
@@ -3574,6 +3630,7 @@ function initCompactFolds() {
     button.setAttribute('aria-expanded', String(expanded));
     if (expanded) S.openModels.add(key);
     else S.openModels.delete(key);
+    if (NARROW.matches) setNarrowCollapsed(key, !expanded);
   });
   [
     ['resource-toggle', 'resource-info'],
@@ -3585,6 +3642,7 @@ function initCompactFolds() {
     button.addEventListener('click', function () {
       const expanded = section.classList.toggle('details-open');
       button.setAttribute('aria-expanded', String(expanded));
+      if (NARROW.matches) setNarrowCollapsed(ids[1], !expanded);
     });
   });
 }
@@ -3596,6 +3654,7 @@ async function boot() {
   initHistTabs();
   initSectionNav();
   initCompactFolds();
+  initNarrowMode();
   initRestart();
   initStatsReset();
   document.addEventListener('pointermove', onPointerMove, { passive: true });

@@ -9,7 +9,7 @@ const dom = new JSDOM(fs.readFileSync(path.join(root, 'frontend/index.html'), 'u
 const win = dom.window;
 win.eval(fs.readFileSync(path.join(root, 'frontend/app.js'), 'utf8').replace(/\nboot\(\);\s*$/, '') + `
 window.probe = { rateReading, applyModel, endpointChip, initHistTabs, initCompactFolds,
-  renderEndpointModels, renderFreshness,
+  renderEndpointModels, renderFreshness, narrowCollapsed, setNarrowCollapsed, modelExpanded,
   snapshot: function (value) { S.snapshot = value; } };
 drawSpark = function () {};
 `);
@@ -74,5 +74,13 @@ win.document.getElementById('resource-toggle').click();
 win.document.getElementById('history-toggle').click();
 assert.equal(win.document.getElementById('resource-info').classList.contains('details-open'), true);
 assert.equal(win.document.getElementById('history-info').classList.contains('details-open'), true);
+// 窄屏持久化：手动收起按 key 存储/清除；jsdom 的 matchMedia 不命中 →
+// modelExpanded 走宽屏 S.openModels 路径（上面已点开 engine/fixture）。
+api.setNarrowCollapsed('engine/fixture', true);
+assert.equal(api.narrowCollapsed('engine/fixture'), true);
+assert.equal(api.narrowCollapsed('other/key'), false);
+api.setNarrowCollapsed('engine/fixture', false);
+assert.equal(api.narrowCollapsed('engine/fixture'), false);
+assert.equal(api.modelExpanded('engine', 'fixture'), true);
 console.log('PASS: rates, engine identity, context, stale samples, keyboard tabs, compact folds and rerender persistence');
 dom.window.close();

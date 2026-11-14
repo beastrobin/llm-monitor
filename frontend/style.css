@@ -2126,3 +2126,104 @@ body {
   #history-info.details-open .hist-tabs { display: flex; }
   #history-info .hist-pane[hidden] { display: none; }
 }
+
+/* ── v1.22 窄屏密度专项：600 宽侧窗是常驻监看，每一竖像素都要装数据。
+   规则只在 ≤640 生效，宽屏版式零改动；默认展开/新鲜度搬家在 app.js 的
+   initNarrowMode，这里只负责把每个区块压扁。 ── */
+@media (max-width: 640px) {
+  main { gap: 10px; padding: 8px 10px 20px; }
+
+  /* 顶栏收成一整行：meta 的 210px 预留是给顶栏档位按钮防抖动的，
+     档位搬进硬件遥测后，窄屏不再需要这份预留。right 列在 ≤1180 被
+     设成 flex:1 1 100%（整行独占用），窄屏必须放回去，否则永远两行。 */
+  .topbar { padding: 6px 10px; gap: 8px; flex-wrap: nowrap; }
+  .brand { gap: 6px; flex: none; }
+  .brand h1 { font-size: 12px; white-space: nowrap; }
+  .brand .version { font-size: 9px; }
+  .brand .tip { display: none; }
+  .topbar-right { gap: 6px; flex-wrap: nowrap; justify-content: flex-end; flex: 0 1 auto; min-width: 0; }
+  .topbar-right button { padding: 5px 8px; font-size: 11px; }
+  #meta { min-width: 0; font-size: 10px; }
+  .topbar-right #freshness { padding: 3px 8px; font-size: 10px; }
+
+  /* 页首标题行整行让位（新鲜度灯已被 JS 搬进顶栏，节点不会消失） */
+  .workspace-head { display: none; }
+
+  /* 概览 4 KPI 一行四列，压到三小行 */
+  .deployment-brief { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 0; }
+  .brief-card { min-height: 0; padding: 5px 8px; border-radius: 8px; }
+  .brief-label { font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .brief-value { margin-top: 1px; font-size: 15px; }
+  .brief-value span { margin-left: 3px; font-size: 9px; }
+  .brief-foot { margin-top: 1px; font-size: 9px; }
+
+  /* 推理服务标题行：h2+来源 chip 一行，token 统计四列一行（head-extra 让位成
+      contents，两个子节点直接成为 block-head 的 flex 成员） */
+  #model-info { padding: 8px; border-radius: 10px; }
+  #model-info .block-head { gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+  .block-head h2 { font-size: 15px; }
+  #model-info .head-extra { display: contents; }
+  #model-info #endpoint-sources { order: 2; margin-left: auto; }
+  #model-info #token-stats { order: 3; flex: 1 1 100%; display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+  #model-info #token-stats .stat { flex-wrap: nowrap; min-width: 0; padding: 3px 6px; }
+  #model-info #token-stats .stat-label { font-size: 9px; white-space: nowrap; }
+  #model-info #token-stats .stat-value { font-size: 12px; }
+  #model-info #token-stats .stat-unit { font-size: 8px; }
+
+  /* hero 三行 → 紧凑两行半：大名字收回正常字级，状态灯与名字共行 */
+  .endpoint { padding: 8px; border-radius: 10px; }
+  .endpoint .hero { padding: 8px 10px; gap: 4px; margin: -2px -2px 8px; }
+  .hero-top, .hero-core { gap: 6px; }
+  .endpoint .hero-label, .endpoint .hero-port { font-size: 10px; padding: 2px 7px; }
+  .endpoint .hero-name { font-size: 16px; line-height: 1.25; letter-spacing: -0.02em; text-shadow: none; }
+  .hero-core [data-role="hero-lamps"] { flex: 1 1 auto; }
+  .hero-tags { gap: 4px; }
+  .hero-tags .tag { font-size: 9px; padding: 1px 6px; }
+  .model { margin-top: 7px; }
+  .model:first-child { margin-top: 4px; }
+
+  /* 六卡网格：decode/prefill 保持两列；比例卡全宽线性仪表，TTFT 全宽收起曲线 */
+  .endpoint .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .endpoint .grid .card { padding: 6px 8px; }
+  .card:not(.bar-h) .card-head .card-value { font-size: 16px; line-height: 1.3; }
+  .card:not(.bar-h) .card-head .card-value .card-unit { font-size: 10px; }
+  .card-visual { margin-top: 4px; }
+  .grid .spark { height: 30px; }
+  .card:not(.bar-h) .card-foot { margin-top: 3px; padding-top: 3px; font-size: 9px; line-height: 1.35; }
+  .model > .grid .gauge-card { grid-column: 1 / -1; }
+  .model > .grid [data-card="ttft"] { grid-column: 1 / -1; }
+  .model > .grid [data-card="ttft"] .spark { display: none; }
+  .model > .grid [data-card="ttft"] .card-foot { margin-top: 0; border-top: 0; padding-top: 0; }
+  .gauge-head { font-size: 11px; }
+  .gauge-visual { min-height: 0; margin-top: 2px; }
+  .gauge { width: 100%; height: 16px; padding: 0; border-radius: 8px; position: relative;
+    background: linear-gradient(90deg, var(--gauge-color) 0 var(--gauge-pct), var(--track) var(--gauge-pct) 100%); }
+  .gauge-inner { width: auto; height: auto; position: absolute; right: 6px; top: -1px;
+    background: transparent; display: block; }
+  .gauge .card-value { font: 600 12px/1.4 var(--font-mono); text-shadow: 0 0 6px var(--panel), 0 0 2px var(--panel); }
+  .gauge-endpoints { display: none; }
+  .gauge-card .card-foot { text-align: right; margin-top: 2px; padding-top: 0; border-top: 0; }
+  .compact-toggle { padding: 5px 9px; }
+  .model-toggle { margin-top: 6px; }
+  .slot-detail { margin-top: 6px; }
+
+  /* 硬件遥测：标题行与卡片全收紧；host 行由 JS 默认展开 */
+  #resource-info .block-head { gap: 8px; }
+  #resource-info .power-control.top .pw-row { gap: 4px; padding: 3px 6px; }
+  #resource-info .pw-btn { padding: 4px 7px; font-size: 10px; }
+  #resource-info .sys-id { padding: 2px 0 5px; }
+  #resource-info .sys-tag { font-size: 11px; }
+  #resource-info .sys-meta { font-size: 10px; }
+  #resource-info .sys-row + .sys-row { margin-top: 8px; }
+  #resource-info .grid.compact { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+  #resource-info .grid.compact .card { padding: 6px; }
+  #resource-info .grid.compact .card-head .card-value { font-size: 14px; }
+  #resource-info .grid.compact .spark { height: 26px; }
+  #resource-info .grid.compact .card-label { font-size: 10px; }
+
+  /* 历史：JS 默认展开；字号收紧 */
+  #history-info .hist-tabs button { padding: 6px 9px; font-size: 11px; }
+  #history-info table, #history-info .stat-grid { font-size: 11px; }
+  #history-info .stat-note { font-size: 10px; }
+}
