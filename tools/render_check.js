@@ -645,6 +645,28 @@ function readFrames(base, count, timeoutMs) {
   };
 
   const live = { pushed: false, cards: 'n/a', history: 'n/a' };
+
+  // 能耗面板那条功率曲线必须是「各卡之和」，不能只画一张卡（2026-11-15：卡片
+  // 383 W，曲线只有 92 W —— drawSpark 写死了 gpu0.power）。能耗卡上的「显卡
+  // 功率」和曲线末值出自同一帧，所以两者必须相等；少画一张卡就差出一倍。
+  // Sampled here, before the pushed frame, so neither side has been overwritten.
+  const powerSum = (function () {
+    const canvas = doc.getElementById('energy-power-line');
+    const stat = doc.querySelector('#energy-cards .stat .stat-value');
+    if (!canvas || !canvas._spark || !stat) return { ok: true, note: '面板未挂载，跳过' };
+    const values = canvas._spark.values || [];
+    let curve = null;
+    for (let i = values.length - 1; i >= 0; i -= 1) {
+      if (typeof values[i] === 'number' && isFinite(values[i])) { curve = values[i]; break; }
+    }
+    const shown = parseFloat(String(text(stat)).replace(/[^0-9.]/g, ''));
+    if (curve === null || !isFinite(shown)) return { ok: true, note: '无功率数据，跳过' };
+    return {
+      ok: Math.abs(curve - shown) <= 1.5,
+      note: '曲线末值 ' + curve.toFixed(1) + ' W / 能耗卡 ' + shown.toFixed(0) + ' W',
+    };
+  })();
+
   if (stream) {
     const cardText = function () {
       return Array.prototype.map.call(
@@ -1366,6 +1388,9 @@ function readFrames(base, count, timeoutMs) {
   say('能耗面板: 四卡+双画布+口径说明 渲染 ' +
     (energyOk ? '✓ — 通过 ✓' : '✗ — 失败 ✗'));
 
+  say('能耗功率曲线=各卡之和: ' + powerSum.note +
+    (powerSum.ok ? ' — 通过 ✓' : ' — 失败 ✗'));
+
   // A half-translated page is the failure mode of a dictionary layer: it reads
   // English until one label stays Chinese. Scan English mode for CJK left in
   // text or in a tooltip; the switch button's own «中文» is the one exception,
@@ -1425,7 +1450,7 @@ function readFrames(base, count, timeoutMs) {
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
     !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk ||
     !verOk || !rowVerOk || !rankOk || !langOk || !langLeaksOk || !ttftOk || !tabOk ||
-    !energyOk || !gpuPickOk || !readOnly.ok || !metersOk) ? 1 : 0;
+    !energyOk || !powerSum.ok || !gpuPickOk || !readOnly.ok || !metersOk) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own

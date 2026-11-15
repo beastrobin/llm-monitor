@@ -446,7 +446,7 @@
     /* energy pane (2026-10-24) */
     '能耗面板': 'Energy',
     '显卡功率 · 近 30 分钟': 'GPU power · last 30 min',
-    'nvidia-smi 实测 · 悬停看精确值': 'measured via nvidia-smi · hover for exact values',
+    'nvidia-smi 实测 · 各卡之和 · 悬停看精确值': 'measured via nvidia-smi · summed over all cards · hover for exact values',
     '每日能耗': 'Daily energy',
     '实测 GPU': 'GPU measured', '估算整机': 'machine est.',
     '显卡功率': 'GPU power', '整机功率': 'Machine power',

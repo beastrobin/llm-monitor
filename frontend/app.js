@@ -1783,8 +1783,8 @@ function renderEndpoints(snapshot) {
 // 取消曲线图和血条").  A ratio card is asking "how full is it right now", and a
 // ring answers that in one glance without the reader having to decode a curve's
 // axis; the left rail went with them because the ring already carries the same
-// fill.  History is not lost -- the 历史 tab still plots gpu0.power and friends
-// from the server's series.
+// fill.  History is not lost -- the 历史 tab's 能耗 panel still plots the
+// summed GPU power and the daily books from the server's series.
 const GPU_SYS_SPECS = [
   cardSpec('util', '显卡利用率', {
     view: 'gauge',
@@ -3167,7 +3167,20 @@ function renderEnergyPanel(snapshot) {
     : '开始记账后每轮采样自动积分，暂无数据。') +
     (flatDays ? '带＊的日期含无小时数据的电量，该部分按一口价 ' + num(price, 2) + ' 元/kWh 补算。' : '');
 
-  drawSpark(line, seriesOf('gpu0.power'), {
+  // The 显卡功率 card above sums every card's draw, so the curve under it has to
+  // be that same sum.  It plotted gpu0.power whatever the machine held, which
+  // put a 90 W line under a 383 W headline the moment the second card started
+  // working (user, 2026-11-15).  The parts come from the series the server
+  // actually has rather than from this frame's card list: a frame where
+  // nvidia-smi hiccups still draws the history instead of 暂无数据, and a card
+  // added mid-session joins the sum on its first sample.  combineSeries leaves
+  // gpuN.power's gaps as gaps, so a card that missed a sample is subtracted
+  // for that sample rather than read as 0 W.
+  const powerParts = Object.keys(S.history.series || {})
+    .filter(function (key) { return /^gpu\d+\.power$/.test(key); })
+    .sort()
+    .map(function (key) { return { series: seriesOf(key) }; });
+  drawSpark(line, combineSeries(powerParts, false), {
     min: 0, color: cssVar('--chart-b'), autoscale: true,
     format: function (v) { return num(v, 0) + ' W'; },
   });
