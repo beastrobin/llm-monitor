@@ -290,8 +290,8 @@
     '注意 WDDM 驱动下 nvidia-smi 不给每进程显存。':
       ' Note: under WDDM, nvidia-smi reports no per-process VRAM.',
     '核心温度': 'GPU temp',
-    'GPU 核心温度。进度条按 30–90°C 换算占用比例，':
-      'GPU core temperature. The bar maps 30-90\u00b0C to 0-100%;',
+    'GPU 核心温度。圆环按 30–90°C 换算占用比例，':
+      'GPU core temperature. The ring maps 30-90\u00b0C to 0-100%;',
     '75°C 转黄、83°C 转红并在脚注直接写明温度偏高。':
       ' amber at 75\u00b0C, red at 83\u00b0C with an explicit hot footnote.',
     '功耗': 'Power',

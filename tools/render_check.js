@@ -692,6 +692,9 @@ function readFrames(base, count, timeoutMs) {
     const stamps = (payload.history && payload.history.timestamps) || [];
     const newest = Math.max.apply(null, stamps.concat([payload.snapshot.ts || 0]));
     frame.ts = newest + 2;
+    // The page is left showing THIS frame, so the meter check below must read
+    // its expectations from it rather than from the untouched payload.
+    live.frame = frame;
 
     stream.onmessage({ data: JSON.stringify({
       snapshot: frame,
@@ -750,64 +753,61 @@ function readFrames(base, count, timeoutMs) {
     });
   });
 
-  // 双卡标尺 (2026-11-14): the two GPU rows must draw against ONE y-window per
-  // metric.  A card that picks its own window leaves no trace in the DOM -- and
-  // that is exactly the problem: the rows still look stacked and comparable
-  // while 80 W and 110 W both fill their box top to bottom, so nothing but an
-  // assertion on the drawn window can catch this coming back.  Skipped on a
-  // one-card machine, where there is nothing to align against.
-  const ruler = { rows: 0, bad: [], lines: [] };
+  // 双卡仪表 (2026-11-15): the two GPU rows draw their four metrics as rings.
+  // The check that matters is the anatomy, because a ring can look perfectly
+  // healthy while ignoring the reading: each card must carry a gauge, must NOT
+  // carry the curve or the left rail it replaced, and -- where the payload gives
+  // us the same number -- the arc must match it.  A card that silently fell back
+  // to a trend card fails here instead of showing up as "looks fine" on screen.
+  const meters = { rows: 0, bad: [], lines: [] };
   const gpuRows = Array.prototype.slice.call(
     doc.querySelectorAll('#sys .sys-row[data-row^="gpu"]'));
-  ruler.rows = gpuRows.length;
-  if (gpuRows.length > 1) {
-    // The 整机 row carries the same measurement for two of its four cards, and
-    // those two must sit on the GPU rows' ruler as well: 显存合计 is the same
-    // ratio, 显卡总功耗 is the sum of the very curves above it.  Asserting only
-    // the GPU rows let the third row keep its own window for a whole release
-    // (user, 11-14: "第三行小卡片总功耗和总显存占用还是没对齐").
-    const hostRow = doc.querySelector('#sys .sys-row[data-row="host"]');
-    const fleetOf = { mem: 'fleetmem', power: 'fleetpower' };
+  meters.rows = gpuRows.length;
+  const gpuPayload = ((live.frame || payload.snapshot).gpu || {}).gpus || [];
+  const round2 = function (v) { return Math.round(v * 100) / 100; };
+  gpuRows.forEach(function (row, position) {
+    const gpu = gpuPayload[position] || {};
+    // The same denominators the collector hands the card: 0-100% for util and
+    // memory, 30-90°C for temperature, 0-wall for power.
+    const ceiling = typeof gpu.power_requested_w === 'number' ? gpu.power_requested_w
+      : (typeof gpu.power_enforced_w === 'number' ? gpu.power_enforced_w : null);
+    // Clamped the way the ring clamps: this harness pushes power_w = 512 at a
+    // 300 W wall on purpose, and a saturated ring is the correct answer there.
+    const clamp = function (v) { return Math.max(0, Math.min(100, v)); };
+    const expect = {
+      util: typeof gpu.util_pct === 'number' ? clamp(gpu.util_pct) : null,
+      mem: typeof gpu.mem_ratio === 'number' ? clamp(gpu.mem_ratio * 100) : null,
+      temp: typeof gpu.temp_c === 'number' ? clamp((gpu.temp_c - 30) / 60 * 100) : null,
+      power: (typeof gpu.power_w === 'number' && ceiling) ? clamp(gpu.power_w / ceiling * 100) : null,
+    };
+    const bits = [];
     ['util', 'mem', 'temp', 'power'].forEach(function (key) {
-      const windows = gpuRows.map(function (row) {
-        const canvas = row.querySelector('[data-card="' + key + '"] canvas.spark');
-        return (canvas && canvas._window) || null;
-      });
-      let fleetNote = '';
-      if (fleetOf[key] && hostRow) {
-        const canvas = hostRow.querySelector(
-          '[data-card="' + fleetOf[key] + '"] canvas.spark');
-        windows.push((canvas && canvas._window) || null);
-        fleetNote = '（含整机·' + text(hostRow.querySelector(
-          '[data-card="' + fleetOf[key] + '"] .card-label')) + '）';
-      }
-      const round = function (v) { return Math.round(v * 100) / 100; };
-      const known = windows.filter(Boolean);
-      // Nothing to compare until every row painted a window: a canvas that
-      // never drew (or a history shorter than the shared-ruler minimum) is
-      // reported, not failed -- the 卡片 dump above already shows the columns.
-      const comparable = known.length === windows.length && windows.length > 1;
-      const same = comparable && known.every(function (w) {
-        return Math.abs(w.min - known[0].min) < 1e-6 &&
-          Math.abs(w.max - known[0].max) < 1e-6;
-      });
-      ruler.lines.push(key + ' 标尺: ' + windows.map(function (w) {
-        return w ? round(w.min) + '~' + round(w.max) : '无';
-      }).join(' / ') + (!comparable ? ' 跳过' : (same ? ' 一致 ✓' : ' ✗ 不一致')) +
-        fleetNote);
-      if (comparable && !same) ruler.bad.push(key);
+      const card = row.querySelector('[data-card="' + key + '"]');
+      const label = card ? text(card.querySelector('.card-label')) : key;
+      const gauge = card && card.querySelector('[data-role="gauge"]');
+      const pct = gauge ? parseFloat(gauge.style.getPropertyValue('--gauge-pct')) : NaN;
+      const trend = !!(card && card.querySelector('canvas.spark'));
+      const rail = !!(card && card.querySelector('.bar'));
+      const want = expect[key];
+      const drift = (want === null || isNaN(pct)) ? null : Math.abs(pct - want);
+      const ok = !!gauge && !trend && !rail && (drift === null || drift <= 1.5);
+      if (!ok) meters.bad.push(label);
+      bits.push(label + '=' + (isNaN(pct) ? '无环' : round2(pct) + '%') +
+        (trend ? ' 有曲线✗' : '') + (rail ? ' 有血条✗' : '') +
+        (drift !== null && drift > 1.5 ? ' 读数不符✗(' + round2(want) + '%)' : ''));
     });
-  }
+    meters.lines.push('GPU' + position + ': ' + bits.join(' · '));
+  });
 
   say('');
-  say('—— 双卡标尺 ——');
-  if (ruler.rows > 1) {
-    ruler.lines.forEach(function (line) { say('  ' + line); });
-    say('  结论: ' + (ruler.bad.length
-      ? '✗ 有行各画各的（' + ruler.bad.join(', ') + '）'
-      : '✓ 三行共用一把标尺（整机行的总功耗/显存合计也在其中）'));
+  say('—— 双卡仪表 ——');
+  if (meters.rows) {
+    meters.lines.forEach(function (line) { say('  ' + line); });
+    say('  结论: ' + (meters.bad.length
+      ? '✗ 有卡没变成仪表盘（' + meters.bad.join(', ') + '）'
+      : '✓ ' + meters.rows + ' 行 × 4 张全是仪表盘，无曲线无血条，弧长与读数一致'));
   } else {
-    say('  ' + ruler.rows + ' 行显卡卡，单卡不需要对齐');
+    say('  没有显卡行（采集不可用？）');
   }
 
   say('');
@@ -1418,14 +1418,14 @@ function readFrames(base, count, timeoutMs) {
   const gpuPickOk = !gpuPick.multi || !!gpuPick.ok;
   // An unexplained blank where the per-slot breakdown should be is the report
   // this harness was asked to chase down, so it fails the run like anything else.
-  // A stacked pair of rows drawn against two different rulers is the failure
-  // the 2026-11-14 change exists for, so it fails the run like the rest.
-  const rulerOk = ruler.rows < 2 || ruler.bad.length === 0;
+  // A GPU card that lost its gauge (or quietly kept its curve) is the failure
+  // the 2026-11-15 change exists for, so it fails the run like the rest.
+  const metersOk = meters.bad.length === 0;
   const code = (errors.length || !routingOk || !silentOk || frozenCards || frozenLedger ||
     brokenContract || !degrade.ok || noFill || !liveSlotsOk || !quietOk ||
     !soloOk || !soloClearsOk || !handover.ok || !resetGateOk || !hdrOk ||
     !verOk || !rowVerOk || !rankOk || !langOk || !langLeaksOk || !ttftOk || !tabOk ||
-    !energyOk || !gpuPickOk || !readOnly.ok || !rulerOk) ? 1 : 0;
+    !energyOk || !gpuPickOk || !readOnly.ok || !metersOk) ? 1 : 0;
 
   // Exit explicitly.  The page arms a setInterval watchdog, which keeps the
   // jsdom event loop alive forever; leaving the process to die on its own

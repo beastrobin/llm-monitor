@@ -204,19 +204,15 @@ function roundRect(g, x, y, w, h, r) {
   g.closePath();
 }
 
-// The y-window a chart draws into, lifted out of drawSpark so more than one
-// card can share it.
+// The y-window a chart draws into.
 //
-// One series picking its own window is fine while there is one card.  With two
-// identical cards stacked on the same page it is actively misleading: 80 W and
-// 110 W both fill their box top to bottom, and 64 GB against 5 GB of VRAM draw
-// two curves of the same height.  ``shareDualRulers`` therefore computes one
-// window from every card's series and hands it to each of them as ``shared`` --
-// "尽量对齐" without dropping to the fixed 0-100% range, which would flatten an
-// idle card's shape into a one-pixel sliver.
+// Each chart picks its own window from its own series: with the GPU rows turned
+// into meters (2026-11-15) no two charts on the page measure the same thing any
+// more, so there is nothing left to align.  A fixed range would flatten a live
+// curve's shape into a sliver, hence the zoom below.
 //
-// ``holder`` is anything that can carry the ``_ceiling`` the smoothing keeps:
-// a canvas for a lone chart, a plain ``{}`` for a window several share.
+// ``holder`` carries the ``_ceiling`` the smoothing keeps -- a canvas, in
+// practice.
 function sparkWindow(holder, clean, opts) {
   const baseMin = (opts.min === undefined || opts.min === null) ? null : opts.min;
   const baseMax = (opts.max === undefined || opts.max === null) ? null : opts.max;
@@ -310,16 +306,11 @@ function drawSpark(canvas, data, options) {
   const fmt = opts.format || function (v) { return defaultFormat(v, opts.decimals); };
 
   const clean = cleanSeries(values);
-  // A window several cards share is already computed when the row was built;
-  // otherwise this chart picks its own (the single-card case, unchanged).
-  const shared = opts.shared;
-  const box = (shared && isFinite(shared.min) && isFinite(shared.max))
-    ? shared
-    : sparkWindow(canvas, clean, opts);
+  const box = sparkWindow(canvas, clean, opts);
   const min = box.min;
   const max = box.max;
   // Parked on the element like _spark/_geom: the render harness reads it to
-  // prove the twin rows really are drawing against one ruler.
+  // prove the axis labels match the window the curve was actually drawn into.
   canvas._window = { min: min, max: max };
 
   const showAxis = opts.axis !== false;
@@ -689,7 +680,8 @@ function buildCards(container, specs) {
           '<div class="card-visual gauge-visual"><div class="gauge" data-role="gauge"' +
             ' role="img" aria-label="' + esc(spec.label) + '：暂无数据">' +
             '<div class="gauge-inner"><span class="card-value" data-role="value">—</span></div>' +
-          '</div><div class="gauge-endpoints"><span>0%</span><span>100%</span></div></div>' +
+          '</div><div class="gauge-endpoints" data-role="ends">' +
+            '<span>0%</span><span>100%</span></div></div>' +
           '<div class="card-foot" data-role="foot"></div>' +
         '</div></div>';
     }
@@ -720,6 +712,7 @@ function buildCards(container, specs) {
       bar: root.querySelector('[data-role="bar"]'),
       fill: root.querySelector('[data-role="fill"]'),
       gauge: root.querySelector('[data-role="gauge"]'),
+      ends: root.querySelector('[data-role="ends"]'),
       label: spec.label,
       horizontal: spec.barDir === 'h',
       tag: root.querySelector('[data-role="tag"]'),
@@ -775,6 +768,14 @@ function paintCards(refs, values) {
       ref.gauge.className = 'gauge' + (ratio === null ? ' empty' : '') +
         (value.barClass ? ' ' + value.barClass : '');
       ref.gauge.style.setProperty('--gauge-pct', ratio === null ? '0%' : (ratio * 100) + '%');
+      // The scale ends are per-card: a usage ring runs 0–100%, but the
+      // temperature ring spans 30–90°C and the power ring stops at the wall
+      // that card is capped to.  Printing "0% / 100%" under those would name a
+      // scale the ring is not drawn against.
+      if (ref.ends && value.ends && value.ends.length === 2) {
+        ref.ends.children[0].textContent = value.ends[0];
+        ref.ends.children[1].textContent = value.ends[1];
+      }
       if (ratio === null) {
         ref.gauge.setAttribute('role', 'img');
         ref.gauge.removeAttribute('aria-valuenow');
@@ -1707,12 +1708,15 @@ function renderEndpoints(snapshot) {
         ? '<div class="hero" data-role="hero">' +
           '<div class="hero-top"><span class="hero-label">' + esc(e === current ? 'running' : e.label) + '</span>' +
             '<span class="hero-port">' + esc(portOf(e.base_url) || '?') + '</span>' +
+            // The spec tags (context / slots / MTP) ride on the title row beside
+            // the port chip instead of taking a row of their own at the bottom
+            // of the hero -- same information, one line less height (2026-11-15).
+            '<span class="hero-tags">' + modelTags(heroModel) + '</span>' +
             (e.engine_version
               ? '<span class="engine-ver" title="当前服务这个模型的引擎构建版本">' + esc(e.engine_version) + '</span>'
               : '') + '</div>' +
           '<div class="hero-core"><span class="hero-name">' + esc(shortModelName(heroModel.id)) + '</span>' +
             '<span data-role="hero-lamps"></span></div>' +
-          '<div class="hero-tags">' + modelTags(heroModel) + '</div>' +
           '</div>'
         : '';
       // The live tracker's failure note belongs on its own source's card:
@@ -1774,24 +1778,31 @@ function renderEndpoints(snapshot) {
 // One card's four headline metrics.  Drawn once per GPU, so a two-card machine
 // gets two rows of identical cards that line up column for column -- reading
 // GPU0 against GPU1 down one column is the whole point of the second row.
+//
+// All four are METERS, not trends (user, 2026-11-15: "4 个卡片都变成仪表盘，
+// 取消曲线图和血条").  A ratio card is asking "how full is it right now", and a
+// ring answers that in one glance without the reader having to decode a curve's
+// axis; the left rail went with them because the ring already carries the same
+// fill.  History is not lost -- the 历史 tab still plots gpu0.power and friends
+// from the server's series.
 const GPU_SYS_SPECS = [
   cardSpec('util', '显卡利用率', {
-    bar: true,
+    view: 'gauge',
     tip: 'nvidia-smi 的 utilization.gpu，采样区间内 SM 处于工作状态的时间占比。' +
       '批量推理时它常常很低，因为瓶颈在显存带宽而不是算力。',
   }),
   cardSpec('mem', '显存占用', {
-    bar: true,
+    view: 'gauge',
     tip: '已用显存 ÷ 总显存。脚注里的上限就是这张卡的全部显存。' +
       '注意 WDDM 驱动下 nvidia-smi 不给每进程显存。',
   }),
   cardSpec('temp', '核心温度', {
-    bar: true,
-    tip: 'GPU 核心温度。进度条按 30–90°C 换算占用比例，' +
+    view: 'gauge',
+    tip: 'GPU 核心温度。圆环按 30–90°C 换算占用比例，' +
       '75°C 转黄、83°C 转红并在脚注直接写明温度偏高。',
   }),
   cardSpec('power', '功耗', {
-    bar: true,
+    view: 'gauge',
     tip: '当前功耗 ÷ 功耗上限。上限优先取软件功耗墙（nvidia-smi -pl 写进去的那个）；' +
       '笔记本 GPU 根本不上报软件墙，那里显示的是驱动实际生效的上限，' +
       '由 Dynamic Boost 在最大 TGP 之内动态调整，所以会在一个区间里浮动。' +
@@ -2028,78 +2039,17 @@ function renderSystem(snapshot) {
     }
     return { row: row, refs: refs, values: values };
   });
-  shareDualRulers(drawn);
   drawn.forEach(function (entry) {
     if (entry.refs) paintCards(entry.refs, entry.values);
   });
 }
 
-// One ruler for the cards that sit on the same page, side by side.
-//
-// Stacking the GPU rows into one column grid lines them up left to right, but
-// each curve still picked its OWN y-window: 80 W on GPU0 and 110 W on GPU1 both
-// filled their box top to bottom, and 64 GB against 5 GB of VRAM drew two
-// curves of the same height.  With twin cards that is the one comparison the
-// block exists for, so every per-card metric now takes a single window computed
-// from all cards' series ("尽量对齐" -- zoomed to the data, but zoomed TOGETHER).
-// Axis labels print that window, so both rows show the same two numbers and the
-// curves can be read across.
-//
-// The ledger / host cards are untouched: there is exactly one of each, and
-// their series are not comparable to a GPU's.  The machine-wide row is the
-// exception, because two of its four cards ARE the same measurement: 显存合计 is
-// a capacity-weighted ratio (0-1, the unit a card's own 显存占用 reports), so it
-// shares the window outright.  显卡总功耗 is a SUM --
-// two cards at 300 W read 600 W, twice the tallest single-card curve -- so it
-// joins the union rather than being squeezed into the per-card window (which
-// would clip it flat against the top edge).  All three rows then print the same
-// pair of numbers, with the totals riding above the halves: that IS what a sum
-// looks like next to its parts.  利用率 and 核心温度 have no machine-wide twin,
-// so their windows stay per-card.
-const DUAL_RULER_METRICS = ['util', 'mem', 'temp', 'power'];
-const FLEET_RULER_CARDS = { mem: 'fleetmem', power: 'fleetpower' };
-// The window's own smoothing state (``_ceiling``) lives here rather than on a
-// canvas, so it survives the per-frame repaint the way a lone chart's does.
-const dualRulers = {};
-
-function shareDualRulers(entries) {
-  const cards = entries.filter(function (entry) { return entry.row.kind === 'gpu'; });
-  if (cards.length < 2) return;
-  // The 整机 row, when it exists (it is there exactly when there are 2+ cards).
-  const fleet = entries.filter(function (entry) {
-    return entry.row.kind === 'host' && entry.values;
-  })[0];
-  DUAL_RULER_METRICS.forEach(function (key) {
-    const members = [];
-    cards.forEach(function (entry) {
-      const value = entry.values[key];
-      if (value && value.series) members.push(value);
-    });
-    const fleetKey = FLEET_RULER_CARDS[key];
-    const fleetValue = fleet && fleetKey ? fleet.values[fleetKey] : null;
-    if (fleetValue && fleetValue.series) members.push(fleetValue);
-    if (members.length < 2) return;
-    const all = [];
-    members.forEach(function (value) {
-      const clean = cleanSeries(value.series);
-      for (let i = 0; i < clean.length; i++) all.push(clean[i]);
-    });
-    // No readings at all: nothing to align and nothing drawn.  Below the 8
-    // samples a zoom wants, sparkWindow() hands back the metric's own fixed
-    // range -- the same pair for every card, so the rows are aligned from the
-    // first sample and only start zooming (together) once there is history.
-    if (all.length < 2) return;
-    const base = members[0].sparkOptions || {};
-    if (!dualRulers[key]) dualRulers[key] = {};
-    const window = sparkWindow(dualRulers[key], all, base);
-    members.forEach(function (value) {
-      // Only the window is shared -- each card keeps its own colour (a hot card
-      // draws red on its own, and sharing the options object would repaint the
-      // cool one red too).
-      value.sparkOptions = Object.assign({}, value.sparkOptions, { shared: window });
-    });
-  });
-}
+// The GPU rows used to share one y-window per metric so two stacked curves could
+// be read across (v1.20/v1.21).  They are meters now -- a ring has no axis to
+// align, and the two rows answer "which card is fuller" by arc length on the
+// same 0-100 scale -- so the shared-ruler machinery was removed with them
+// (2026-11-15).  The 整机 row keeps its own curves; each is a single card with
+// nothing to align against.
 
 // One card's four vitals.  Every GPU row is drawn from here, so the flat row
 // and a per-card row cannot drift apart.
@@ -2124,50 +2074,38 @@ function gpuCardValues(gpu, index) {
       text: gpu ? num(gpu.util_pct, 0) : '—', unit: gpu ? '%' : '',
       bar: gpu ? (gpu.util_pct || 0) / 100 : null,
       barClass: 't-d',
+      ends: ['0%', '100%'],
       foot: gpu
         ? 'SM ' + countText(gpu.clock_sm_mhz) + ' MHz · 显存 ' + countText(gpu.clock_mem_mhz) + ' MHz'
         : '显卡不可用',
-      series: seriesOf('gpu' + index + '.util'),
-      sparkOptions: {
-        min: 0, max: 100, color: cssVar('--chart-d'), autoscale: true,
-        format: function (v) { return num(v, 0) + '%'; },
-      },
     },
     mem: {
       text: gpu ? gb(gpu.mem_used_mb, 1) : '—', unit: gpu ? 'GB' : '', bar: memRatio,
       barClass: memTight ? 'bad' : (gpu && (memRatio || 0) > 0.8 ? 'warn' : 't-e'),
+      ends: ['0%', '100%'],
       foot: gpu ? '上限 ' + gb(gpu.mem_total_mb, 1) + ' GB' + (memTight ? ' · 接近上限' : '') : '显卡不可用',
-      series: seriesOf('gpu' + index + '.mem'),
-      sparkOptions: {
-        min: 0, max: 1, color: cssVar('--chart-e'), autoscale: true,
-        format: function (v) { return num(v * 100, 0) + '%'; },
-      },
     },
     temp: {
       text: gpu ? num(temp, 0) : '—', unit: gpu ? '°C' : '', bar: tempRatio,
       barClass: hot ? 'bad' : (warm ? 'warn' : 't-f'),
+      // The ring's own scale, not 0–100%: 30°C is an idle card and 90°C is the
+      // point past which the driver starts trimming clocks.
+      ends: ['30°', '90°'],
       foot: gpu
         ? (hot ? '温度偏高，注意散热' : '风扇 ' + num(gpu.fan_pct, 0) + '%')
         : '显卡不可用',
-      series: seriesOf('gpu' + index + '.temp'),
-      sparkOptions: {
-        min: 30, max: 95, color: hot ? cssVar('--bad') : cssVar('--chart-f'), autoscale: true,
-        format: function (v) { return num(v, 0) + '°'; },
-      },
     },
     power: {
       text: gpu ? num(gpu.power_w, 0) : '—', unit: gpu ? 'W' : '', bar: powerRatio,
       barClass: (powerRatio || 0) > 0.95 ? 'warn' : 't-g',
+      // Right end = the wall this card is actually capped to, so a 300 W card
+      // at 306 W reads as "full" instead of "58%" of some unrelated ceiling.
+      ends: ['0 W', powerCeiling === null ? '—' : num(powerCeiling, 0) + ' W'],
       foot: gpu
         ? (powerCeiling !== null
             ? '上限 ' + num(powerCeiling, 0) + ' W' + (powerDynamic ? ' · 动态' : '')
             : '上限 — W')
         : '显卡不可用',
-      series: seriesOf('gpu' + index + '.power'),
-      sparkOptions: {
-        min: 0, color: cssVar('--chart-g'), autoscale: true,
-        format: function (v) { return num(v, 0); },
-      },
     },
   };
 }

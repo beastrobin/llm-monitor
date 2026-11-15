@@ -1803,9 +1803,25 @@ button:focus-visible, summary:focus-visible, .tip:focus-visible { outline: 2px s
 .gauge.good { --gauge-color: var(--good); }
 .gauge.warn { --gauge-color: var(--warn); }
 .gauge.bad { --gauge-color: var(--bad); }
+/* One colour per metric, the same chart-* family the rails and curves used, so
+   a card keeps its identity after turning into a ring (2026-11-15). */
+.gauge.t-a { --gauge-color: var(--chart-a); }
+.gauge.t-b { --gauge-color: var(--chart-b); }
 .gauge.t-c { --gauge-color: var(--chart-c); }
+.gauge.t-d { --gauge-color: var(--chart-d); }
+.gauge.t-e { --gauge-color: var(--chart-e); }
+.gauge.t-f { --gauge-color: var(--chart-f); }
 .gauge.t-g { --gauge-color: var(--chart-g); }
+.gauge.t-h { --gauge-color: var(--chart-h); }
 .gauge-card .card-foot { text-align: center; }
+/* 硬件遥测的四张卡是仪表盘（2026-11-15：取消曲线与左侧血条）。环比模型区的
+   略小一圈 —— 两行显卡 + 一行整机都换成环的话，环按 94px 走会把硬件区撑高
+   一大截，而 84px 装 "63.8 GB" 仍然够。 */
+#sys .gauge-card .card-body { align-items: center; }
+#sys .gauge-visual { min-height: 96px; gap: 4px; }
+#sys .gauge { width: 84px; height: 84px; padding: 7px; }
+#sys .gauge .card-value { font-size: 17px; }
+#sys .gauge-endpoints { width: 98px; }
 @media (max-width: 720px) {
   .gauge { width: 80px; height: 80px; padding: 7px; }
   .gauge .card-value { font-size: 17px; }
@@ -1904,6 +1920,10 @@ body {
 .endpoint .hero-name { font-size: clamp(22px, 2.4vw, 35px); font-weight: 720; letter-spacing: -.055em; line-height: 1.15; text-shadow: 0 0 25px color-mix(in srgb, var(--accent) 18%, transparent); }
 .hero-core [data-role="hero-lamps"] { margin-left: 0; }
 .hero-tags { gap: 7px; }
+/* The spec tags ride the title row now (2026-11-15), so they must not push the
+   engine build off its right-aligned edge: they shrink and wrap before the
+   auto margin does. */
+.hero-top .hero-tags { flex: 0 1 auto; }
 .hero-tags .tag { background: color-mix(in srgb, var(--panel) 65%, transparent); border-color: color-mix(in srgb, var(--accent) 19%, var(--border)); }
 .endpoint .card { background: linear-gradient(150deg, color-mix(in srgb, var(--accent) 2%, var(--panel)), var(--panel) 65%); border-radius: 10px; }
 .endpoint .card:hover, #sys .card:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); transform: translateY(-2px); }
@@ -2126,17 +2146,24 @@ body {
   .model > .grid .gauge-card { grid-column: 1 / -1; }
   .model > .grid [data-card="ttft"] { grid-column: 1 / -1; }
   .model > .grid [data-card="ttft"] .spark { display: none; }
-  .gauge-card .card-body { display: flex; flex-direction: row; align-items: center; gap: 8px; }
-  .gauge-head { flex: none; }
-  .gauge-head .tip { margin-left: 0; }
-  .gauge-visual { flex: 1 1 0px; min-width: 0; display: block; min-height: 0; margin-top: 0; }
-  .gauge { width: 100%; height: 14px; padding: 0; border-radius: 7px; position: relative; flex: initial;
+  /* 横条形态只给模型区（比例卡）。硬件行的四张卡要的是仪表盘 —— 把它们也
+     压成横条，就正好回到了用户 2026-11-15 说要取消的那根血条。 */
+  .endpoint .gauge-card .card-body { display: flex; flex-direction: row; align-items: center; gap: 8px; }
+  .endpoint .gauge-head { flex: none; }
+  .endpoint .gauge-head .tip { margin-left: 0; }
+  .endpoint .gauge-visual { flex: 1 1 0px; min-width: 0; display: block; min-height: 0; margin-top: 0; }
+  .endpoint .gauge { width: 100%; height: 14px; padding: 0; border-radius: 7px; position: relative; flex: initial;
     background: linear-gradient(90deg, var(--gauge-color) 0 var(--gauge-pct), var(--track) var(--gauge-pct) 100%); }
-  .gauge-inner { width: auto; height: auto; position: absolute; right: 4px; top: -1px;
+  .endpoint .gauge-inner { width: auto; height: auto; position: absolute; right: 4px; top: -1px;
     background: color-mix(in srgb, var(--panel) 88%, transparent); display: block;
     padding: 0 5px; border-radius: 5px; }
-  .gauge .card-value { font: 600 11px/1.4 var(--font-mono); text-shadow: none; }
-  .gauge-endpoints { display: none; }
+  .endpoint .gauge .card-value { font: 600 11px/1.4 var(--font-mono); text-shadow: none; }
+  .endpoint .gauge-endpoints { display: none; }
+  /* 窄窗里的硬件环：四列一排，环只能缩到 58px，再大就把行撑回一屏。 */
+  #sys .gauge-visual { min-height: 0; gap: 3px; }
+  #sys .gauge { width: 58px; height: 58px; padding: 5px; }
+  #sys .gauge .card-value { font-size: 13px; }
+  #sys .gauge-endpoints { display: none; }
   .compact-toggle { padding: 5px 9px; }
   .model-toggle { margin-top: 6px; }
   .slot-detail { margin-top: 6px; }
