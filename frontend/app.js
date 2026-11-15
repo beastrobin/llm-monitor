@@ -1652,7 +1652,6 @@ function renderEndpoints(snapshot) {
     });
     return out;
   });
-  renderDeploymentBrief(snapshot, deduped);
   // Every server with a loaded model gets its own card.  Taking only the
   // first one dropped the others entirely: with hermes and strata both up,
   // strata's chip said 在线 while its model, rates and context sat on no
@@ -1768,64 +1767,6 @@ function renderEndpoints(snapshot) {
       }
     }
   });
-}
-
-function renderDeploymentBrief(snapshot, endpoints) {
-  const host = document.getElementById('deployment-brief');
-  if (!host) return;
-  const online = endpoints.filter(function (e) { return e.up; }).length;
-  const models = [];
-  const seen = new Set();
-  endpoints.forEach(function (e) {
-    (e.models || []).forEach(function (model) {
-      if (model.loaded === false) return;
-      const key = e.id + '/' + model.id;
-      if (seen.has(key)) return;
-      seen.add(key);
-      models.push(model);
-    });
-  });
-  const requestTotals = function (key) {
-    const values = models.map(function (m) { return m.metrics && m.metrics[key]; })
-      .filter(function (v) { return typeof v === 'number' && Number.isFinite(v); });
-    return values.length ? values.reduce(function (sum, v) { return sum + v; }, 0) : null;
-  };
-  const processing = requestTotals('requests_processing');
-  const queued = requestTotals('requests_deferred');
-  const gpus = snapshot.gpu && snapshot.gpu.available ? (snapshot.gpu.gpus || []) : [];
-  const measured = gpus.filter(function (g) {
-    return typeof g.mem_total_mb === 'number' && typeof g.mem_used_mb === 'number' &&
-      Number.isFinite(g.mem_total_mb) && Number.isFinite(g.mem_used_mb) && g.mem_total_mb > 0;
-  });
-  const totalMb = measured.reduce(function (sum, g) { return sum + g.mem_total_mb; }, 0);
-  const freeMb = measured.reduce(function (sum, g) {
-    return sum + Math.max(0, g.mem_total_mb - g.mem_used_mb);
-  }, 0);
-  const roomiest = measured.reduce(function (best, g, position) {
-    const free = Math.max(0, g.mem_total_mb - g.mem_used_mb);
-    return !best || free > best.free ? { free: free, index: g.index === undefined ? position : g.index } : best;
-  }, null);
-  const cards = [
-    { label: '服务可达', value: online + ' / ' + endpoints.length,
-      foot: '已配置端点 · 按来源去重', tone: online ? 'good' : 'quiet' },
-    { label: '已加载模型', value: String(models.length),
-      foot: models.length === 1 ? shortModelName(models[0].id) :
-        (models.length ? models.length + ' 个可服务模型' : '等待模型加载'),
-      tone: models.length ? 'accent' : 'quiet' },
-    { label: '处理中', value: processing === null ? '—' : String(processing),
-      foot: queued === null ? '排队数据未上报' : '排队 ' + queued + ' 个请求',
-      tone: queued > 0 ? 'warn' : 'accent' },
-    { label: '单卡最大余量', value: roomiest ? gb(roomiest.free, 1) : '—',
-      unit: measured.length ? 'GB' : '',
-      foot: roomiest ? 'GPU' + roomiest.index + ' · 全部空闲合计 ' + gb(freeMb, 1) + ' GB' : '显卡未上报容量',
-      tone: measured.length && freeMb / totalMb < 0.1 ? 'warn' : 'accent' },
-  ];
-  host.innerHTML = cards.map(function (c) {
-    return '<div class="brief-card ' + c.tone + '"><div class="brief-label">' + esc(c.label) +
-      '</div><div class="brief-value">' + esc(c.value) +
-      (c.unit ? '<span>' + esc(c.unit) + '</span>' : '') +
-      '</div><div class="brief-foot">' + esc(c.foot) + '</div></div>';
-  }).join('');
 }
 
 // ---------------------------------------------------------------- system cards
@@ -3563,8 +3504,8 @@ function initSectionNav() {
 
 // ── 窄屏（≤640px）密度模式 ──────────────────────────────────────────
 // 600 宽的侧窗是常驻监看用的：折叠是宽屏逻辑，窄屏恰恰相反——
-// 详细指标 / 整机行 / 历史默认展开，用户手动收起的选择持久化；
-// 页首「运行概览」标题行整行让位给数据，新鲜度灯搬进顶栏。
+// 详细指标 / 整机行 / 历史默认展开，用户手动收起的选择持久化。
+// 新鲜度灯常驻顶栏（页首标题行已于 2026-11-15 整体删除），这里不再搬运。
 var NARROW_QUERY = '(max-width: 640px)';
 var NARROW = window.matchMedia
   ? window.matchMedia(NARROW_QUERY)
@@ -3587,19 +3528,7 @@ function modelExpanded(endpointId, modelId) {
   return S.openModels.has(key);
 }
 function initNarrowMode() {
-  const head = document.querySelector('.workspace-head');
-  const fresh = document.getElementById('freshness');
-  const navHost = document.querySelector('.topbar-right');
-  const meta = document.getElementById('meta');
   const SECTIONS = [['resource-toggle', 'resource-info'], ['history-toggle', 'history-info']];
-  function placeFreshness() {
-    if (!head || !fresh || !navHost || !meta) return;
-    if (NARROW.matches) {
-      if (fresh.parentNode !== navHost) navHost.insertBefore(fresh, meta);
-    } else if (fresh.parentNode !== head) {
-      head.appendChild(fresh);
-    }
-  }
   function applySectionDefaults() {
     // 宽屏永远展开（折叠样式只活在窄屏媒体查询里），窄屏默认展开、
     // 尊重持久化的手动收起。
@@ -3612,7 +3541,7 @@ function initNarrowMode() {
       button.setAttribute('aria-expanded', String(open));
     });
   }
-  function apply() { placeFreshness(); applySectionDefaults(); }
+  function apply() { applySectionDefaults(); }
   apply();
   NARROW.addEventListener('change', apply);
 }

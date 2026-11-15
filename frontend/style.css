@@ -1690,10 +1690,8 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
   --axis: #8392aa;
 }
 main { max-width: 1920px; margin: 0 auto; padding-bottom: 32px; gap: 24px; }
-.workspace-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
-.eyebrow { font: 10px/1.5 var(--font-mono); color: var(--muted); letter-spacing: .14em; }
-.workspace-head h2 { margin: 3px 0 0; font-size: 24px; letter-spacing: -.04em; font-weight: 650; }
-.freshness { flex: none; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+/* 页首标题条已删除（2026-11-15），新鲜度灯常驻顶栏，紧挨 #meta 之前。 */
+.freshness { flex: none; display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; cursor: default; }
 .freshness::before { content: ''; width: 6px; height: 6px; background: var(--good); border-radius: 50%; }
 .freshness.stale::before { background: var(--warn); }
 .stale-notice { border: 1px solid var(--warn); border-radius: 8px; padding: 10px 14px; color: var(--warn); background: color-mix(in srgb, var(--warn) 7%, var(--panel)); }
@@ -1736,7 +1734,6 @@ button:focus-visible, summary:focus-visible, .tip:focus-visible { outline: 2px s
   .topbar-right #power-control { flex: 1 1 100%; max-width: 100%; }
   .power-control.top .pw-row { gap: 6px; }
   .pw-group { flex-wrap: wrap; min-width: 0; }
-  .workspace-head h2 { font-size: 22px; }
   .grid.compact, .endpoint .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .grid, .slot-cards { gap: 10px; }
   .card, .grid.compact .card { padding: 11px; }
@@ -1759,39 +1756,8 @@ button:focus-visible, summary:focus-visible, .tip:focus-visible { outline: 2px s
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
 
-/* Deployment-first dashboard. The brief uses only fields present in each snapshot. */
-.deployment-brief {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: -6px;
-}
-.brief-card {
-  position: relative;
-  min-width: 0;
-  overflow: hidden;
-  padding: 15px 17px 13px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-}
-.brief-card::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background: var(--accent);
-}
-.brief-card.good::before { background: var(--good); }
-.brief-card.warn::before { background: var(--warn); }
-.brief-card.quiet::before { background: var(--faint); }
-.brief-label { font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .03em; }
-.brief-value { margin-top: 6px; font: 600 25px/1.15 var(--font-mono); color: var(--text); letter-spacing: -.045em; font-variant-numeric: tabular-nums; }
-.brief-value span { margin-left: 5px; color: var(--muted); font: 400 11px/1.2 var(--font-mono); letter-spacing: 0; }
-.brief-foot { margin-top: 9px; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Deployment-first dashboard.  The four-KPI brief strip that used to sit here
+   was removed on 2026-11-15: every number on it repeated a card below. */
 .section-context { color: var(--muted); font: 10px/1.5 var(--font-mono); letter-spacing: .07em; }
 #model-info { padding: 16px; border-radius: 14px; background: color-mix(in srgb, var(--accent) 3%, var(--bg)); border: 1px solid var(--border-soft); }
 #model-info .block-head { align-items: center; }
@@ -1805,14 +1771,7 @@ button:focus-visible, summary:focus-visible, .tip:focus-visible { outline: 2px s
 .endpoint .hero-name { font-size: 18px; letter-spacing: -.025em; }
 .endpoint .hero-port { background: var(--panel-soft); border: 1px solid var(--border); padding: 2px 7px; border-radius: 5px; }
 .endpoint .card { background: var(--panel); }
-@media (max-width: 1050px) {
-  .deployment-brief { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
 @media (max-width: 720px) {
-  .deployment-brief { gap: 8px; }
-  .brief-card { padding: 12px; }
-  .brief-value { font-size: 21px; }
-  .brief-foot { font-size: 10px; }
   #model-info { padding: 12px; }
   #model-info .head-extra { margin-left: 0; }
   .section-context { display: none; }
@@ -1912,16 +1871,8 @@ body {
 .topbar { background: color-mix(in srgb, var(--panel) 90%, transparent); backdrop-filter: blur(18px); }
 .brand::before { content: ''; flex: none; width: 14px; height: 14px; border-radius: 4px; transform: rotate(45deg); background: linear-gradient(135deg, var(--accent), var(--chart-c)); box-shadow: 0 0 15px color-mix(in srgb, var(--accent) 40%, transparent); }
 .brand h1 { font-size: 14px; font-weight: 700; }
-.workspace-head { padding: 6px 2px 0; }
-.workspace-head .eyebrow { color: var(--accent); letter-spacing: .19em; }
-.workspace-head h2 { font-size: clamp(26px, 2.2vw, 34px); font-weight: 730; letter-spacing: -.06em; }
 .freshness { padding: 5px 10px; border-radius: 999px; background: color-mix(in srgb, var(--good) 9%, var(--panel)); border: 1px solid color-mix(in srgb, var(--good) 22%, var(--border)); }
 .freshness.stale { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--panel)); border-color: color-mix(in srgb, var(--warn) 25%, var(--border)); }
-.brief-card { border-top: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border)); background: linear-gradient(145deg, color-mix(in srgb, var(--accent) 4%, var(--panel)), var(--panel) 52%); }
-.brief-card.good { background: linear-gradient(145deg, color-mix(in srgb, var(--good) 9%, var(--panel)), var(--panel) 56%); }
-.brief-card.warn { background: linear-gradient(145deg, color-mix(in srgb, var(--warn) 10%, var(--panel)), var(--panel) 56%); }
-.brief-card::before { width: 4px; }
-.brief-value { font-size: 28px; letter-spacing: -.06em; }
 #model-info { padding: 0; border: 0; background: none; }
 #model-info .block-head { margin-bottom: 14px; }
 .block-head h2 { font-size: 17px; letter-spacing: -.03em; }
@@ -1961,7 +1912,6 @@ body {
 #resource-info .sys-tag { letter-spacing: .08em; }
 .hist-tabs button.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
 @media (max-width: 720px) {
-  .brief-value { font-size: 22px; }
   .endpoint .hero { margin: -2px -2px 14px; padding: 17px; }
   .endpoint .hero-name { font-size: clamp(21px, 6vw, 29px); }
   .hero-top .engine-ver { flex: 1 1 100%; margin-left: 0; }
@@ -1972,12 +1922,6 @@ body {
 /* Dense desktop telemetry: all six inference readings share one scan line. */
 @media (min-width: 1280px) {
   main { gap: 16px; padding-top: 15px; }
-  .workspace-head { padding-top: 0; }
-  .deployment-brief { margin-top: -2px; gap: 10px; }
-  .brief-card { padding: 10px 14px 9px; }
-  .brief-label { font-size: 10px; }
-  .brief-value { font-size: 24px; margin-top: 2px; }
-  .brief-foot { margin-top: 5px; }
   .endpoint .model > .grid { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 9px; }
   .endpoint .model > .grid .card { padding: 10px; }
   .endpoint .model > .grid .card-head .card-value { font-size: 22px; }
@@ -2060,14 +2004,6 @@ body {
   .topbar-right button { padding: 6px 9px; }
   .section-nav { display: none; }
   main { gap: 13px; padding: 12px 12px 28px; }
-  .workspace-head { padding: 0 2px; }
-  .workspace-head .eyebrow { font-size: 9px; }
-  .workspace-head h2 { font-size: 22px; }
-  .deployment-brief { gap: 7px; margin: 0; }
-  .brief-card { min-height: 71px; padding: 8px 10px 7px; }
-  .brief-label { font-size: 10px; }
-  .brief-value { margin-top: 3px; font-size: 19px; }
-  .brief-foot { margin-top: 4px; font-size: 9px; }
   #model-info { padding: 10px; }
   #model-info .block-head { gap: 7px; margin-bottom: 8px; }
   #model-info .head-extra { gap: 6px; }
@@ -2146,12 +2082,8 @@ body {
   #meta { min-width: 0; font-size: 10px; }
   .topbar-right #freshness { padding: 3px 8px; font-size: 10px; }
 
-  /* 页首标题行整行让位（新鲜度灯已被 JS 搬进顶栏，节点不会消失）；
-     概览 4 KPI 卡整体隐藏——服务可达有歧义（被并卡的 hermes 记离线）、
-     已加载模型/处理中在 hero 状态灯与 slot 条里本来就有，显存余量看
-     硬件遥测的显存卡。宽屏保留这条摘要。 */
-  .workspace-head { display: none; }
-  .deployment-brief { display: none; }
+  /* 页首标题行与 4 KPI 概览卡已在 2026-11-15 整体删除（宽屏一起删），
+     窄屏不必再隐藏；新鲜度灯常驻顶栏。 */
 
   /* 推理服务标题行：h2+来源 chip 一行，token 统计四列一行（head-extra 让位成
       contents，两个子节点直接成为 block-head 的 flex 成员） */
