@@ -18,14 +18,20 @@ What the collector translates, and why each translation needs code:
   the parent mapping reads the absence as "unloaded" -- which would empty
   the card of the one model the process actually serves.  One
   MegaCapybara process loads exactly one model, so every listed model is
-  stamped ``loaded: True``.
+  stamped ``loaded: True``.  The id is taken from ``gateway.realModel`` when
+  the launcher's gateway is in front (see :meth:`list_models`).
 * **No counter dialect.**  ``/stats`` carries the lifetime token totals
   (``tokens_prefilled`` / ``tokens_generated``) -- enough for the ledger to
   book -- but no seconds, no cached split and no draft counters, so those
   stay ``None`` and the derived averages read "—" rather than guessing.
   The instantaneous rates come from the engine's own ``decode_tps`` /
   ``prefill_tps`` instead of counter deltas: there are no counters to
-  difference on.
+  difference on.  The ``decode_tps`` gauge reads 0.0 even while decoding,
+  so the working jobs' own ``tok_per_s`` is the fallback.
+* **Job states are classified by their numbers, not their words.**  The
+  engine's vocabulary (``prefill``, ``tool call``, ``parked``) is not the
+  one this dashboard uses (``reading`` / ``generating``); see
+  :func:`_job_phase`.
 * **Slots are the working jobs, and only those.**  ``jobs[]`` mixes the
   working conversations with the *parked conversation cache* (held in the
   RAM tier, resumable).  A machine with four concurrency slots can carry
@@ -44,9 +50,56 @@ import time
 
 from .llama import LlamaEndpoint, _get_json, _ratio
 
-# The two job states that do work; every other state (parked, swapped,
-# waiting...) keeps its context but carries no live rate.
-_BUSY_STATES = ("reading", "generating")
+# The job states that hold a concurrency slot.  A parked or swapped row is
+# the engine's resumable conversation cache (RAM / disk tier), not a slot: a
+# four-slot server carries dozens of them.
+_CACHE_STATES = ("parked", "swapped", "cached", "evicted", "preempted")
+# Bookkeeping states that are not work in progress either.
+_IDLE_STATES = ("", "idle", "queued", "waiting", "done", "finished",
+                "complete", "completed", "error", "failed", "cancelled",
+                "canceled", "aborted")
+# Names another engine (or a future build of this one) may use for the
+# prompt-reading phase.  Only consulted when the job's own numbers are silent.
+_READING_STATES = ("reading", "prefill", "prefill+decode", "prompt")
+
+
+def _job_phase(job):
+    """``"reading"``, ``"generating"`` or ``None`` -- is this job a slot?
+
+    The engine names its phases in a vocabulary of its own, and the names are
+    not the ones this dashboard uses: a working conversation is observed as
+    ``prefill`` and then ``tool call``, never ``reading`` / ``generating``.
+    Matching on those two words (the v1.16 mapping, written against the docs
+    of the engine it replaced) dropped **every** MegaCapybara job on the
+    floor, so a card sat on 空闲 / 0 t/s / no slot rows while the engine was
+    decoding at 295 t/s -- the "有时候是空的" report of 2026-11-15.
+
+    So the class comes from the job's own numbers, with the state word only
+    as a tie-break: the cache states are excluded by name, and everything
+    else is "reading" until the prompt is in (``prefill_frac < 1`` and
+    nothing generated) and "generating" once tokens or a rate move.  A
+    renamed or newly added state therefore keeps its row instead of
+    disappearing.
+    """
+    state = str(job.get("state") or "").strip().lower()
+    if state in _CACHE_STATES or state in _IDLE_STATES:
+        return None
+    # Deliberately NOT filtered on ``slot < 0``: the parked rows do carry -1,
+    # but a working row the engine has not numbered yet must still count, and
+    # dropping it would rebuild the very hole this function exists to close.
+    generated = job.get("generated")
+    generated = generated if isinstance(generated, (int, float)) else 0
+    rate = job.get("tok_per_s")
+    rate = rate if isinstance(rate, (int, float)) else 0
+    if generated > 0 or rate > 0:
+        return "generating"
+    frac = job.get("prefill_frac")
+    if isinstance(frac, (int, float)) and frac < 1:
+        return "reading"
+    if state in _READING_STATES:
+        return "reading"
+    return "generating"
+
 
 
 class MegaCapybaraEndpoint(LlamaEndpoint):
@@ -97,13 +150,34 @@ class MegaCapybaraEndpoint(LlamaEndpoint):
         if now - fetched < self.PROPS_TTL:
             return cached
         payload = _get_json(self._url("/v1/models"), self.api_key)
+        rows = [item for item in (payload.get("data") or [])
+                if isinstance(item, dict)]
+        # Port 8085 is the launcher's *gateway* in front of the engine: it
+        # renames the one model it proxies to ``local-model`` and publishes the
+        # engine's own id under ``gateway.realModel``.  Booking the alias puts
+        # every model of the day in one ledger bucket (``mc/local-model``,
+        # seen 2026-11-15) next to the same model's older rows under its real
+        # name -- one model reading as two, with the day's tokens split between
+        # them -- and the hero card announces "local-model" instead of the
+        # model that is running.  The gateway describes exactly one upstream
+        # model, so the real name is used only when the list has one row.
+        gateway = payload.get("gateway")
+        gateway = gateway if isinstance(gateway, dict) else {}
+        real = gateway.get("realModel")
+        real = real.strip() if isinstance(real, str) else ""
         models = []
-        for item in payload.get("data", []):
+        for item in rows:
+            ident = item.get("id")
+            own = real if (real and len(rows) == 1) else None
             models.append({
-                "id": item.get("id"),
+                "id": own or ident,
+                # The alias is kept beside it: a ledger row printed as
+                # "qwen3.8-flash-next" still has to be traceable to the name
+                # the gateway answers to when someone greps the API.
+                "alias": ident if own else None,
                 "loaded": True,
                 "args": [],
-                "context_length": item.get("context_length"),
+                "context_length": item.get("context_length") or item.get("max_context"),
             })
         self._models_cache = (now, models)
         return models
@@ -144,17 +218,42 @@ class MegaCapybaraEndpoint(LlamaEndpoint):
         mtp_ratio = None
         if detail["mtp_enabled"] and rows and accepted is not None:
             mtp_ratio = _ratio(accepted, rows)
+        # The global ``decode_tps`` gauge sits at 0.0 for this engine even
+        # while it decodes -- measured 2026-11-15: tokens_generated climbing
+        # at ~113 t/s, one working job reporting tok_per_s = 295, and the
+        # gauge flat at zero.  The per-job rate is the real reading, so the
+        # card takes the sum of the working jobs when the gauge says nothing,
+        # instead of printing "0.0 t/s" while the engine is busy (the "有时
+        # 候是空的" half of the report).  A gauge that does report keeps the
+        # floor: it is the engine's own single number and outranks a sum.
+        decode_inst = stats.get("decode_tps")
+        if not decode_inst:
+            busy_rates = [j.get("tok_per_s") for j in jobs
+                          if _job_phase(j) == "generating"]
+            busy_rates = [r for r in busy_rates
+                          if isinstance(r, (int, float)) and r > 0]
+            if busy_rates:
+                decode_inst = sum(busy_rates)
+        jobs_listed = isinstance(stats.get("jobs"), list)
+        busy_rows = [j for j in jobs if _job_phase(j)]
+        # ``active`` is NOT the in-flight request count: it sits at 1 on a
+        # completely idle engine (measured 2026-11-15 -- no working job row,
+        # decode_tps 0, tokens not moving), because it counts attached
+        # conversations.  Reading it as "处理中 1 请求" made the panel claim a
+        # request was running all day.  The working rows are the honest count;
+        # ``active`` stays only for a build that publishes no ``jobs`` key.
+        requests_processing = len(busy_rows) if jobs_listed else stats.get("active")
         detail["metrics"] = {
             "decode_tps_avg": None,
             "prefill_tps_avg": None,
-            "decode_tps_inst": stats.get("decode_tps"),
+            "decode_tps_inst": decode_inst,
             "prefill_tps_inst": stats.get("prefill_tps"),
             "kv_hit_ratio": stats.get("cache_hit_rate"),
             "mtp_accept_ratio": mtp_ratio,
             "mtp_tokens_per_step": accepted if detail["mtp_enabled"] else None,
             "mtp_active": detail["mtp_enabled"],
             "mtp_positions": {},
-            "requests_processing": stats.get("active"),
+            "requests_processing": requests_processing,
             "requests_deferred": stats.get("queued"),
             "busy_slots_per_decode": None,
             "n_decode_total": None,
@@ -192,8 +291,8 @@ class MegaCapybaraEndpoint(LlamaEndpoint):
         n_ctx = stats.get("conversation_context")
         slots = []
         for job in jobs:
-            state = job.get("state") or "idle"
-            if state not in _BUSY_STATES:
+            phase = _job_phase(job)
+            if phase is None:
                 continue
             context = job.get("context")
             generated = job.get("generated")
@@ -203,14 +302,14 @@ class MegaCapybaraEndpoint(LlamaEndpoint):
                 "is_processing": True,
                 # A working row splits its context into the prompt it is
                 # reading/generated against and what it has generated.
-                "n_prompt_tokens": context - generated
-                    if context is not None else None,
+                "n_prompt_tokens": context - (generated or 0)
+                    if isinstance(context, (int, float)) else None,
                 "n_prompt_tokens_processed": None,
                 "n_prompt_tokens_cache": None,
                 "n_decoded": generated,
                 "ctx_used": context,
                 "ctx_ratio": _ratio(context, n_ctx),
-                "state": state,
+                "state": phase,
                 "tok_s": job.get("tok_per_s"),
                 "elapsed_s": None,
                 "prefill_tok_s": None,
@@ -228,11 +327,13 @@ class MegaCapybaraEndpoint(LlamaEndpoint):
         The lamps (idle / reading / generating / queued) take one state
         word; the note beside them takes the figures of the job the engine
         is on.  A generating job outranks a reading one, the way the
-        Strata live block does.
+        Strata live block does.  The phase comes from :func:`_job_phase`, not
+        from the state word -- see its docstring for why matching the words
+        left every lamp on 空闲 while the engine was decoding.
         """
         state = {"queued": stats.get("queued") or 0}
         for job in jobs:
-            if job.get("state") == "generating":
+            if _job_phase(job) == "generating":
                 state.update({
                     "state": "generating",
                     "generated": job.get("generated"),
@@ -240,7 +341,7 @@ class MegaCapybaraEndpoint(LlamaEndpoint):
                 })
                 return state
         for job in jobs:
-            if job.get("state") == "reading":
+            if _job_phase(job) == "reading":
                 state.update({
                     "state": "reading",
                     "prompt_tokens": job.get("context"),

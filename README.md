@@ -365,7 +365,12 @@ python tools/sync_hermes_key.py --check  # 只报告差异，不动文件
 （写 app 给自己的那个客户端 URL 就行，见下一节；采集器要的是服务根地址，尾巴上的
 `/v1` 会被吃掉。）
 
-- 服务未启动的端点不会拖慢采样，只是显示为离线。
+- 服务未启动的端点不会拖慢采样，只是显示为离线 —— 但 **`kind: strata` 是个例外**（v1.23 修正）：
+  Strata 采集器每轮还要"跟随"引擎（先问 `/health`，再按桌面版留下的记录逐个探），**每个死端口
+  在这台机器上约 2 秒**，`%USERPROFILE%\.strata\data\native-instances` 里躺着 8 条旧记录时，
+  一轮就是 2 + 3×2 + 2 ≈ 10 秒，`interval_seconds: 2` 形同虚设。引擎已经卸载（或固定在某个地址）
+  就给这个端点加 `"discover": false`：跳过跟随、只按配置里的地址探，失败后退避。
+  离线端点本身不画卡片（v1.22 起只画有模型的源），所以留不留它都不影响界面。
 - `stats.enabled` 设成 `false` 就关掉 token 账本（既不读也不写）；`stats.path` 的相对路径按项目
   根目录解析，父目录不存在会自动创建；`stats.keep_days` 控制每日明细的保留天数，超期的"日桶"
   会被丢掉，但累计总量不受影响。能耗面板（v1.10）共用这套账本：`stats.enabled: false` 时它同样
@@ -627,6 +632,39 @@ HTTP 接口：
 是第三条，所以它显示的一定是**服务端**在跑的版本 —— 浏览器拿了一份旧的 `app.js` 也不会
 报出一个前端自己编的号。**改动要写进版本记录；版本号按发布批次递增 —— 未发布的改动合并进
 同一个版本条目，不逐笔跳号**（页头徽章靠它区分"改过了没有"）。
+
+### v1.23 — 2026-11-15
+
+- **采样从 10 秒回到 0.1 秒**（用户："显示的数据更新很慢"）。`timings.endpoints[1] = 10048 ms`
+  全花在已经卸载的 Strata 端点上：`kind: strata` 的采集器每轮先"跟随"引擎 —— 问一次
+  `/health`（2.0 s）+ 按 `%USERPROFILE%\.strata\data\native-instances` 里的旧记录逐个探
+  （`INSTANCE_SWEEP = 3`，每个死端口 2.0 s，实测 18500/18501 各 2.01 s）+ 本体那次失败探测
+  2.0 s ≈ 10 s。**跟随的重试间隔只有 5 s，比一轮采样还短，所以每一轮都会重付这笔钱。**
+  配置里给这个端点加 `"discover": false` 即跳过跟随（失败后走父类的 15 轮退避），采样
+  `sample_ms` 从 10048 → 88~161，快照年龄从 10~14 s 降到 0.6~1.8 s。离线端点不画卡片，
+  所以留着它也不占界面。
+- **MegaCapybara 的槽行/状态灯/上下文卡回来了**（用户："有的时候是空的"）。v1.16 的映射按
+  `reading` / `generating` 两个词筛 job，而这台引擎说的是 `prefill` / `tool call` / `parked` ——
+  **每一个工作 job 都被筛掉了**，于是引擎在 295 t/s 解码时卡片仍印"空闲 / 0 t/s / 无槽 /
+  上下文 —"。改成 `_job_phase()`：缓存态（`parked`/`swapped`…）按名字排除，其余**按 job 自己的
+  数字分类**（`prefill_frac < 1` 且没生成 → reading；有 token 或速率 → generating），
+  状态词只作兜底。以后引擎改词或加新词也不会再静默丢行。
+- **`decode_tps` 恒为 0 时用 job 速率兜底**：实测 `tokens_generated` 以 ~113 t/s 增长、
+  job 自报 `tok_per_s = 295`，而全局 gauge 一直 0.0。现在 gauge 为 0/缺失时取工作 job 的
+  `tok_per_s` 之和；gauge 有值则仍以引擎自己的数为准（并加单测钉住两侧）。
+- **模型名取真名，不再记成 `local-model`**：8085 是启动器前面的**网关**，它把上游模型改名叫
+  `local-model`，真名在 `/v1/models` 的 `gateway.realModel` 里。照抄别名会让同一天同一个模型在
+  账本里裂成 `mc/local-model` 与 `mc/Qwen3.8-Flash-Next` 两桶（今天已经发生），卡片标题也印成
+  "local-model"。现在单条上游时用 `realModel`，别名存在 `alias` 字段里备查。
+- **"处理中 N 请求"改按在跑的工作 job 计数**：引擎的 `active` 在**完全空闲**时也恒为 1（实测：
+  无工作 job、`decode_tps = 0`、token 不动），它数的是挂着的会话，不是请求；照抄它面板会一整天
+  宣称"处理中 1 请求"。只有引擎根本不发 `jobs` 键时才回落到 `active`。
+- `render_check` 的 TTFT 断言在"没有任何模型在服务"时改为跳过 —— 那时 `#model-info` 只剩空提示，
+  本来就没有槽卡；原来无条件要求它会把一个健康的空闲面板判成红的。
+- 单测 +12（`prefill`/`tool call`/排队的 job 分类、parked 不因邻居未知而漏、decode 兜底与
+  gauge 优先、网关真名三例、"处理中"按工作行计数与无 `jobs` 键的回落）。
+  闸门：unittest 144 OK、display_check PASS、render_check EXIT=0；活体：请求中卡片
+  `generating / 228→668→1101 tok / 220 t/s / ctx 0.1%→0.4%`，空闲时 `处理中 0`。
 
 ### v1.22 — 2026-11-14
 

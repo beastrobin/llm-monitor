@@ -32,12 +32,12 @@ from collectors.megacapybara import MegaCapybaraEndpoint
 
 
 def job(jid, state="parked", context=100000, generated=0, tok_s=0.0,
-        prefill_frac=0.0, tier="ram"):
+        prefill_frac=0.0, tier="ram", slot=-1):
     return {"id": jid, "client": "", "state": state,
             "prefill_frac": prefill_frac, "context": context,
             "generated": generated, "tok_per_s": tok_s,
             "accepted_per_round": 0.0, "preset": "", "elapsed_s": 0.0,
-            "slot": -1, "tier": tier, "continues": ""}
+            "slot": slot, "tier": tier, "continues": ""}
 
 
 def stats(jobs=None, **over):
@@ -196,12 +196,30 @@ class ModelDetail(unittest.TestCase):
         self.assertEqual(m["decode_tps_inst"], 276.5)
         self.assertEqual(m["prefill_tps_inst"], 1388.0)
         self.assertAlmostEqual(m["kv_hit_ratio"], 0.947)
-        self.assertEqual(m["requests_processing"], 1)
+        # ``active`` is a conversation count, not an in-flight request count:
+        # it reads 1 on a fully idle engine, so "处理中" comes from the working
+        # job rows and is 0 here even though active says 1.
+        self.assertEqual(m["requests_processing"], 0)
         self.assertEqual(m["requests_deferred"], 2)
         # the engine reports no decode/prefill seconds, so no cumulative
         # average can be derived from its counters
         self.assertIsNone(m["decode_tps_avg"])
         self.assertIsNone(m["prefill_tps_avg"])
+
+    def test_requests_processing_counts_working_rows(self):
+        d = self.detail(stats(active=1, jobs=[
+            job("cache-1", state="parked"),
+            job("a", state="prefill", context=5000, prefill_frac=0.4),
+            job("b", state="tool call", context=9000, generated=300,
+                tok_s=200.0, prefill_frac=1.0, slot=1, tier="")]))
+        self.assertEqual(d["metrics"]["requests_processing"], 2)
+        self.assertEqual(d["metrics"]["requests_deferred"], 0)
+
+    def test_no_jobs_key_at_all_falls_back_to_active(self):
+        st = stats()
+        st.pop("jobs")
+        d = self.detail(st)
+        self.assertEqual(d["metrics"]["requests_processing"], st.get("active"))
 
     def test_parked_jobs_are_conversation_cache_not_slots(self):
         # A parked conversation is the engine's resumable cache (RAM tier),
@@ -272,6 +290,130 @@ class ModelDetail(unittest.TestCase):
         self.assertIsNone(d["metrics"]["decode_tps_inst"])
         self.assertEqual(d["slots"], [])
         self.assertEqual(d["live_state"]["state"], "idle")
+
+
+class EngineVocabulary(unittest.TestCase):
+    """The states this engine actually publishes (measured 2026-11-15).
+
+    A live conversation is reported as ``prefill`` and then ``tool call`` --
+    never ``reading`` / ``generating``, the two words v1.16 matched on.  Every
+    job therefore fell through the filter and the card read 空闲 / 0 t/s / no
+    slot rows while the engine was decoding at 295 t/s.
+    """
+
+    def detail(self, st):
+        ep = make_endpoint()
+        ep._stats = st
+        return ep._model_detail("qwen3.8-flash-next", None, time.time())
+
+    def test_prefill_job_is_a_reading_slot(self):
+        d = self.detail(stats(jobs=[job(
+            "chatcmpl-274", state="prefill", context=88064,
+            generated=0, tok_s=0.0, prefill_frac=0.813, slot=3, tier="")]))
+        self.assertEqual(len(d["slots"]), 1)
+        s = d["slots"][0]
+        self.assertEqual(s["state"], "reading")
+        self.assertEqual(s["ctx_used"], 88064)
+        self.assertAlmostEqual(s["ctx_ratio"], 88064 / 262144)
+        self.assertEqual(d["live_state"]["state"], "reading")
+
+    def test_tool_call_job_is_a_generating_slot(self):
+        d = self.detail(stats(jobs=[job(
+            "chatcmpl-274", state="tool call", context=108896,
+            generated=591, tok_s=294.98, prefill_frac=1.0, slot=3, tier="")]))
+        s = d["slots"][0]
+        self.assertEqual(s["state"], "generating")
+        self.assertEqual(s["n_decoded"], 591)
+        self.assertEqual(s["n_prompt_tokens"], 108896 - 591)
+        self.assertEqual(s["tok_s"], 294.98)
+        self.assertEqual(d["live_state"]["state"], "generating")
+        self.assertEqual(d["live_state"]["tok_s"], 294.98)
+
+    def test_parked_rows_stay_cache_even_with_an_unknown_neighbour(self):
+        d = self.detail(stats(jobs=[
+            job("cache-1", state="parked", context=195651),
+            job("cache-2", state="swapped", context=190000),
+            job("job-1", state="tool call", context=5000, generated=12,
+                tok_s=40.0, prefill_frac=1.0, slot=0, tier="")]))
+        self.assertEqual([s["id"] for s in d["slots"]], ["job-1"])
+
+    def test_process_wide_states_are_not_slots(self):
+        d = self.detail(stats(jobs=[
+            job("q", state="queued", context=0, prefill_frac=0.0),
+            job("d", state="done", context=100, generated=99)]))
+        self.assertEqual(d["slots"], [])
+
+    def test_decode_gauge_at_zero_falls_back_to_the_job_rate(self):
+        # The engine's global decode_tps sits at 0.0 while it decodes; the
+        # per-job rate is the only real reading on the document.
+        d = self.detail(stats(
+            decode_tps=0.0,
+            jobs=[job("a", state="tool call", context=9000, generated=700,
+                      tok_s=295.0, prefill_frac=1.0, slot=1, tier=""),
+                  job("b", state="tool call", context=9000, generated=10,
+                      tok_s=55.5, prefill_frac=1.0, slot=2, tier="")]))
+        self.assertAlmostEqual(d["metrics"]["decode_tps_inst"], 350.5)
+
+    def test_reported_gauge_outranks_the_job_rates(self):
+        d = self.detail(stats(
+            decode_tps=276.5,
+            jobs=[job("a", state="tool call", context=9000, generated=700,
+                      tok_s=295.0, prefill_frac=1.0, slot=1, tier="")]))
+        self.assertEqual(d["metrics"]["decode_tps_inst"], 276.5)
+
+    def test_idle_engine_reports_a_measured_zero(self):
+        # No job, no rate -- 0.0 is the measurement, not a missing reading.
+        d = self.detail(stats(decode_tps=0.0, jobs=[]))
+        self.assertEqual(d["metrics"]["decode_tps_inst"], 0.0)
+
+
+class GatewayAlias(unittest.TestCase):
+    """8085 is the launcher's gateway; the engine's own id is behind it."""
+
+    def test_real_model_name_wins_over_the_local_model_alias(self):
+        ep = make_endpoint()
+        payload = {
+            "object": "list",
+            "data": [{"id": "local-model", "object": "model",
+                      "created": 1794719081, "owned_by": "local-mc",
+                      "max_context": 262144}],
+            "gateway": {"upstream": "http://127.0.0.1:8186", "engine": "mc",
+                        "realModel": "qwen3.8-flash-next",
+                        "upstreamModelCount": 1},
+        }
+        with mock.patch("collectors.megacapybara._get_json",
+                        return_value=payload):
+            models = ep.list_models()
+        self.assertEqual([m["id"] for m in models], ["qwen3.8-flash-next"])
+        # the alias stays visible for anyone grepping the API
+        self.assertEqual(models[0]["alias"], "local-model")
+
+    def test_a_plain_server_keeps_its_own_id(self):
+        ep = make_endpoint()
+        payload = {"object": "list", "data": [
+            {"id": "qwen3.8-flash-next", "object": "model",
+             "context_length": 262144}]}
+        with mock.patch("collectors.megacapybara._get_json",
+                        return_value=payload):
+            models = ep.list_models()
+        self.assertEqual(models[0]["id"], "qwen3.8-flash-next")
+        self.assertIsNone(models[0]["alias"])
+
+    def test_two_upstream_models_are_not_renamed(self):
+        # The gateway's realModel describes one model; with two rows the
+        # mapping is ambiguous, so the ids are left alone.
+        ep = make_endpoint()
+        payload = {
+            "object": "list",
+            "data": [{"id": "local-model-1"}, {"id": "local-model-2"}],
+            "gateway": {"realModel": "qwen3.8-flash-next",
+                        "upstreamModelCount": 2},
+        }
+        with mock.patch("collectors.megacapybara._get_json",
+                        return_value=payload):
+            models = ep.list_models()
+        self.assertEqual([m["id"] for m in models],
+                         ["local-model-1", "local-model-2"])
 
 
 if __name__ == "__main__":

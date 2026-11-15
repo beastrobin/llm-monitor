@@ -1312,10 +1312,17 @@ function readFrames(base, count, timeoutMs) {
   const ttftCard = doc.querySelector('#model-info [data-card="ttft"]');
   const stepGone = !doc.querySelector('#model-info [data-card="step"]');
   const ttftValue = text(doc.querySelector('#model-info [data-card="ttft"] .card-value'));
-  const ttftOk = !!ttftCard && stepGone &&
-    (!ttftValue || ttftValue === '—' || /^[0-9.,]+\s*s$/.test(ttftValue));
-  say('TTFT 卡: 存在 ' + (ttftCard ? '✓' : '✗') + ' 旧每步卡清除 ' + (stepGone ? '✓' : '✗') +
-    ' 数值「' + (ttftValue || '—') + '」' + (ttftOk ? ' — 通过 ✓' : ' — 失败 ✗'));
+  // No model loaded => no slot card to carry it: the section shows its empty
+  // note instead, which is the state the engine being down puts the page in
+  // (and one of the two "有时候是空的" reports of 2026-11-15).  The card is only
+  // required while something is serving; demanding it unconditionally turned
+  // a healthy idle panel into a red gate.
+  const modelServing = !!doc.querySelector('#model-info .hero');
+  const ttftOk = !modelServing || (!!ttftCard && stepGone &&
+    (!ttftValue || ttftValue === '—' || /^[0-9.,]+\s*s$/.test(ttftValue)));
+  say('TTFT 卡: ' + (ttftCard ? '存在 ✓' : (modelServing ? '存在 ✗' : '无模型，跳过')) +
+    ' 旧每步卡清除 ' + (stepGone ? '✓' : '✗') + ' 数值「' + (ttftValue || '—') + '」' +
+    (ttftOk ? ' — 通过 ✓' : ' — 失败 ✗'));
 
   // Ledger view tabs (2026-10-23): the four views answer to four buttons in
   // the section head, exactly one pane visible at a time, and the click that
