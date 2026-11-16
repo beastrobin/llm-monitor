@@ -33,6 +33,13 @@ What actually differs, and why each difference needs code:
   (``/health`` says ``"api_key": false``), so the Strata address-following
   machinery is switched off: the card polls exactly where ``config.json``
   says.
+* **Gateway-aware model list.**  When the card sits behind the house gateway
+  (8085), ``/v1/models`` is the gateway's own one-row alias answer with no
+  ``status`` block -- the parent mapping reads that as "unloaded" and blanks
+  the card.  ``list_models`` resolves the single status-less row to
+  ``gateway.realModel`` (same rule the MegaCapybara collector applies); a
+  direct engine, whose rows carry a ``status`` block, keeps the parent
+  behaviour.
 """
 
 import time
@@ -66,6 +73,50 @@ class BasaltEndpoint(StrataEndpoint):
         # Filled by ``_slots`` each poll: a failed ``/slots`` scrape names the
         # reason the panel would otherwise only call "no data this round".
         self._slots_error = None
+
+    def list_models(self):
+        """The model list, gateway-aware.
+
+        A basalt engine answers ``/v1/models`` with llama-shaped rows that
+        carry a ``status`` block (the parent mapping).  Port 8085 in this
+        house is usually the *gateway* in front of the engine: it renames the
+        one model it proxies to ``local-model`` with no ``status`` block and
+        publishes the engine's own id under ``gateway.realModel`` -- and the
+        parent mapping reads the missing status as "unloaded", so the whole
+        模型信息 section blanks on a server that is answering happily (the
+        card that did not show on 2026-11-16).  One gateway describes exactly
+        one upstream model, so a single status-less row next to a gateway
+        block is the loaded one under its real name, with the alias kept
+        beside it for anyone grepping the API -- the same rule the
+        MegaCapybara collector applies.
+        """
+        now = time.time()
+        fetched, cached = self._models_cache
+        if now - fetched < self.PROPS_TTL:
+            return cached
+        payload = _get_json(self._url("/v1/models"), self.api_key)
+        rows = [item for item in (payload.get("data") or [])
+                if isinstance(item, dict)]
+        gateway = payload.get("gateway")
+        gateway = gateway if isinstance(gateway, dict) else {}
+        real = gateway.get("realModel")
+        real = real.strip() if isinstance(real, str) else ""
+        statusless = all(not isinstance(item.get("status"), dict)
+                         for item in rows)
+        models = []
+        for item in rows:
+            status = item.get("status") or {}
+            ident = item.get("id")
+            if status.get("value") == "loaded":
+                models.append({"id": ident, "loaded": True,
+                               "args": status.get("args") or []})
+            elif statusless and real and len(rows) == 1:
+                models.append({"id": real, "alias": ident,
+                               "loaded": True, "args": []})
+            else:
+                models.append({"id": ident, "loaded": False, "args": []})
+        self._models_cache = (now, models)
+        return models
 
     def _series(self, payload):
         """Lifetime counters rebuilt from the finished-request ring.

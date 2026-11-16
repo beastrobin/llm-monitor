@@ -193,6 +193,42 @@ class ResidentKindTests(unittest.TestCase):
     def test_a_closed_port_names_nothing(self):
         self.assertIsNone(self.kind_for({}))
 
+    # --- naming the engine through the house gateway ------------------------
+
+    def test_a_gateway_fronting_basalt_names_basalt(self):
+        """8085's /health answers about the gateway itself: no ``service``
+        banner, but the engine it proxies by name."""
+        self.assertEqual(self.kind_for({
+            "/health": {"ok": True, "gateway": "local-gateway 1.0.0",
+                        "engine": "basalt27",
+                        "upstream": "http://127.0.0.1:8190",
+                        "realModel": "Qwen3.8-27B"},
+        }), "basalt")
+
+    def test_a_gateway_fronting_megacapybara_names_megacapybara(self):
+        self.assertEqual(self.kind_for({
+            "/health": {"ok": True, "gateway": "local-gateway 1.0.0",
+                        "engine": "mc",
+                        "upstream": "http://127.0.0.1:8186",
+                        "realModel": "qwen3.8-flash-next"},
+        }), "megacapybara")
+
+    def test_a_gateway_fronting_an_unowned_dialect_names_nothing(self):
+        """strata/llama are not in RESIDENT_KINDS: re-reading into a dialect
+        the refresh loop does not own would strand the card, so the gateway's
+        word on them is not believed here."""
+        self.assertIsNone(self.kind_for({
+            "/health": {"ok": True, "gateway": "local-gateway 1.0.0",
+                        "engine": "strata",
+                        "upstream": "http://127.0.0.1:8187"},
+        }))
+
+    def test_a_bare_engine_field_without_the_gateway_banner_names_nothing(self):
+        """One field alone is not the gateway's signature."""
+        self.assertIsNone(self.kind_for({
+            "/health": {"ok": True, "engine": "basalt"},
+        }))
+
 
 if __name__ == "__main__":
     unittest.main()

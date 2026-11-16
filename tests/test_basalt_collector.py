@@ -228,6 +228,83 @@ class SlotMapping(unittest.TestCase):
         # for the engine block through the ring pass.
 
 
+class GatewayModels(unittest.TestCase):
+    """8085 is the house gateway; the engine's own id is behind it.
+
+    The gateway renames the one model it proxies to ``local-model`` and drops
+    the ``status`` block the parent mapping needs to call it loaded -- read
+    naively, that is "no model" and the whole model section blanks (the card
+    that did not show on 2026-11-16).
+    """
+
+    def gateway_payload(self, data, real_model="Qwen3.8-27B"):
+        return {
+            "object": "list",
+            "data": data,
+            "gateway": {"upstream": "http://127.0.0.1:8190", "engine": "basalt27",
+                        "realModel": real_model,
+                        "upstreamModelCount": len(data)},
+        }
+
+    def test_gateway_alias_resolves_to_the_real_model_and_is_loaded(self):
+        ep = make_endpoint()
+        payload = self.gateway_payload([
+            {"id": "local-model", "object": "model",
+             "created": 1794719081, "owned_by": "local-basalt",
+             "max_context": 262144}])
+        with mock.patch("collectors.basalt._get_json", return_value=payload):
+            models = ep.list_models()
+        self.assertEqual([m["id"] for m in models], ["Qwen3.8-27B"])
+        self.assertTrue(models[0]["loaded"])
+        # the alias stays visible for anyone grepping the API
+        self.assertEqual(models[0]["alias"], "local-model")
+
+    def test_a_direct_engine_keeps_its_own_status_mapping(self):
+        """Rows that carry a ``status`` block are the engine's own answer,
+        not the gateway's: the parent mapping decides, loaded or not."""
+        ep = make_endpoint()
+        payload = {"object": "list", "data": [
+            {"id": "Qwen3.8-27B", "status": {"value": "loaded",
+                                             "args": ["--n-gpu-layers", "99"]}}]}
+        with mock.patch("collectors.basalt._get_json", return_value=payload):
+            models = ep.list_models()
+        self.assertEqual(models[0]["id"], "Qwen3.8-27B")
+        self.assertTrue(models[0]["loaded"])
+        self.assertEqual(models[0]["args"], ["--n-gpu-layers", "99"])
+
+        # A fresh card: the list is TTL-cached, so the same endpoint would
+        # just re-serve the loaded answer.
+        unloaded_ep = make_endpoint()
+        unloaded = {"object": "list", "data": [
+            {"id": "Qwen3.8-27B", "status": {"value": "unloaded", "args": []}}]}
+        with mock.patch("collectors.basalt._get_json", return_value=unloaded):
+            models = unloaded_ep.list_models()
+        self.assertFalse(models[0]["loaded"])
+
+    def test_two_statusless_rows_are_not_renamed(self):
+        # The gateway's realModel describes one model; with two rows the
+        # mapping is ambiguous, so the ids are left alone (and un-loaded).
+        ep = make_endpoint()
+        payload = self.gateway_payload(
+            [{"id": "local-model-1"}, {"id": "local-model-2"}])
+        with mock.patch("collectors.basalt._get_json", return_value=payload):
+            models = ep.list_models()
+        self.assertEqual([m["id"] for m in models],
+                         ["local-model-1", "local-model-2"])
+        self.assertFalse(any(m["loaded"] for m in models))
+
+    def test_a_statusless_row_without_a_gateway_block_is_unloaded(self):
+        """A plain non-llama server with no status block is not a gateway:
+        nothing is renamed and nothing is invented as loaded."""
+        ep = make_endpoint()
+        payload = {"object": "list",
+                   "data": [{"id": "some-model", "object": "model"}]}
+        with mock.patch("collectors.basalt._get_json", return_value=payload):
+            models = ep.list_models()
+        self.assertEqual(models[0]["id"], "some-model")
+        self.assertFalse(models[0]["loaded"])
+
+
 class Registration(unittest.TestCase):
     def test_kind_dispatches_to_the_basalt_collector(self):
         from monitor import ENDPOINT_KINDS

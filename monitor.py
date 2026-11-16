@@ -313,19 +313,40 @@ def resident_kind_at(endpoint):
     Each engine names itself in its own way: basalt answers ``/health`` with
     ``"service": "basalt"`` and has no ``/stats``, while MegaCapybara answers
     the ``/stats`` document its own launcher draws its Statistics tab from and
-    has no ``/health``, no ``/props``, no ``/metrics``.  Anything else --
-    llama.cpp, a gateway, a closed port, an HTML page where JSON was expected --
-    answers None: silently re-labelling one engine's tokens as another's in the
-    ledger is a worse failure than a card that admits it is offline.
+    has no ``/health``, no ``/props``, no ``/metrics``.  The local gateway
+    names both of them at once: its own ``/health`` carries no ``service``
+    banner but does carry the engine it currently proxies, so a card behind
+    the gateway is re-labelled from that field instead of from the pass-through
+    below it.  Anything else -- llama.cpp, a closed port, an HTML page where
+    JSON was expected -- answers None: silently re-labelling one engine's
+    tokens as another's in the ledger is a worse failure than a card that
+    admits it is offline.
     """
     try:
         health = _get_json(endpoint._url("/health"), endpoint.api_key,
                            PROBE_TIMEOUT)
     except Exception:  # no such route is the common answer, not an error
         health = None
-    if isinstance(health, dict) and \
-            str(health.get("service", "")).lower() == "basalt":
-        return "basalt"
+    if isinstance(health, dict):
+        if str(health.get("service", "")).lower() == "basalt":
+            return "basalt"
+        # A local *gateway* in front of the resident engine answers /health
+        # about itself -- no "service" banner -- and names the engine it
+        # currently proxies.  It has to be read before the /stats vocabulary
+        # below: that probe sees the gateway's pass-through, which answers 200
+        # with the upstream's own document while the gateway fronts
+        # MegaCapybara and 404 while it fronts basalt -- exactly the asymmetry
+        # that left the card on its stale dialect on 2026-11-16.  strata and
+        # llama are not in RESIDENT_KINDS, and re-reading into a dialect the
+        # refresh loop does not own would strand the card where it can never
+        # be re-read back, so they name nothing here.
+        engine = health.get("engine")
+        engine = engine.strip().lower() if isinstance(engine, str) else ""
+        if isinstance(health.get("gateway"), str) and engine:
+            if engine.startswith("basalt"):
+                return "basalt"
+            if engine in ("mc", "megacapybara"):
+                return "megacapybara"
     try:
         stats_doc = _get_json(endpoint._url("/stats"), endpoint.api_key,
                               PROBE_TIMEOUT)
