@@ -90,7 +90,7 @@ def _delta(now_value, prev_value):
 
 
 def _ratio(numerator, denominator):
-    if not denominator:
+    if numerator is None or not denominator:
         return None
     return numerator / denominator
 

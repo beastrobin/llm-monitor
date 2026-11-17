@@ -35,7 +35,8 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from collectors import gpu, power, stats, system
-from collectors.llama import LlamaEndpoint, _get_json, _resolve_api_key
+from collectors.llama import (LlamaEndpoint, _friendly_error, _get_json,
+                         _resolve_api_key)
 from collectors.strata import StrataEndpoint
 from collectors.basalt import BasaltEndpoint
 from collectors.megacapybara import MegaCapybaraEndpoint
@@ -55,7 +56,7 @@ del _stream_name
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.26"
+VERSION = "1.27"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
@@ -1071,24 +1072,61 @@ class Hub(object):
 
         timings = {"endpoints": []}
         endpoints = []
-        for future in endpoint_futures:
-            value, cost = future.result()
+        for endpoint, future in zip(active, endpoint_futures):
+            try:
+                value, cost = future.result()
+            except Exception as exc:
+                # A collector that raises degrades its own card, never the
+                # whole sample: one dialect mismatch once blanked every card
+                # for hours, and the failing verdict the resident-kind
+                # refresh waits for was never recorded, so the card could
+                # not heal.  _offline_payload covers every LlamaEndpoint
+                # kind; the live card is its own lineage, hand it the same
+                # shape by hand.
+                log("endpoint %s failed: %s: %s"
+                    % (getattr(endpoint, "id", "?"), type(exc).__name__, exc))
+                build = getattr(endpoint, "_offline_payload", None)
+                if callable(build):
+                    value = build()
+                else:
+                    value = {"id": getattr(endpoint, "id", None),
+                             "label": getattr(endpoint, "label", None),
+                             "base_url": getattr(endpoint, "base_url", None),
+                             "up": False, "mode": None, "models": [],
+                             "polled_at": time.time()}
+                value["error"] = _friendly_error(exc)
+                value["backing_off"] = True
+                cost = 0.0
             endpoints.append(value)
             timings["endpoints"].append(round(cost))
         payload["endpoints"] = endpoints
         payload["current_endpoint_id"] = self.router_covered_by or (
             self.hermes_endpoint.id if self.hermes_endpoint is not None else None)
 
+        # A stalled nvidia-smi or collector is that section's own failure:
+        # the frame reports it and carries every other reading through.
         if gpu_future is not None:
-            payload["gpu"], cost = gpu_future.result()
-            timings["gpu"] = round(cost)
+            try:
+                payload["gpu"], cost = gpu_future.result()
+                timings["gpu"] = round(cost)
+            except Exception as exc:
+                log("gpu collect failed: %s: %s" % (type(exc).__name__, exc))
+                payload["gpu"] = {"available": False,
+                                  "error": _friendly_error(exc),
+                                  "gpus": [], "processes": []}
         else:
             payload["gpu"] = {"available": False, "error": "disabled",
                               "gpus": [], "processes": []}
 
         if host_future is not None:
-            payload["system"], cost = host_future.result()
-            timings["system"] = round(cost)
+            try:
+                payload["system"], cost = host_future.result()
+                timings["system"] = round(cost)
+            except Exception as exc:
+                log("system collect failed: %s: %s"
+                    % (type(exc).__name__, exc))
+                payload["system"] = {"available": False,
+                                     "error": _friendly_error(exc)}
         else:
             payload["system"] = {"available": False, "error": "disabled"}
 
