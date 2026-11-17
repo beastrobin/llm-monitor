@@ -56,7 +56,7 @@ del _stream_name
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.27"
+VERSION = "1.28"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
@@ -295,12 +295,18 @@ def build_endpoint(spec):
     return endpoint
 
 
-# The dialects of "the resident engine on one fixed port" -- basalt and
-# MegaCapybara took turns on 8085 four times in one week, and the two share no
-# telemetry route whatsoever.  A card left built for the other one polls a
-# route that answers 404, so the panel reports a healthy server as offline and
-# blanks the model section without saying why.
-RESIDENT_KINDS = ("basalt", "megacapybara")
+# The dialects of "the resident engine on one fixed port" -- basalt,
+# MegaCapybara and Strata have taken turns on 8085 in successive days, and they
+# share no telemetry route whatsoever.  A card left built for the engine that
+# used to live there polls a route the new one never had, so the panel reports
+# a healthy server as offline and blanks the model section without saying why.
+# Every dialect the gateway can front is in this set: an unowned dialect was
+# once the excuse for leaving strata out (a rebuilt strata card could never be
+# re-read back), and the 2026-11-18 overnight rotation basalt->strata->basalt
+# is exactly the incident that excuse produced -- a strata-typed card reading
+# basalt's dialect raised every cycle while the refresh loop skipped it for
+# being out of set.
+RESIDENT_KINDS = ("basalt", "megacapybara", "strata")
 
 # How often a card that is already failing may ask the engine again what it is.
 # A card that answers is never asked, so this only bounds the retry loop for a
@@ -312,10 +318,11 @@ def resident_kind_at(endpoint):
     """Which resident-engine dialect answers this card's address, or None.
 
     Each engine names itself in its own way: basalt answers ``/health`` with
-    ``"service": "basalt"`` and has no ``/stats``, while MegaCapybara answers
-    the ``/stats`` document its own launcher draws its Statistics tab from and
-    has no ``/health``, no ``/props``, no ``/metrics``.  The local gateway
-    names both of them at once: its own ``/health`` carries no ``service``
+    ``"service": "basalt"``, Strata's serve answers it with ``"service":
+    "strata"``, and MegaCapybara answers the ``/stats`` document its own
+    launcher draws its Statistics tab from and has no ``/health``, no
+    ``/props``, no ``/metrics``.  The local gateway
+    names all of them at once: its own ``/health`` carries no ``service``
     banner but does carry the engine it currently proxies, so a card behind
     the gateway is re-labelled from that field instead of from the pass-through
     below it.  Anything else -- llama.cpp, a closed port, an HTML page where
@@ -329,18 +336,22 @@ def resident_kind_at(endpoint):
     except Exception:  # no such route is the common answer, not an error
         health = None
     if isinstance(health, dict):
-        if str(health.get("service", "")).lower() == "basalt":
+        service = str(health.get("service", "")).lower()
+        if service == "basalt":
             return "basalt"
+        if service == "strata":
+            return "strata"
         # A local *gateway* in front of the resident engine answers /health
         # about itself -- no "service" banner -- and names the engine it
         # currently proxies.  It has to be read before the /stats vocabulary
         # below: that probe sees the gateway's pass-through, which answers 200
         # with the upstream's own document while the gateway fronts
         # MegaCapybara and 404 while it fronts basalt -- exactly the asymmetry
-        # that left the card on its stale dialect on 2026-11-16.  strata and
-        # llama are not in RESIDENT_KINDS, and re-reading into a dialect the
-        # refresh loop does not own would strand the card where it can never
-        # be re-read back, so they name nothing here.
+        # that left the card on its stale dialect on 2026-11-16.  The gateway's
+        # word is believed for every dialect in RESIDENT_KINDS (strata
+        # included since 2026-11-18: the refresh loop owns all three, so
+        # reading into any of them can be read back out); llama.cpp is still
+        # not a resident dialect and names nothing.
         engine = health.get("engine")
         engine = engine.strip().lower() if isinstance(engine, str) else ""
         if isinstance(health.get("gateway"), str) and engine:
@@ -348,6 +359,8 @@ def resident_kind_at(endpoint):
                 return "basalt"
             if engine in ("mc", "megacapybara"):
                 return "megacapybara"
+            if engine == "strata":
+                return "strata"
     try:
         stats_doc = _get_json(endpoint._url("/stats"), endpoint.api_key,
                               PROBE_TIMEOUT)

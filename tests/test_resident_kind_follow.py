@@ -23,7 +23,8 @@ def resident_config(kind):
         config[section]["enabled"] = False
     config["endpoints"] = [
         {"id": "mc", "label": "Basalt", "kind": kind,
-         "base_url": "http://127.0.0.1:59101", "api_key": ""},
+         "base_url": "http://127.0.0.1:59101", "api_key": "",
+         "discover": False},
     ]
     return config
 
@@ -88,6 +89,23 @@ class ResidentKindTests(unittest.TestCase):
             "mc: the engine on http://127.0.0.1:59101 is basalt, not "
             "megacapybara -- card re-read as kind=basalt (config.json still "
             "says megacapybara)"])
+
+    def test_a_strata_typed_card_follows_back_to_basalt(self):
+        """The 2026-11-18 incident: config pinned the gateway card to strata
+        overnight, basalt reclaimed 8085 with the morning switch, and the
+        refresh loop skipped the card for being outside RESIDENT_KINDS --
+        raising every cycle with no heal. A strata-typed card now fails,
+        gets named, and is rebuilt for the dialect actually answering."""
+        hub = self.hub("strata")
+        self.assertIsInstance(self.card(hub), monitor.StrataEndpoint)
+        self.fails(hub)
+        before = self.card(hub)
+        with patch.object(monitor, "resident_kind_at", return_value="basalt"):
+            hub.sample()
+        after = self.card(hub)
+        self.assertIsNot(after, before)
+        self.assertIsInstance(after, monitor.BasaltEndpoint)
+        self.assertEqual(after.id, "mc")
 
     def test_the_new_card_is_polled_in_the_same_cycle_that_builds_it(self):
         """A card built after the refresh must not wait a cycle to be asked."""
@@ -213,14 +231,31 @@ class ResidentKindTests(unittest.TestCase):
                         "realModel": "qwen3.8-flash-next"},
         }), "megacapybara")
 
-    def test_a_gateway_fronting_an_unowned_dialect_names_nothing(self):
-        """strata/llama are not in RESIDENT_KINDS: re-reading into a dialect
-        the refresh loop does not own would strand the card, so the gateway's
-        word on them is not believed here."""
-        self.assertIsNone(self.kind_for({
+    def test_a_gateway_fronting_strata_names_strata(self):
+        """The gateway's word on strata is believed since 2026-11-18: the
+        refresh loop owns all three resident dialects now, so a strata-typed
+        card can be read in AND back out -- the overnight rotation
+        basalt->strata->basalt is what demanded it."""
+        self.assertEqual(self.kind_for({
             "/health": {"ok": True, "gateway": "local-gateway 1.0.0",
                         "engine": "strata",
                         "upstream": "http://127.0.0.1:8187"},
+        }), "strata")
+
+    def test_a_strata_serve_names_itself_on_health(self):
+        """Direct (no gateway): the serve signs /health with service=strata."""
+        self.assertEqual(self.kind_for({
+            "/health": {"status": "ok", "service": "strata",
+                        "model": "Qwen3.8-Flash-Next"},
+        }), "strata")
+
+    def test_a_gateway_fronting_an_unowned_dialect_names_nothing(self):
+        """llama is not a resident dialect: the gateway's word on it names
+        nothing -- mislabelling stays the worse failure."""
+        self.assertIsNone(self.kind_for({
+            "/health": {"ok": True, "gateway": "local-gateway 1.0.0",
+                        "engine": "llama",
+                        "upstream": "http://127.0.0.1:8188"},
         }))
 
     def test_a_bare_engine_field_without_the_gateway_banner_names_nothing(self):

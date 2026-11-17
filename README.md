@@ -633,6 +633,19 @@ HTTP 接口：
 报出一个前端自己编的号。**改动要写进版本记录；版本号按发布批次递增 —— 未发布的改动合并进
 同一个版本条目，不逐笔跳号**（页头徽章靠它区分"改过了没有"）。
 
+### v1.28 — 2026-11-18
+
+- **方言自愈补全 strata，网关卡三引擎轮换不再失明**。v1.27 把 mc 卡按当天上游钉成
+  `kind=strata`，并承诺"切回 basalt/MC 时由自愈重建"——但 `RESIDENT_KINDS` 里没有
+  strata，失败判决记不到 strata 卡头上（`_note_resident_answers` 先按白名单发卡），
+  复查循环也跳过它：basalt 收回 8085 后卡片每 2s 抛一次
+  `AttributeError: 'str' object has no attribute 'get'`，永远等不到重识别。现在
+  `RESIDENT_KINDS = (basalt, megacapybara, strata)`，`resident_kind_at` 同时认
+  网关 `engine:"strata"` 与 strata serve 自己的 `service:"strata"` 横幅；llama 仍
+  不认（非 resident 方言，错标比离线更糟）。锚定测试含事故复现：strata 型卡失败 →
+  点名 basalt → 重建，id/label/地址不变。config.json 的 `kind` 自此只是开机方言，
+  切引擎不再需要动它。
+
 ### v1.27 — 2026-11-17
 
 - **单卡崩溃不再拖垮整帧**。一个 collector 的 `poll()` 抛异常时，`future.result()`
