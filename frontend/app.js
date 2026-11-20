@@ -1031,7 +1031,38 @@ function endpointChip(endpoint) {
 // Two states still speak up, because they are not "nothing to show": a model the
 // router names but whose port has not answered yet, and any other transport
 // error whose own words are worth reading as-is.
-// One line for each server that is not putting a model on screen.
+// Hover panel for the badge.  Bound once, because renderSourceNotes runs on every
+// sample and re-binding would stack handlers.  Mouse and keyboard get hover/focus;
+// a finger gets a tap that pins the panel until tapped again, tapped elsewhere or
+// Escaped -- there is no hover on glass, and an alert nobody can open is no alert.
+function bindAlertBadge(badge, pop) {
+  if (badge.dataset.bound) return;
+  badge.dataset.bound = '1';
+  const show = function () {
+    pop.classList.add('show');
+    badge.setAttribute('aria-expanded', 'true');
+  };
+  const hide = function () {
+    pop.classList.remove('show');
+    badge.setAttribute('aria-expanded', 'false');
+  };
+  badge.addEventListener('mouseenter', show);
+  badge.addEventListener('focus', show);
+  badge.addEventListener('mouseleave', hide);
+  badge.addEventListener('blur', hide);
+  badge.addEventListener('click', function () {
+    if (pop.classList.contains('show')) { hide(); } else { show(); }
+  });
+  document.addEventListener('click', function (ev) {
+    if (ev.target !== badge && !badge.contains(ev.target)) hide();
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape') hide();
+  });
+  badge._hidePop = hide;
+}
+
+// A badge in the top bar for every server that is not putting a model on screen.
 //
 // The chip row shows online servers only (user request 2026-10-19), and the empty
 // card explains the panel when NOTHING serves (2026-10-28 dropped the line that
@@ -1040,55 +1071,58 @@ function endpointChip(endpoint) {
 // "8085 answers, 8185 is nobody, and nothing answered on 8185-8190" -- appeared
 // nowhere on the panel.
 //
-// It quotes rather than re-invents: the collector's own error, the gateway's own
-// excuse in error_detail, and the address a moving card settled on with the
-// reason it settled there.  A covered address stays out, because another card is
-// already polling that server, and so does "no active model", which the tracker
-// says in its own words.
+// So the panel does say it, in the servers' own words -- the collector's error, the
+// gateway's own excuse, and where a moving card settled -- but as a badge beside the
+// sample pill rather than lines across the top of the section (2026-11-21: three
+// sentences above the first card cost more room than they gave back).  The full text
+// opens on hover, and the panel that holds it lives on <body>, not in the top bar:
+// the sticky bar became the containing block for anything fixed inside it, and the
+// panel was measured against the title strip and clipped there.
 //
-// The whole strip appears only while something is missing.  With every card up
-// and serving, "this card followed the newest engine record" is a log line, not
-// news -- and the panel already has a log for it.
-function renderSourceNotes(container, deduped) {
-  if (!container) return;
+// A covered address stays out, because another card is already polling that server,
+// and so does "no active model", which the tracker says in its own words.  Where a
+// card settled is only worth saying while something is missing: with every card up
+// and serving, "following the newest engine record" is a log line, not news.
+function renderSourceNotes(badge, deduped) {
+  if (!badge) return;
   const answered = deduped.filter(function (e) { return e.up; });
   const name = function (e) {
     const port = portOf(e.base_url);
     return (e.label || e.id) + (port ? ' :' + port : '');
   };
-  const missing = [];
+  const lines = [];
   deduped.forEach(function (e) {
     if (e.up || e.covered_by || !e.error || e.error === 'no active model') return;
-    missing.push('<div class="gap"><b>' + esc(name(e)) + '</b>' +
-      '<span class="gap-why">' + esc(e.error) + '</span>' +
-      (e.error_detail ? '<span class="gap-detail">' + esc(e.error_detail) + '</span>' : '') +
-      '</div>');
+    lines.push(name(e) + ' · ' + e.error +
+      (e.error_detail ? '\n  ' + e.error_detail : ''));
   });
   // Reachable, offering models, holding none: idle, not missing.
-  const idle = [];
   answered.forEach(function (e) {
     if ((e.models || []).length || !(e.available_models || []).length) return;
-    idle.push('<div class="gap"><b>' + esc(name(e)) + '</b>' +
-      '<span class="gap-why">在线，但没加载模型</span>' +
-      '<span class="gap-detail">可加载 ' + esc(e.available_models.join('、')) + '</span></div>');
+    lines.push(name(e) + ' · 在线，但没加载模型\n  可加载 ' +
+      e.available_models.join('、'));
   });
-  const lines = missing.concat(idle);
   if (lines.length) {
-    // Where a moving card settled, said while there is a gap for it to explain:
-    // "the card is reading 18500 because that is the engine that answered last"
-    // is what turns a blank card into a five-second diagnosis.
     answered.forEach(function (e) {
       if (!e.follow_reason) return;
-      lines.push('<div class="gap moved"><b>' + esc(name(e)) + '</b>' +
-        '<span class="gap-why">跟随到了这里的地址</span>' +
-        '<span class="gap-detail">' + esc(e.follow_reason) + '</span></div>');
+      lines.push(name(e) + ' · 跟随到了这里的地址\n  ' + e.follow_reason);
     });
   }
   const signature = lines.join('|');
-  if (container.dataset.sig === signature) return;
-  container.dataset.sig = signature;
-  container.innerHTML = lines.join('');
-  container.hidden = !lines.length;
+  if (badge.dataset.sig === signature) return;
+  badge.dataset.sig = signature;
+  const text = lines.join('\n');
+  const pop = document.getElementById('alert-pop');
+  badge.hidden = !lines.length;
+  badge.textContent = lines.length ? '\u26a0 ' + lines.length : '';
+  if (!lines.length) {
+    if (badge._hidePop) badge._hidePop();
+    return;
+  }
+  if (pop) {
+    pop.textContent = text;
+    bindAlertBadge(badge, pop);
+  }
 }
 
 function liveNote(endpoint) {
@@ -1815,7 +1849,7 @@ function renderEndpoints(snapshot) {
     }
   }
 
-  renderSourceNotes(document.getElementById('endpoint-note'), deduped);
+  renderSourceNotes(document.getElementById('alert-chip'), deduped);
 
   if (container.dataset.signature !== signature) {
     container.dataset.signature = signature;

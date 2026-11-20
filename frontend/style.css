@@ -1548,23 +1548,76 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
   white-space: nowrap;
 }
 .slot-idle:empty { display: none; }
-/* The line under the chip strip names the servers that are NOT on screen, in
-   their own words (see renderSourceNotes in app.js).  Quiet on purpose: it
-   explains an absence, it is not a second alarm. */
-.src-gaps {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: -2px 0 10px;
-  font-size: 11.5px;
-  color: var(--muted);
+/* 折起来的那一行必须真的只有一行：窗口一窄，标题行的 chips 就会换行，折叠块比它
+   本来要省掉的空行还高（2026-11-21 反馈）。折叠时单行裁切，展开后照常换行。 */
+.slot-fold:not([open]) > summary { flex-wrap: nowrap; }
+.slot-fold:not([open]) .slot-idle,
+.slot-fold:not([open]) .slot-live .kv-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
-.src-gaps[hidden] { display: none; }
-.src-gaps .gap { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
-.src-gaps .gap b { color: var(--text); font-weight: 600; }
-.src-gaps .gap-why { color: var(--bad); }
-.src-gaps .gap.moved .gap-why { color: var(--muted); }
-.src-gaps .gap-detail { color: var(--muted); }
+.slot-fold:not([open]) .slot-live { flex-wrap: nowrap; overflow: hidden; min-width: 0; }
+/* 顶栏的告警徽标：不在画面上的卡不再占版面（2026-11-21 反馈），只在采样气泡左边留
+   一颗；逐条原话挂在悬停浮层上，用的是 ⓘ 提示同一套行为（窄屏改成底部面板）。 */
+.alert-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  position: relative;
+  flex: none;
+  padding: 3px 9px;
+  border: 1px solid var(--bad);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--bad);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.5;
+  cursor: help;
+}
+.alert-chip[hidden] { display: none; }
+.alert-chip:hover, .alert-chip:focus-visible, .alert-chip[aria-expanded="true"] {
+  background: var(--bad);
+  color: var(--panel);
+}
+/* 徽标对应的正文。独立挂在 body 上：顶栏（sticky + z-index）给里面的 fixed 后代当了
+   包含块，浮层量到的是那一条标题栏而不是整个屏幕，被裁在顶上（2026-11-21 实测）。
+   多行照原样换行：每条一行，采集器的原话缩进在下面。 */
+.alert-pop {
+  display: none;
+  position: fixed;
+  right: 16px;
+  top: 60px;
+  z-index: 40;
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .2);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-line;
+  text-align: left;
+}
+.alert-pop.show { display: block; }
+@media (max-width: 759px) {
+  /* 窄屏贴底部，跟 ⓘ 提示同一条规矩。 */
+  .alert-pop {
+    left: 16px;
+    right: 16px;
+    top: auto;
+    bottom: 16px;
+    max-width: none;
+  }
+  /* 折起来的 slot 明细必须只占一行，否则比它替换掉的空行还高。引擎此刻在做什么
+     英雄区那句已经说了，这里折叠态只留"N 个槽空闲"。展开照旧全给。 */
+  .slot-fold:not([open]) .slot-live { display: none; }
+}
 /* The no-rows state keeps the same strip next to its reason sentence. */
 .slot-fold.is-empty { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .slot-fold.is-empty .slot-live { margin-left: 0; }

@@ -33,6 +33,9 @@
     <nav class="section-nav" aria-label="面板导航">
       <a href="#model-info">推理</a><a href="#resource-info">硬件</a><a href="#history-info">历史</a>
     </nav>
+    <!-- 缺席的卡收在这颗徽标里（2026-11-21 反馈：状态线太占地方）。悬停或键盘聚焦
+         看逐条原话；窄屏下浮层自动改成底部面板，跟 ⓘ 提示同一套行为。 -->
+    <button id="alert-chip" class="alert-chip" type="button" hidden></button>
     <span id="freshness" class="freshness" role="status">等待首个采样</span>
     <span class="muted" id="meta">正在连接…</span>
     <button id="theme-btn" type="button">深色</button>
@@ -56,10 +59,6 @@
         <div id="endpoint-sources" class="src-row head"></div>
       </div>
     </div>
-    <!-- One line for the card that is not there: which server, and whose words
-         say why (see renderSourceNotes in app.js).  Hidden while nothing is
-         missing. -->
-    <div id="endpoint-note" class="src-gaps" role="status" hidden></div>
     <div id="endpoints" class="endpoint-list"></div>
   </section>
 
@@ -140,6 +139,9 @@
     if (box) box.textContent = '脚本错误：' + (event.message || event.type);
   });
 </script>
+<!-- 告警徽标的正文（app.js 的 renderSourceNotes 填）。挂在 body 上而不是顶栏里：
+     顶栏成了里面 fixed 后代的包含块，浮层被关在标题那一条里出不去（2026-11-21 实测）。 -->
+<div id="alert-pop" class="alert-pop" role="status" aria-live="polite"></div>
 <script src="/i18n.js"></script>
 <script src="/app.js"></script>
 </body>
