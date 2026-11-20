@@ -372,6 +372,17 @@ class StrataEndpoint(LlamaEndpoint):
         # or one whose state directory this process cannot read, is then polled
         # exactly where config.json says it is.
         self.discover = bool(spec.get("discover", True))
+        # Only the class that can follow has anything to admit.  ``BasaltEndpoint``
+        # switches following off by construction -- a hand-started server owns a
+        # fixed port, so it is not a card that could lose its engine -- and a card
+        # nagging about a pin it never chose teaches the reader nothing.  An
+        # operator's ``"discover": false`` on a Strata card is the other case: it
+        # is the single setting that lets the app move the engine to a new port
+        # and key, and leave this card polling the old address in silence.  That
+        # is the shape "the panel shows no model after I switched versions"
+        # arrives in, and nothing in ``run.log`` said why.  The dashboard logs it
+        # once at startup; see the ``pinned`` line in ``monitor.py``.
+        self.pinned = not self.discover and type(self) is StrataEndpoint
         self._next_follow = 0.0
         self._engine_answered = False
         # Two memories across scrapes, both needed because ``slots_view()`` is a

@@ -56,7 +56,7 @@ del _stream_name
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.28"
+VERSION = "1.29"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
@@ -1741,6 +1741,15 @@ def main():
     for endpoint in hub._active_endpoints():
         log("watching %s -> %s" % (
             endpoint.id, endpoint.base_url or getattr(endpoint, "log_path", None)))
+        # A pinned card is polled exactly where config.json says, so the desktop
+        # app moving its engine -- a new port and a new key with every model load
+        # -- leaves it reading the old address.  That is a deliberate setting, and
+        # it is also the one that reads on screen as "no model running", so say
+        # once at startup which cards carry it.
+        if getattr(endpoint, "pinned", False):
+            log("%s pinned: polled at %s and will not follow an engine that "
+                "moves port or key (discover=false)" % (
+                    endpoint.id, endpoint.base_url))
     if hub.router_url:
         log("hermes router: %s (%s)" % (hub.router_url, hub.router_reason))
     elif hub.live_log is not None:
