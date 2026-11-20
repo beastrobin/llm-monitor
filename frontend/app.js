@@ -787,6 +787,11 @@ function paintCards(refs, values) {
         ref.gauge.setAttribute('aria-valuenow', String(Math.round(ratio * 1000) / 10));
         ref.gauge.setAttribute('aria-label', ref.label);
       }
+      // At a narrow width every ratio card is a line of its own across the whole
+      // panel, so an engine started without MTP paid a full row to show "—"
+      // (2026-11-21).  The card marks itself so that width can drop the line
+      // while the wide grid keeps the slot and its "已启用 · 暂无每步数据" foot.
+      ref.root.classList.toggle('no-value', ratio === null);
     }
     if (ref.spark && value.series) {
       drawSpark(ref.spark, value.series, value.sparkOptions || {});
@@ -1494,15 +1499,17 @@ function renderSlotDetail(host, model, base) {
   // only on the state chip's tooltip.
   const liveEl = host.querySelector('[data-role="live"]');
   if (liveEl) liveEl.innerHTML = slotLiveHtml(model);
-  // A shut fold still says what it is hiding; the engine's live readings stay on
-  // the heading either way.
-  const idleEl = host.querySelector('[data-role="idle"]');
-  if (idleEl) {
-    idleEl.textContent = slotBusy ? '' : slots.length + ' 个槽空闲 · 展开看逐项';
-  }
   const fold = host.querySelector('details.slot-fold');
   if (fold && !host.dataset.foldPinned && fold.open !== slotBusy) {
     fold.open = slotBusy;
+  }
+  // A shut fold says what it is hiding.  An open one does not tell the reader to
+  // expand what is already on the screen -- and at this width the heading is the
+  // only place that sentence could be read, so it stays short once unfolded.
+  const idleEl = host.querySelector('[data-role="idle"]');
+  if (idleEl) {
+    idleEl.textContent = slotBusy ? '' :
+      slots.length + ' 个槽空闲' + (fold && fold.open ? '' : ' · 展开看逐项');
   }
 
   host.querySelectorAll('.slot-row').forEach(function (row) {

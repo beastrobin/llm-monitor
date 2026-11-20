@@ -1614,9 +1614,11 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
     bottom: 16px;
     max-width: none;
   }
-  /* 折起来的 slot 明细必须只占一行，否则比它替换掉的空行还高。引擎此刻在做什么
-     英雄区那句已经说了，这里折叠态只留"N 个槽空闲"。展开照旧全给。 */
-  .slot-fold:not([open]) .slot-live { display: none; }
+  /* 这个宽度上折叠标题只留名字和"N 个槽空闲"：那几枚 chips 挤不进一行就竖着叠成
+     四行，标题比它下面的一个槽还高（602px 实测），而说的全是别处已经说过的话——
+     累计均值/prefill 均值就是上面那两张卡显示的值（带 ≈ 的那个），处理中就是英雄区
+     的状态灯，"上次"就是英雄区那句。展开之后每个槽自己就是数据。宽窗里照旧全给。 */
+  .slot-fold .slot-live { display: none; }
 }
 /* The no-rows state keeps the same strip next to its reason sentence. */
 .slot-fold.is-empty { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
@@ -2226,6 +2228,12 @@ body {
   .model > .grid .gauge-card { grid-column: 1 / -1; }
   .model > .grid [data-card="ttft"] { grid-column: 1 / -1; }
   .model > .grid [data-card="ttft"] .spark { display: none; }
+  /* 比例卡不再一张霸占一整行。横条只是名字的装饰，数字才是那条信息，295px 里名字、
+     条、值都放得下；两张并排之后，空闲时这三行（0.0% / 0.0% / –）只占一行。
+     连值都没有的那张（引擎没开 MTP、或根本没报）在这里不占行——它没有可说的。 */
+  .model > .grid .gauge-card { grid-column: span 1; }
+  .model > .grid .gauge-card.no-value { display: none; }
+  .model > .grid .gauge-card .gauge-head { font-size: 11px; }
   /* 横条形态只给模型区（比例卡）。硬件行的四张卡要的是仪表盘 —— 把它们也
      压成横条，就正好回到了用户 2026-11-15 说要取消的那根血条。 */
   .endpoint .gauge-card .card-body { display: flex; flex-direction: row; align-items: center; gap: 8px; }
