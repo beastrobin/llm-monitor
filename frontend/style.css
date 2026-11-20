@@ -2226,7 +2226,9 @@ body {
   .grid .spark { height: 34px; }
   .endpoint .card:not(.bar-h) .card-foot { display: none; }
   .model > .grid .gauge-card { grid-column: 1 / -1; }
-  .model > .grid [data-card="ttft"] { grid-column: 1 / -1; }
+  /* TTFT 在这个宽度上早就没有曲线了（下一条规则把 spark 收了），剩下的只是名字加一个
+     数——全宽不再是它该占的位子，和上下文占比并排正好一行（2026-11-21 追问）。 */
+  .model > .grid [data-card="ttft"] { grid-column: span 1; }
   .model > .grid [data-card="ttft"] .spark { display: none; }
   /* 比例卡不再一张霸占一整行。横条只是名字的装饰，数字才是那条信息，295px 里名字、
      条、值都放得下；两张并排之后，空闲时这三行（0.0% / 0.0% / –）只占一行。
