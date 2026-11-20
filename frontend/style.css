@@ -1619,6 +1619,24 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
      累计均值/prefill 均值就是上面那两张卡显示的值（带 ≈ 的那个），处理中就是英雄区
      的状态灯，"上次"就是英雄区那句。展开之后每个槽自己就是数据。宽窗里照旧全给。 */
   .slot-fold .slot-live { display: none; }
+  /* 槽行的密度。宽窗里一张卡是"血条 + 名字 + 值"三段，六个字段两列三行，一个槽约
+     170px —— 引擎开到 4 个槽就是两屏多（2026-11-21 要求：窗口收到 600px 也要尽量多看，
+     最多 4 个槽）。这里把每条血条收掉（身份牌那张只留 slot 编号和引擎状态，值照旧写在
+     DOM 里），六张卡按列宽自动排布（600px 排 3 列、更窄退 2 列）；空闲的槽不显示没有
+     数字的字段，一个槽压到一行（实测 40px），忙着的槽仍是全部六个字段（实测 105px，
+     原来是 170px）。四个空闲槽连同标题实测 265px，一屏之内还能看见硬件区。 */
+  .slot-cards.grid.compact { grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 5px; }
+  .slot-cards .card { padding: 4px 7px; }
+  .slot-cards .card-rail-row .bar { display: none; }
+  .slot-cards .card:not(.has-tag) .card-rail-row { display: none; }
+  .slot-cards .card.has-tag .card-rail-row { min-height: 0; }
+  .slot-cards .card-meta-row { margin-top: 0; }
+  .slot-cards .card-label { font-size: 10px; }
+  .slot-cards .card-value { font-size: 13px; }
+  .slot-row.idle .card.no-value:not(.has-tag) { display: none; }
+  .slot-row.idle .card.has-tag.no-value .card-meta-row { display: none; }
+  .slot-rows { gap: 6px; }
+  .slot-row + .slot-row { padding-top: 6px; }
 }
 /* The no-rows state keeps the same strip next to its reason sentence. */
 .slot-fold.is-empty { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }

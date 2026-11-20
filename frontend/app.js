@@ -657,7 +657,8 @@ function buildCards(container, specs) {
     // INSIDE the body next to the value instead of under everything, and no
     // card reserves an empty tag placeholder any more.
     if (spec.barDir === 'h') {
-      return '<div class="card' + (spec.bar ? '' : ' no-bar') + ' bar-h" data-card="' + esc(spec.key) + '">' +
+      return '<div class="card' + (spec.bar ? '' : ' no-bar') + ' bar-h' +
+        (spec.tag ? ' has-tag' : '') + '" data-card="' + esc(spec.key) + '">' +
         '<div class="card-body">' +
         '<div class="card-rail-row">' +
           (spec.tag ? '<span class="card-tag" data-role="tag"></span>' : '') +
@@ -744,6 +745,15 @@ function paintCards(refs, values) {
       ref.value.innerHTML = esc(value.text) +
         (value.unit ? '<span class="card-unit">' + esc(value.unit) + '</span>' : '');
     }
+    // A card with no number to show.  Narrow widths spend a whole line on each
+    // card, so an engine that does not have the thing at all (no MTP) and a slot
+    // that is idle (five em-dashes out of six fields) were paying for lines with
+    // nothing in them (2026-11-21).  The class is set at every width and only the
+    // narrow rules act on it: the wide grid still shows the card, its rail and the
+    // foot that explains why it is empty.
+    const shown = value.text === 0 || value.text === '0' ||
+      (typeof value.text === 'string' && value.text.trim() !== '' && value.text !== '—');
+    ref.root.classList.toggle('no-value', !shown);
     // The foot line is hidden; its text now rides on the info icon's tooltip so
     // the card keeps its full height for the spark.  The static metric note
     // (if any) leads, the live breakdown follows.
@@ -787,11 +797,6 @@ function paintCards(refs, values) {
         ref.gauge.setAttribute('aria-valuenow', String(Math.round(ratio * 1000) / 10));
         ref.gauge.setAttribute('aria-label', ref.label);
       }
-      // At a narrow width every ratio card is a line of its own across the whole
-      // panel, so an engine started without MTP paid a full row to show "—"
-      // (2026-11-21).  The card marks itself so that width can drop the line
-      // while the wide grid keeps the slot and its "已启用 · 暂无每步数据" foot.
-      ref.root.classList.toggle('no-value', ratio === null);
     }
     if (ref.spark && value.series) {
       drawSpark(ref.spark, value.series, value.sparkOptions || {});
@@ -1516,6 +1521,10 @@ function renderSlotDetail(host, model, base) {
     const id = row.getAttribute('data-slot');
     const slot = slots.filter(function (s) { return String(s.id) === id; })[0];
     if (!slot) return;
+    // An idle slot has nothing in five of its six fields, and someone counting
+    // slots wants to see them all at once.  The class lets the narrow layout drop
+    // the empty ones and keep one line per slot (2026-11-21).
+    row.classList.toggle('idle', !slot.is_processing);
     const cardsHost = row.querySelector('[data-role="cards"]');
     const refs = ensureCards(cardsHost, SLOT_SPECS);
     if (!refs) return;
