@@ -1538,6 +1538,33 @@ tbody tr:hover td { background: color-mix(in srgb, var(--accent) 4%, var(--panel
   margin-left: 10px;
 }
 .slot-live .kv-note { margin-right: 0; }
+/* A shut fold names what it is hiding (2026-11-21 review): one clause on the
+   heading instead of six empty cards per idle slot.  :empty keeps the heading's
+   spacing intact while the fold is open. */
+.slot-idle {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 10px;
+  white-space: nowrap;
+}
+.slot-idle:empty { display: none; }
+/* The line under the chip strip names the servers that are NOT on screen, in
+   their own words (see renderSourceNotes in app.js).  Quiet on purpose: it
+   explains an absence, it is not a second alarm. */
+.src-gaps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: -2px 0 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.src-gaps[hidden] { display: none; }
+.src-gaps .gap { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.src-gaps .gap b { color: var(--text); font-weight: 600; }
+.src-gaps .gap-why { color: var(--bad); }
+.src-gaps .gap.moved .gap-why { color: var(--muted); }
+.src-gaps .gap-detail { color: var(--muted); }
 /* The no-rows state keeps the same strip next to its reason sentence. */
 .slot-fold.is-empty { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .slot-fold.is-empty .slot-live { margin-left: 0; }

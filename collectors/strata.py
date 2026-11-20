@@ -341,6 +341,36 @@ def _reported_slot_count(live, rows):
     return len(rows) or live.get("parallel") or None
 
 
+def _live_ctx_ratio(state, n_ctx):
+    """The context share the engine's live block implies, or None.
+
+    The slot rows are the right source whenever a request claims a numbered
+    batch slot.  They are the wrong source for the lone request above: every row
+    stays ``idle`` with an empty context for the whole request, and 2026-11-21
+    the card read "0.0% · 空间就绪" while the engine was 195,759 prompt tokens
+    into a 262,144-token context with a 99.7% KV hit.  A zero the slots never
+    measured is not a measurement, so the engine's own live block -- which knows
+    the prompt it is holding -- gets its own field instead of the slot default.
+
+    Only while the engine says it is busy.  The live block keeps the last
+    request's numbers after it finishes, and an idle engine that still shows a
+    full context would be lying in the other direction.
+    """
+    if not state or not n_ctx:
+        return None
+    busy = (state.get("running") or state.get("queued")
+            or state.get("state") in ("generating", "reading", "thinking"))
+    if not busy:
+        return None
+    prompt = state.get("prompt_total")
+    if prompt is None:
+        prompt = state.get("prompt_tokens")
+    if prompt is None:
+        return None
+    held = prompt + (state.get("generated") or 0)
+    return max(0.0, min(1.0, held / float(n_ctx)))
+
+
 class StrataEndpoint(LlamaEndpoint):
     """One Strata server, scraped through its JSON ``/metrics``.
 
@@ -795,6 +825,8 @@ class StrataEndpoint(LlamaEndpoint):
             "decode_tok_s": first.get("decode_tok_s"),
         } if first else None
         detail["slots"] = self._slots(payload)
+        # Beside the slot ratios, not instead of them (see _live_ctx_ratio).
+        detail["ctx_ratio_live"] = _live_ctx_ratio(state, detail.get("n_ctx"))
         metrics = self._sampler(model_id).feed(self._series(payload), now)
         # The instantaneous series needs the engine's own rate, not a counter
         # delta.  Strata adds its totals up when a request *finishes*, beside

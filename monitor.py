@@ -56,7 +56,7 @@ del _stream_name
 # The one place the release is named.  It is stamped into the startup log, the
 # /api/snapshot config and --version, so the console, the browser header and a
 # bare invocation all agree; nothing else in the tree hard-codes it.
-VERSION = "1.29"
+VERSION = "1.30"
 
 # The router writes its startup line -- the port it listens on, the api-key it
 # generated, and every request it proxies -- to this log, and that line is the
@@ -1035,7 +1035,17 @@ class Hub(object):
                 slots = model.get("slots") or []
                 ratios = [s.get("ctx_ratio") for s in slots
                           if s.get("ctx_ratio") is not None]
-                values[base + ".ctx"] = max(ratios) if ratios else None
+                slot_ratio = max(ratios) if ratios else None
+                # The engine's live block speaks when its slot rows have
+                # nothing to say: a lone request under --batch books no slot, so
+                # a curve drawn from those slots sits on a floor the engine never
+                # touched (see strata._live_ctx_ratio).  The card headline applies
+                # the same rule, so a number and its own trend line cannot tell
+                # two stories.
+                live_ratio = model.get("ctx_ratio_live")
+                values[base + ".ctx"] = (
+                    slot_ratio if (slot_ratio or 0) > 0 or live_ratio is None
+                    else live_ratio)
                 # Per-slot series, so a slot card can draw the same kind of
                 # trend the big cards do.  Keyed by slot id rather than by list
                 # position: ids are what the engine reports and what the UI

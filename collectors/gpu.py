@@ -167,6 +167,22 @@ PROCESS_TTL_SECONDS = 10.0
 _process_cache = {"at": 0.0, "value": []}
 
 
+# Process names that mean "an inference server holds this card" rather than
+# "another desktop window has a context".  Matching on "llama" alone went stale
+# the day the box started running other engines: Strata is ``strata.exe``, WDDM
+# reports its VRAM as ``N/A``, and the filter in ``_query_processes`` dropped
+# every real tenant -- so ``gpu.processes`` came back empty on a machine with two
+# engines loaded (2026-11-21), which is the one question the field exists to
+# answer before starting a third.
+ENGINE_PROCESS_NAMES = ("llama", "llamafile", "strata", "basalt", "megacapybara",
+                        "capybara", "vllm", "ollama", "exllama", "tabbyapi")
+
+
+def _is_engine_process(name):
+    low = (name or "").lower()
+    return any(marker in low for marker in ENGINE_PROCESS_NAMES)
+
+
 def _query_processes():
     now = time.time()
     if now - _process_cache["at"] < PROCESS_TTL_SECONDS:
@@ -194,21 +210,21 @@ def _query_processes():
             continue
         name = parts[1] or ""
         used = _to_number(parts[2], float)
-        is_llama = "llama" in name.lower()
+        is_engine = _is_engine_process(name)
         # Under WDDM every desktop process holds a GPU context, yet the driver
         # reports no per-process VRAM for most of them, which buries the real
         # tenants in noise.  Keep only rows carrying a number or belonging to
         # an inference server.
-        if used is None and not is_llama:
+        if used is None and not is_engine:
             continue
         procs.append({
             "pid": _to_number(parts[0], int),
             "name": os.path.basename(name),
             "path": name,
             "used_mb": used,
-            "is_llama": is_llama,
+            "is_engine": is_engine,
         })
-    procs.sort(key=lambda p: (not p["is_llama"], -(p["used_mb"] or 0)))
+    procs.sort(key=lambda p: (not p["is_engine"], -(p["used_mb"] or 0)))
     return remember(procs)
 
 

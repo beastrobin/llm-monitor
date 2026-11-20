@@ -207,6 +207,83 @@ def _energy_fields(data):
     return bucket
 
 
+def model_part_of(key):
+    """The model-name part of a ledger key, however the key is built.
+
+    A model bucket is ``endpoint/model``; a combo bucket is
+    ``day|watts|endpoint/model``.  Only the model part is ever folded: the
+    endpoint id is a configured handle and two servers whose ids differ by case
+    are two servers, and the day/watts parts are facts about when and at what
+    limit the tokens were earned.
+    """
+    tail = key.rpartition("|")[2]
+    return tail.partition("/")[2] or tail
+
+
+def normalize_model_key(key):
+    """``key`` with its model name folded to lower case.
+
+    Engine Control hands out one name for a model (``Qwen3.8-Flash-Next``, the
+    unified contract name) while the engine's own ``/v1/models`` answers with
+    the same name in another case, and the ledger keyed on that exact string:
+    on 2026-11-21 the books held two rows for one model, 161.4 M tokens split
+    between them and each row reading smaller than the work it covered.
+    """
+    head, sep, tail = key.rpartition("|")
+    endpoint, slash, model = tail.partition("/")
+    return head + sep + endpoint + slash + model.lower()
+
+
+def fold_model_case(buckets):
+    """Merge buckets whose keys differ only by the model name's case.
+
+    Returns ``(merged, display_names)``.  The row keeps the casing that earned
+    the most tokens -- whichever engine served last is not the one that served
+    most -- and an exact tie goes to the mixed-case spelling, because a name the
+    operator typed reads better than one lower-cased for the key.
+    """
+    merged = {}
+    for key, bucket in buckets.items():
+        slot = merged.setdefault(normalize_model_key(key), ({}, {}))
+        fields, names = slot
+        for field, value in bucket.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                fields[field] = fields.get(field, 0) + value
+        names[model_part_of(key)] = names.get(
+            model_part_of(key), 0) + int(bucket.get("predicted_tokens") or 0)
+    display = {}
+    for key, (fields, names) in merged.items():
+        display[key] = max(names.items(),
+                           key=lambda item: (item[1],
+                                             item[0] != item[0].lower()))[0] \
+            if names else model_part_of(key)
+    return dict((key, fields) for key, (fields, _) in merged.items()), display
+
+
+def fold_model_ver(ver_map):
+    """Fold the version attribution of buckets that merged above.
+
+    Model buckets hold ``{build: tokens}`` and sum cleanly.  Combo buckets hold
+    one build string per bucket, so two spellings of the same model that ran on
+    different builds come back joined with ``+`` -- the same way a multi-build
+    row is already named in the ranking table.
+    """
+    out = {}
+    for key, ver in ver_map.items():
+        norm = normalize_model_key(key)
+        if isinstance(ver, dict):
+            dst = out.setdefault(norm, {})
+            for build, tok in ver.items():
+                dst[build] = dst.get(build, 0) + tok
+        elif isinstance(ver, str) and ver:
+            seen = out.setdefault(norm, [])
+            if ver not in seen:
+                seen.append(ver)
+    return dict((key, " + ".join(builds) if isinstance(builds, list) else builds)
+                for key, builds in out.items()
+                if builds or builds == {})
+
+
 def readings_for(endpoints):
     """Extract one ledger reading per (endpoint, model) from a single sample.
 
@@ -222,8 +299,12 @@ def readings_for(endpoints):
                 continue
             metrics = model.get("metrics") or {}
             counters = metrics.get("counters") or {}
+            # The bucket key folds the model name's case (see
+            # normalize_model_key); the raw spelling rides along as the row's
+            # display name, so the ranking still shows what the engine called
+            # the model instead of a lower-cased handle.
             readings.append((
-                "%s/%s" % (endpoint_id, model_id),
+                normalize_model_key("%s/%s" % (endpoint_id, model_id)),
                 {
                     "prompt_tokens": counters.get("prompt_tokens"),
                     "predicted_tokens": counters.get("predicted_tokens"),
@@ -235,6 +316,8 @@ def readings_for(endpoints):
                 # The build that produced these counters, carried so the
                 # ledger can stamp it on the row it books (see observe).
                 endpoint.get("engine_version"),
+                # The spelling to print for this row (see observe).
+                "%s/%s" % (endpoint_id, model_id),
             ))
     return readings
 
@@ -266,6 +349,10 @@ class TokenLedger(object):
         # endpoint id -- v1.19 closed the hole v1.18 left where 模型排行 kept
         # printing "mc/" because only combo rows carried a build.
         self._model_ver = {}
+        # model key -> the spelling to print for that row.  The key folds case
+        # (see normalize_model_key), so without this the ranking would print a
+        # lower-cased handle where the engine printed "Qwen3.8-Flash-Next".
+        self._model_name = {}
         self._energy = {}        # "YYYY-MM-DD" -> energy bucket (floats)
         self._power_ts = None    # last observe_power() timestamp
         self._tier_since = ""    # when tier attribution first booked anything
@@ -312,11 +399,20 @@ class TokenLedger(object):
             return
 
         for key, fields in (data.get("seen") or {}).items():
-            if isinstance(fields, dict):
-                self._seen[key] = dict(
-                    (field, int(value)) for field, value in fields.items()
-                    if isinstance(value, (int, float))
-                    and not isinstance(value, bool))
+            if not isinstance(fields, dict):
+                continue
+            # The odometer folds too, taking the highest reading per field.
+            # Two spellings of one model are the same counter stream, so the
+            # larger value is the later one: keeping both tracks and letting the
+            # folded key claim the smaller would make the next sample book the
+            # whole gap between them as fresh work (inventing history), while
+            # the max can at worst take a lower live counter for a reset, which
+            # books nothing.
+            track = self._seen.setdefault(normalize_model_key(key), {})
+            for field, value in fields.items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    value = int(value)
+                    track[field] = max(value, track.get(field, value))
         if isinstance(data.get("totals"), dict):
             self._totals = _ints(data["totals"])
         for day, fields in (data.get("daily") or {}).items():
@@ -343,6 +439,27 @@ class TokenLedger(object):
                          and not isinstance(tok, bool) and tok > 0)
             if clean:
                 self._model_ver[key] = clean
+        for key, name in (data.get("model_names") or {}).items():
+            if isinstance(key, str) and isinstance(name, str) and name:
+                self._model_name[key] = name
+        # -- fold buckets that differ only by the model name's case ---------
+        # A ledger written before bookings were case-folded still holds two
+        # buckets for one model (see normalize_model_key): on 2026-11-21 the
+        # books carried "mc/Qwen3.8-Flash-Next" beside "mc/qwen3.8-flash-next",
+        # so the ranking showed one model twice and every cost-per-million
+        # looked better than it was.  Sums merge here.
+        #
+        # The odometer in ``_seen`` folds above, field by field to its highest
+        # reading: one model is one counter stream however it is spelled.
+        self._models, model_names = fold_model_case(self._models)
+        self._combos, combo_names = fold_model_case(self._combos)
+        self._model_ver = fold_model_ver(self._model_ver)
+        self._combo_ver = fold_model_ver(self._combo_ver)
+        for key, name in model_names.items():
+            self._model_name.setdefault(key, name)
+        for combo_key, name in combo_names.items():
+            self._model_name.setdefault(
+                normalize_model_key(combo_key.rpartition("|")[2]), name)
         # A bucket booked before this dimension existed gets its attribution
         # back from the combo stamps the same bucket already carries (combos
         # have been booked with a build since v1.13) -- otherwise an old row
@@ -396,6 +513,7 @@ class TokenLedger(object):
             "combos": self._combos,
             "combo_versions": self._combo_ver,
             "model_versions": self._model_ver,
+            "model_names": self._model_name,
             "energy": self._energy,
             "seen": self._seen,
         }
@@ -449,6 +567,7 @@ class TokenLedger(object):
         self._combos = {}
         self._combo_ver = {}
         self._model_ver = {}
+        self._model_name = {}
         self._energy = {}
         self._tier_since = ""
         self._resets = 0
@@ -476,12 +595,19 @@ class TokenLedger(object):
             # that build readings by hand may still pass pairs.
             key, counters = entry[0], entry[1]
             version = entry[2] if len(entry) > 2 else None
+            # The spelling this sample's engine printed for the model.  Rows are
+            # keyed case-folded so one model cannot split in two, and the name
+            # they print has to come from somewhere: last writer wins, the same
+            # rule the merged card uses for a shared engine version.
+            display = entry[3] if len(entry) > 3 else key
             track = self._seen.setdefault(key, {})
             # Captured before the loop: the loop adds to ``track`` as it goes,
             # so asking again later would call a brand-new pair "known" from
             # its second field onwards.
             fresh_pair = not track
             model_bucket = self._models.setdefault(key, _blank())
+            if display:
+                self._model_name[key] = display
             # One reset per pair per sample: a server restart rolls every
             # counter back at the same instant, so counting per field would
             # report four times the restarts that actually happened.
@@ -807,7 +933,8 @@ class TokenLedger(object):
             row["day"] = parts[0]
             row["watts"] = int(parts[1])
             row["endpoint"] = endpoint
-            row["model"] = model or parts[2]
+            row["model"] = (model_part_of(self._model_name.get(
+                normalize_model_key(parts[2]), "")) or model or parts[2])
             stored = self._combo_ver.get(key)
             if stored:
                 row["engine_version"] = stored
@@ -836,7 +963,10 @@ class TokenLedger(object):
             # rows gain identity/attribution fields on top.
             row = dict(self._detail(bucket))
             row["endpoint"] = endpoint
-            row["model"] = model or key
+            # The key is case-folded; the row prints the spelling the engines
+            # used (last writer wins, see observe).
+            row["model"] = (model_part_of(self._model_name.get(key, ""))
+                            or model or key)
             vers = self._model_ver.get(key)
             if vers:
                 row["engine_versions"] = dict(vers)

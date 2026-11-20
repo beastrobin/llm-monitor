@@ -272,6 +272,20 @@
     '序列峰值': 'seq peak', '批内 slot': 'batch slots', '第': 'No.',
     '/ 上限': '/ limit', '上限': 'limit', '峰值': 'peak',
 
+    /* 2026-11-21: a card that moved, a fold that is shut, and the host facts
+       that have no ring of their own */
+    '· 取自引擎实时状态（这个请求没占编号槽）':
+      '· from the engine\u2019s live state (this request claimed no numbered slot)',
+    '个槽空闲 · 展开看逐项': 'slots idle · expand for the breakdown',
+    '在线，但没加载模型': 'online, no model loaded',
+    '跟随到了这里的地址': 'followed the engine to this address',
+    '可加载 ': 'can load ',
+    '物理内存 剩 ': 'RAM free ',
+    '剩 ': 'free ',
+    '· 物理占用 ': '· physical used ',
+    '显卡进程 ': 'GPU processes ',
+    '带宽占用 ': 'bandwidth ',
+
     /* live state notes & lamps */
     '空闲': 'idle', '读prompt': 'read prompt', '生成中': 'generating',
     '排队': 'queued', '出错': 'error', '等待请求': 'waiting for a request',

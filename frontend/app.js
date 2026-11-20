@@ -1031,6 +1031,66 @@ function endpointChip(endpoint) {
 // Two states still speak up, because they are not "nothing to show": a model the
 // router names but whose port has not answered yet, and any other transport
 // error whose own words are worth reading as-is.
+// One line for each server that is not putting a model on screen.
+//
+// The chip row shows online servers only (user request 2026-10-19), and the empty
+// card explains the panel when NOTHING serves (2026-10-28 dropped the line that
+// only restated it).  Neither covers one card up and another down: on 2026-11-21
+// the gateway card simply was not there, and the sentence that ended the search --
+// "8085 answers, 8185 is nobody, and nothing answered on 8185-8190" -- appeared
+// nowhere on the panel.
+//
+// It quotes rather than re-invents: the collector's own error, the gateway's own
+// excuse in error_detail, and the address a moving card settled on with the
+// reason it settled there.  A covered address stays out, because another card is
+// already polling that server, and so does "no active model", which the tracker
+// says in its own words.
+//
+// The whole strip appears only while something is missing.  With every card up
+// and serving, "this card followed the newest engine record" is a log line, not
+// news -- and the panel already has a log for it.
+function renderSourceNotes(container, deduped) {
+  if (!container) return;
+  const answered = deduped.filter(function (e) { return e.up; });
+  const name = function (e) {
+    const port = portOf(e.base_url);
+    return (e.label || e.id) + (port ? ' :' + port : '');
+  };
+  const missing = [];
+  deduped.forEach(function (e) {
+    if (e.up || e.covered_by || !e.error || e.error === 'no active model') return;
+    missing.push('<div class="gap"><b>' + esc(name(e)) + '</b>' +
+      '<span class="gap-why">' + esc(e.error) + '</span>' +
+      (e.error_detail ? '<span class="gap-detail">' + esc(e.error_detail) + '</span>' : '') +
+      '</div>');
+  });
+  // Reachable, offering models, holding none: idle, not missing.
+  const idle = [];
+  answered.forEach(function (e) {
+    if ((e.models || []).length || !(e.available_models || []).length) return;
+    idle.push('<div class="gap"><b>' + esc(name(e)) + '</b>' +
+      '<span class="gap-why">在线，但没加载模型</span>' +
+      '<span class="gap-detail">可加载 ' + esc(e.available_models.join('、')) + '</span></div>');
+  });
+  const lines = missing.concat(idle);
+  if (lines.length) {
+    // Where a moving card settled, said while there is a gap for it to explain:
+    // "the card is reading 18500 because that is the engine that answered last"
+    // is what turns a blank card into a five-second diagnosis.
+    answered.forEach(function (e) {
+      if (!e.follow_reason) return;
+      lines.push('<div class="gap moved"><b>' + esc(name(e)) + '</b>' +
+        '<span class="gap-why">跟随到了这里的地址</span>' +
+        '<span class="gap-detail">' + esc(e.follow_reason) + '</span></div>');
+    });
+  }
+  const signature = lines.join('|');
+  if (container.dataset.sig === signature) return;
+  container.dataset.sig = signature;
+  container.innerHTML = lines.join('');
+  container.hidden = !lines.length;
+}
+
 function liveNote(endpoint) {
   if (!endpoint || !endpoint.error) return '';
   // Silence for both empty-card cases.  A covered address means another card is
@@ -1112,7 +1172,15 @@ function applyModel(root, endpoint, model) {
   const decodeNow = rateReading(metrics.decode_tps_inst, metrics.decode_tps_avg, 1);
   const prefillNow = rateReading(metrics.prefill_tps_inst, metrics.prefill_tps_avg, 0);
 
-  const ctxRatio = maxOf(slots, 'ctx_ratio');
+  const slotCtx = maxOf(slots, 'ctx_ratio');
+  // The same rule monitor.py applies to the history line: a slot reading above
+  // zero wins, and where the slots have nothing to say the engine's own live
+  // block names the context.  Under --batch a lone request books no numbered
+  // slot, so every row reads empty for the whole request, and 2026-11-21 that
+  // printed "0.0% · 空间就绪" beside a 195k-token prompt already in the KV cache.
+  const ctxRatio = ((slotCtx || 0) > 0) || typeof model.ctx_ratio_live !== 'number'
+    ? slotCtx : model.ctx_ratio_live;
+  const ctxFromLive = ctxRatio !== slotCtx;
   const mtpRatio = metrics.mtp_accept_ratio;
   const kvRatio = metrics.kv_hit_ratio;
   const stepValue = metrics.mtp_tokens_per_step;
@@ -1196,7 +1264,8 @@ function applyModel(root, endpoint, model) {
       barClass: ctxTight ? 'bad' : 't-g',
       foot: '上限 ' + countText(model.n_ctx) + ' tok' +
         (ctxTight ? ' · 接近溢出' : '') +
-        (ctxRatio === null ? ' · 未上报上下文' : (slotLive ? '' : ' · 空闲残留')),
+        (ctxFromLive ? ' · 取自引擎实时状态（这个请求没占编号槽）'
+          : (ctxRatio === null ? ' · 未上报上下文' : (slotLive ? '' : ' · 空闲残留'))),
       series: ctxSeries,
       sparkOptions: {
         min: 0, max: 1, color: ctxTight ? cssVar('--bad') : cssVar('--chart-g'), autoscale: true,
@@ -1334,13 +1403,32 @@ function renderSlotDetail(host, model, base) {
   // Rebuild only when the shape changes: the row count and each slot's id.
   // The values inside are repainted every tick without touching the DOM, so
   // the fold state and the canvases survive.
+  const liveState = model.live_state || {};
+  const soloPath = !slots.some(function (s) { return s.is_processing; }) &&
+    Number(liveState.running) > 0;
+  // Whether this breakdown has anything to say: a slot holding work or a prompt.
+  // The engine's own live block is deliberately NOT part of this test.  Under
+  // --batch a lone request books no numbered slot (see _reported_slot_count), so
+  // "the engine is busy" goes together with twelve em-dashes -- and the heading
+  // already carries the live sentence, "处理中 1 请求 thinking · 17 tok", which is
+  // the part worth seeing.  Six dashes per idle slot cost a quarter of the first
+  // screen and pushed the hardware section below the fold (2026-11-21 review), so
+  // the block stays shut until a slot itself has a reading.
+  const slotBusy = slots.some(function (s) {
+    return s.is_processing || s.ctx_used ||
+      (s.n_prompt_tokens !== null && s.n_prompt_tokens !== undefined);
+  });
   const signature = 'slots:' + slots.length + ':' +
     slots.map(function (s) { return s.id; }).join(',');
   if (host.dataset.sig !== signature) {
     host.dataset.sig = signature;
+    host.dataset.foldPinned = '';
     host.innerHTML =
-      '<details class="collapsible slot-fold" data-tone="h" open>' +
-      '<summary><h3>slot 明细</h3><span class="slot-live" data-role="live"></span></summary>' +
+      '<details class="collapsible slot-fold" data-tone="h"' +
+      (slotBusy ? ' open' : '') + '>' +
+      '<summary><h3>slot 明细</h3>' +
+      '<span class="slot-idle" data-role="idle"></span>' +
+      '<span class="slot-live" data-role="live"></span></summary>' +
       '<div class="slot-rows">' +
       slots.map(function (slot) {
         // No title line: the slot's identity (id + state) rides inside the
@@ -1350,6 +1438,14 @@ function renderSlotDetail(host, model, base) {
           '</div>';
       }).join('') +
       '</div></details>';
+    // Opening or shutting the fold by hand is the reader's own call about this
+    // model, so the automatic rule above stands down from then on.
+    const summary = host.querySelector('summary');
+    if (summary) {
+      summary.addEventListener('click', function () {
+        host.dataset.foldPinned = '1';
+      });
+    }
   }
 
   // Same job as applyModel, one row at a time: the slot cards are built by the
@@ -1362,11 +1458,18 @@ function renderSlotDetail(host, model, base) {
   // title line carries the engine's live readings instead (see slotLiveHtml),
   // repainted every tick the same way, and the solo-path explanation survives
   // only on the state chip's tooltip.
-  const liveState = model.live_state || {};
-  const soloPath = !slots.some(function (s) { return s.is_processing; }) &&
-    Number(liveState.running) > 0;
   const liveEl = host.querySelector('[data-role="live"]');
   if (liveEl) liveEl.innerHTML = slotLiveHtml(model);
+  // A shut fold still says what it is hiding; the engine's live readings stay on
+  // the heading either way.
+  const idleEl = host.querySelector('[data-role="idle"]');
+  if (idleEl) {
+    idleEl.textContent = slotBusy ? '' : slots.length + ' 个槽空闲 · 展开看逐项';
+  }
+  const fold = host.querySelector('details.slot-fold');
+  if (fold && !host.dataset.foldPinned && fold.open !== slotBusy) {
+    fold.open = slotBusy;
+  }
 
   host.querySelectorAll('.slot-row').forEach(function (row) {
     const id = row.getAttribute('data-slot');
@@ -1626,6 +1729,20 @@ function renderEndpoints(snapshot) {
     list.forEach(function (e) {
       if (e.error && !out.error) out.error = e.error;
     });
+    // The gateway's own excuse rides with the error it explains.  A merged
+    // record that kept "HTTP 502 Bad Gateway" and dropped the sentence naming the
+    // dead upstream would blame the wrong side again -- the same trap the version
+    // banner below was fixed for.
+    list.forEach(function (e) {
+      if (e.error_detail && !out.error_detail) out.error_detail = e.error_detail;
+      if (e.follow_reason && !out.follow_reason) out.follow_reason = e.follow_reason;
+    });
+    // Why a card is silent because another card is not, and what an idle engine
+    // would load: both read from the record the merged card actually describes.
+    if (primary.covered_by) out.covered_by = primary.covered_by;
+    if ((primary.available_models || []).length) {
+      out.available_models = primary.available_models;
+    }
     // The engine build banner rides the merged record too: any member may be
     // the one whose /props answered (the router probes itself), so the first
     // non-empty one wins — dropping it here silenced every version annotation
@@ -1697,6 +1814,8 @@ function renderEndpoints(snapshot) {
       sourcesBox.innerHTML = online.map(endpointChip).join('');
     }
   }
+
+  renderSourceNotes(document.getElementById('endpoint-note'), deduped);
 
   if (container.dataset.signature !== signature) {
     container.dataset.signature = signature;
@@ -2003,6 +2122,45 @@ function combineSeries(parts, average) {
 // The power-limit SWITCH moved to the top bar on 2026-10-19 (left of the
 // update time); the 功耗 card itself stayed here -- watts belong to the grid,
 // the tier buttons are the thing worth keeping one click away at all times.
+// The two host facts no ring of its own carries: how much physical memory is
+// left to load a model into, and how much disk is left to load one from.
+//
+// The 提交内存 card answers a different question -- what the kernel has promised,
+// pagefile included -- and on 2026-11-21 it read 249.6 GB while 100 GB of real
+// memory sat free.  Disk was collected and never drawn at all, on a box where
+// starting a model means copying tens of gigabytes onto a volume first.
+function renderSysContext(host, gpuPayload) {
+  const el = document.getElementById('sys-context');
+  if (!el || !host.available) return;
+  const memory = host.memory || {};
+  const parts = [];
+  const avail = firstNumber(memory.avail_mb);
+  const ratio = firstNumber(memory.used_ratio);
+  if (avail !== null) {
+    parts.push('物理内存 剩 ' + gb(avail, 0) + ' GB' +
+      (ratio !== null ? ' · 物理占用 ' + num(ratio * 100, 0) + '%' : ''));
+  }
+  (host.disks || []).slice(0, 3).forEach(function (disk) {
+    const free = firstNumber(disk.free_mb);
+    if (free === null) return;
+    parts.push((String(disk.root || '?').charAt(0)) + ': 剩 ' + gb(free, 0) + ' GB');
+  });
+  // Who actually holds the cards.  WDDM names the processes but gives no
+  // per-process VRAM, so this is a name list, not a bill (gpu.py's
+  // _query_processes keeps only the inference servers).  It answers the question
+  // asked before starting another engine on a full card.
+  const engines = [];
+  (((gpuPayload || {}).processes) || []).forEach(function (p) {
+    // One engine spread over two cards reports the same executable per card;
+    // the reader wants to know which programs hold the memory, not how many
+    // cards each of them touched.
+    if (p && p.is_engine && p.name && engines.indexOf(p.name) < 0) engines.push(p.name);
+  });
+  if (engines.length) parts.push('显卡进程 ' + engines.slice(0, 3).join('、'));
+  const text = 'GPU / HOST · 实时采样' + (parts.length ? ' · ' + parts.join(' · ') : '');
+  if (el.textContent !== text) el.textContent = text;
+}
+
 function renderSystem(snapshot) {
   const container = document.getElementById('sys');
   if (!container) return;
@@ -2010,6 +2168,7 @@ function renderSystem(snapshot) {
   const host = snapshot.system || {};
   const gpus = (snapshot.gpu || {}).gpus || [];
   const rows = sysRows(gpus, host);
+  renderSysContext(host, snapshot.gpu || {});
 
   // Rebuilding the block moves the canvases, and a fresh canvas loses the
   // scale it had accumulated, so the DOM is rebuilt only when the row list
@@ -2083,7 +2242,16 @@ function gpuCardValues(gpu, index) {
       text: gpu ? gb(gpu.mem_used_mb, 1) : '—', unit: gpu ? 'GB' : '', bar: memRatio,
       barClass: memTight ? 'bad' : (gpu && (memRatio || 0) > 0.8 ? 'warn' : 't-e'),
       ends: ['0%', '100%'],
-      foot: gpu ? '上限 ' + gb(gpu.mem_total_mb, 1) + ' GB' + (memTight ? ' · 接近上限' : '') : '显卡不可用',
+      // Bandwidth, beside capacity: 46 GB resident and the memory bus idling are
+      // two different facts, and only the second says whether a layer is
+      // VRAM-bound or the compute is.  The driver reports it as the share of the
+      // interval the memory was read or written, not as a GB/s figure.
+      foot: gpu
+        ? '上限 ' + gb(gpu.mem_total_mb, 1) + ' GB' +
+          (firstNumber(gpu.mem_util_pct) !== null
+            ? ' · 带宽占用 ' + num(gpu.mem_util_pct, 0) + '%' : '') +
+          (memTight ? ' · 接近上限' : '')
+        : '显卡不可用',
     },
     temp: {
       text: gpu ? num(temp, 0) : '—', unit: gpu ? '°C' : '', bar: tempRatio,

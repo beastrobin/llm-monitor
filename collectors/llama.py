@@ -292,6 +292,9 @@ class LlamaEndpoint(object):
         self._failures = 0
         self._skip_cycles = 0
         self._last_error = None
+        # Whose excuse was read for which address: a card that moves ports asks a
+        # different server, so the cached sentence leaves with the address.
+        self._gateway_note = (0.0, None)
         return True
 
     def _offline_payload(self):
@@ -303,15 +306,58 @@ class LlamaEndpoint(object):
             "mode": None,
             "models": [],
             "error": self._last_error or "unreachable",
+            "error_detail": self._error_detail(),
             "backing_off": True,
             "polled_at": time.time(),
         }
+
+    # How often to ask a fronting server for its own excuse, while it keeps
+    # refusing.  Slow on purpose: a failing card is a backing-off card, and
+    # knocking on one more route every cycle is what the backoff exists to stop.
+    GATEWAY_STATUS_SECONDS = 20
+
+    def _error_detail(self):
+        """What a fronting server says about its own refusal, or None.
+
+        A gateway answers on its own port even with nothing behind it, so the
+        transport's words -- "HTTP 502 Bad Gateway" -- blame the address the panel
+        polls rather than the engine that is not running.  On 2026-11-21 that cost
+        an hour of guessing, and the answer sat in one field of the gateway's own
+        status: the dead upstream, and the range it had searched for a live engine.
+
+        Asked of every dialect on purpose.  The engine behind a fixed port changes
+        hands more often than the panel is restarted -- basalt, MegaCapybara and
+        Strata have all answered :8085 -- so the server replying to a card's
+        address is not necessarily the one the card was built to read.  A server
+        that answers no such route simply costs one request per interval.
+        """
+        now = time.time()
+        seen, note = getattr(self, "_gateway_note", (0.0, None))
+        if now - seen < self.GATEWAY_STATUS_SECONDS:
+            return note
+        note = None
+        try:
+            status = _get_json(self._url("/engine/status"), self.api_key)
+            if isinstance(status, dict) and (
+                    "lastError" in status or "upstream" in status):
+                if status.get("lastError"):
+                    note = "gateway says: %s" % status["lastError"]
+                elif status.get("upstream") and status.get("ok") is False:
+                    note = "gateway says: upstream %s is not answering" % (
+                        status["upstream"])
+        except Exception:  # noqa: BLE001 - an excuse is never worth a scrape error
+            note = None
+        self._gateway_note = (now, note)
+        return note
 
     def _fail(self, exc, result):
         self._failures += 1
         self._last_error = _friendly_error(exc)
         self._skip_cycles = min(self.BACKOFF_CAP, 2 ** min(self._failures, 4))
         result["error"] = self._last_error
+        detail = self._error_detail()
+        if detail:
+            result["error_detail"] = detail
         result["backing_off"] = True
         return result
 
